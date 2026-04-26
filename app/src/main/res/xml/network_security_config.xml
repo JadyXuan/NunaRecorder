@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 仅在开发/内网调试时允许对特定 IP 的 HTTP 明文访问 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 你当前局域网服务器 IP，例如 172.20.7.253 -->
+        <domain includeSubdomains="false">172.20.10.3</domain>
+        <!-- 常用的本机映射，方便模拟器调试 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- anlan的测试服务器ip-->
+        <domain includeSubdomains="false">120.79.196.171</domain>
+
+    </domain-config>
+</network-security-config>
+

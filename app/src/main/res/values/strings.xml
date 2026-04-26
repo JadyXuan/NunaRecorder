@@ -1,0 +1,40 @@
+<resources>
+    <string name="app_name">NunaRecorder</string>
+
+    <!-- Main / Device tab -->
+    <string name="target_device_name">Target device name</string>
+    <string name="scan_devices">Scan Devices</string>
+    <string name="connect">Connect</string>
+    <string name="scanned_devices">Scanned devices:</string>
+    <string name="paired_devices">Paired devices:</string>
+    <string name="no_named_devices">(No named devices yet)</string>
+    <string name="no_paired_devices">(No paired devices yet)</string>
+    <string name="no_name">(no name)</string>
+    <string name="device_status">Device status: %s</string>
+    <string name="handshake">Handshake</string>
+    <string name="start_recording">Start Recording</string>
+    <string name="stop_recording">Stop Recording</string>
+    <string name="log">Log:</string>
+
+    <!-- Recordings tab -->
+    <string name="saved_recordings">Saved Recordings</string>
+    <string name="no_recordings_found">No recordings found.</string>
+    <string name="play">Play</string>
+    <string name="share">Share</string>
+    <string name="delete">Delete</string>
+    <string name="delete_recording_confirm">Delete this recording?</string>
+    <string name="confirm">Confirm</string>
+    <string name="cancel">Cancel</string>
+    <string name="upload">Upload</string>
+
+    <!-- Navigation -->
+    <string name="tab_device">Device</string>
+    <string name="tab_recordings">Recordings</string>
+    <string name="tab_settings">Settings</string>
+    <!-- DEBUG_WEARABLE: 临时调试 tab，可删 -->
+    <string name="tab_wearable_debug">Wearable</string>
+
+    <!-- External -->
+    <string name="choose_app_to_play">Choose app to play</string>
+    <string name="share_recording">Share recording</string>
+</resources>
