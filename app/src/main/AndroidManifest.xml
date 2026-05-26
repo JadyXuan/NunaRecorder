@@ -15,6 +15,7 @@
     <!-- 如果要扫描附近设备，有时还需要位置信息 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <!-- 写入外部存储（低版本有效，高版本用 SAF 或 app 内部存储） -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
@@ -22,8 +23,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
@@ -31,6 +33,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
+        android:name=".NunaApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -61,14 +64,19 @@
                 android:resource="@xml/file_paths" />
         </provider>
         <service
-            android:name=".service.RecordingService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync">
-        </service>
-        <service
             android:name=".service.ContextDataService"
             android:exported="false"
             android:foregroundServiceType="location|dataSync">
+        </service>
+        <service
+            android:name=".service.VadProcessingService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync">
+        </service>
+        <service
+            android:name=".service.MigrationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync">
         </service>
     </application>
 

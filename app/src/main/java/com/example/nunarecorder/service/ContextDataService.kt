@@ -1,6 +1,5 @@
 package com.example.nunarecorder.service
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,7 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -18,23 +16,22 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
-import android.os.Looper
 import android.util.Log
-import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.example.nunarecorder.MainActivity
 import com.example.nunarecorder.R
+import com.example.nunarecorder.context.ActivityRecognitionCollector
+import com.example.nunarecorder.util.LocationUpdatesHelper
 import java.io.File
 import java.io.FileOutputStream
 
 /**
- * 前台服务：在录制期间持续采集 GPS + IMU 数据并写入 sidecar 文件。
+ * 前台服务：在录制期间持续采集 GPS + IMU + 身体活动，写入会话目录 `context/context.jsonl`。
  * 以前台服务方式运行，确保熄屏/后台情况下数据不中断。
  *
- * 启动方式：
- *   ContextDataService.start(context, audioFile)
- * 停止方式：
- *   ContextDataService.stop(context)
+ * 启动：[start]；停止：[stop]。
+ *
+ * Schema: [docs/SESSION_SYNC_PROTOCOL.md] (section 1.2).
  */
 class ContextDataService : Service() {
 
@@ -47,14 +44,12 @@ class ContextDataService : Service() {
         const val ACTION_STOP  = "com.example.nunarecorder.action.STOP_CONTEXT"
         const val EXTRA_SIDECAR_PATH = "extra_sidecar_path"
 
-        fun start(context: Context, audioFile: File) {
-            val sidecar = File(
-                audioFile.parentFile,
-                "${audioFile.nameWithoutExtension}.bin"
-            )
+        /** 新格式：写入会话目录下 context/context.jsonl */
+        fun start(context: Context, sessionDir: File) {
+            val contextFile = com.example.nunarecorder.session.SessionPaths.contextFile(sessionDir)
             val intent = Intent(context, ContextDataService::class.java).apply {
                 action = ACTION_START
-                putExtra(EXTRA_SIDECAR_PATH, sidecar.absolutePath)
+                putExtra(EXTRA_SIDECAR_PATH, contextFile.absolutePath)
             }
             context.startForegroundService(intent)
         }
@@ -76,6 +71,7 @@ class ContextDataService : Service() {
     private var locationManager: LocationManager? = null
     private var sensorListener: SensorEventListener? = null
     private var locationListener: LocationListener? = null
+    private var activityCollector: ActivityRecognitionCollector? = null
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -92,7 +88,7 @@ class ContextDataService : Service() {
                 val path = intent.getStringExtra(EXTRA_SIDECAR_PATH) ?: run {
                     stopSelf(); return START_NOT_STICKY
                 }
-                startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS & IMU 数据..."))
+                startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
                 startCapture(File(path))
             }
             ACTION_STOP -> {
@@ -118,8 +114,12 @@ class ContextDataService : Service() {
             collecting = true
             Log.d(TAG, "Context capture started: ${sidecar.absolutePath}")
 
+            writeRecord(
+                """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"]}"""
+            )
             startImu()
             startGps()
+            startActivity()
         } catch (e: Exception) {
             Log.e(TAG, "startCapture failed", e)
             stopSelf()
@@ -161,16 +161,7 @@ class ContextDataService : Service() {
     }
 
     private fun startGps() {
-        val hasFine = ActivityCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ActivityCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-
-        Log.d(TAG, "GPS permission: FINE=$hasFine COARSE=$hasCoarse")
-
-        if (!hasFine && !hasCoarse) {
+        if (!LocationUpdatesHelper.hasLocationPermission(this)) {
             Log.w(TAG, "No location permission — GPS capture skipped")
             return
         }
@@ -185,28 +176,28 @@ class ContextDataService : Service() {
             Log.d(TAG, "GPS fix: ${location.provider} lat=${location.latitude} lon=${location.longitude} acc=${location.accuracy}m")
         }
         locationListener = listener
+        LocationUpdatesHelper.startUpdates(this, locationManager!!, listener)
+    }
 
-        // GPS provider（卫星定位）
-        runCatching {
-            locationManager?.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER, 1000L, 0f, listener, Looper.getMainLooper()
+    private fun startActivity() {
+        activityCollector = ActivityRecognitionCollector(this) { state, confidence, tMs ->
+            writeRecord(
+                """{"type":"activity","state":"$state","confidence":$confidence,"t_ms":$tMs}"""
             )
-            Log.d(TAG, "GPS_PROVIDER registered")
-        }.onFailure { Log.w(TAG, "GPS_PROVIDER register failed", it) }
-
-        // Network provider（Wi-Fi / 蜂窝辅助定位，可在室内补充）
-        runCatching {
-            locationManager?.requestLocationUpdates(
-                LocationManager.NETWORK_PROVIDER, 1000L, 0f, listener, Looper.getMainLooper()
-            )
-            Log.d(TAG, "NETWORK_PROVIDER registered")
-        }.onFailure { Log.w(TAG, "NETWORK_PROVIDER register failed", it) }
+        }
+        if (!activityCollector!!.start()) {
+            Log.w(TAG, "Activity recognition unavailable (GMS or permission)")
+            activityCollector = null
+        }
     }
 
     private fun stopCapture() {
         collecting = false
 
-        runCatching { locationListener?.let { locationManager?.removeUpdates(it) } }
+        activityCollector?.stop()
+        activityCollector = null
+
+        LocationUpdatesHelper.stopUpdates(locationManager, locationListener)
         locationListener = null
         locationManager = null
 
@@ -238,8 +229,8 @@ class ContextDataService : Service() {
             val ch = NotificationChannel(
                 CHANNEL_ID,
                 "Nuna 上下文采集",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "采集 GPS 和 IMU 传感器数据" }
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply { description = "采集 GPS、IMU 与身体活动状态" }
             mgr.createNotificationChannel(ch)
         }
     }
@@ -252,7 +243,7 @@ class ContextDataService : Service() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nuna)
             .setContentTitle("Nuna 数据采集")
             .setContentText(content)
             .setContentIntent(pi)

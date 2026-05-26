@@ -5,12 +5,14 @@ import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.List
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 
 @Composable
 fun BottomNavBar(
@@ -26,7 +28,11 @@ fun BottomNavBar(
         TabItem(Icons.Outlined.Settings, "设置")
     )
 
-    NavigationBar(modifier = modifier) {
+    NavigationBar(
+        modifier = modifier,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp
+    ) {
         tabs.forEachIndexed { index, tab ->
             NavigationBarItem(
                 selected = selectedTab == index,
@@ -40,15 +46,5 @@ fun BottomNavBar(
                 label = { Text(tab.label) }
             )
         }
-        // DEBUG_WEARABLE_START — 已从主导航移除；恢复时取消注释
-        /*
-        NavigationBarItem(
-            selected = selectedTab == 3,
-            onClick = { onTabSelected(3) },
-            icon = { Icon(Icons.Outlined.BugReport, contentDescription = "Wearable") },
-            label = { Text("Wearable") }
-        )
-        */
-        // DEBUG_WEARABLE_END
     }
 }

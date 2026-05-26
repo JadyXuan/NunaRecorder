@@ -1,6 +1,5 @@
 package com.example.nunarecorder.ui.screen
 
-import android.os.Environment
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,8 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
@@ -27,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,140 +35,170 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.nunarecorder.ui.components.RecordingItem
+import com.example.nunarecorder.audio.SegmentPlaybackState
+import com.example.nunarecorder.data.RecordingEntry
 import java.io.File
+import com.example.nunarecorder.migration.MigrationCoordinator
+import com.example.nunarecorder.sync.SessionSyncCoordinator
+import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.ui.components.RecordingItem
 
-private const val CONTEXT_DATA_SUFFIX = ".bin"
-
-// Represents what action triggered the multimodal dialog
 private enum class MultiModalAction { SHARE, UPLOAD }
 
 @Composable
 fun RecordingsScreen(
-    onPlayFile: (File, (Int, Int) -> Unit) -> Unit,
-    onShareFile: (File) -> Unit,
-    onShareFileWithContext: (File) -> Unit,
-    onDeleteFile: (File, () -> Unit) -> Unit,
-    onUploadFile: (File) -> Unit,
-    onUploadFileWithContext: (File) -> Unit,
+    segmentPlayback: SegmentPlaybackState?,
+    onPlaySegment: (RecordingEntry.Session, Int, String) -> Unit,
+    onStopPlayback: () -> Unit,
+    onShareEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
+    onDeleteEntry: (RecordingEntry, () -> Unit) -> Unit,
+    onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
+    onMigrateLegacy: (File) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var recordings by remember { mutableStateOf(listOf<File>()) }
-    var fileToDelete by remember { mutableStateOf<File?>(null) }
-    var convertingFile by remember { mutableStateOf<File?>(null) }
-    var convertProgress by remember { mutableStateOf<Float?>(null) }
-
-    // Multimodal action dialog state
-    var multiModalTarget by remember { mutableStateOf<File?>(null) }
+    var entries by remember { mutableStateOf(listOf<RecordingEntry>()) }
+    var entryToDelete by remember { mutableStateOf<RecordingEntry?>(null) }
+    var multiModalTarget by remember { mutableStateOf<RecordingEntry?>(null) }
     var multiModalAction by remember { mutableStateOf(MultiModalAction.SHARE) }
     var includeContextData by remember { mutableStateOf(true) }
+    var includeVadPrelabel by remember { mutableStateOf(true) }
+    var detailSession by remember { mutableStateOf<RecordingEntry.Session?>(null) }
 
     fun refreshList() {
-        val downloadDir =
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        recordings = downloadDir
-            .listFiles { file ->
-                file.isFile && file.name.endsWith(".opus", ignoreCase = true)
+        val sessions = SessionPaths.listSessionDirs().mapNotNull { dir ->
+            SessionManifest.load(SessionPaths.manifestFile(dir))?.let {
+                RecordingEntry.Session(dir, it)
             }
-            ?.sortedByDescending { it.lastModified() }
-            ?: emptyList()
+        }
+        val legacy = SessionPaths.listLegacyOpusFiles().map { RecordingEntry.LegacyOpus(it) }
+        entries = (sessions + legacy).sortedByDescending { it.sortKey }
     }
 
     LaunchedEffect(Unit) { refreshList() }
 
-    // ── Delete confirmation dialog ─────────────────────────────────────────
-    fileToDelete?.let { file ->
-        AlertDialog(
-            onDismissRequest = { fileToDelete = null },
-            shape = RoundedCornerShape(16.dp),
-            title = {
-                Text("删除录音", fontWeight = FontWeight.SemiBold)
+    val migrationState by MigrationCoordinator.state.collectAsState()
+    val syncState by SessionSyncCoordinator.state.collectAsState()
+    LaunchedEffect(migrationState) {
+        when (migrationState?.phase) {
+            MigrationCoordinator.Phase.DONE, MigrationCoordinator.Phase.ERROR -> {
+                refreshList()
+                MigrationCoordinator.clearDoneState()
+            }
+            else -> Unit
+        }
+    }
+    LaunchedEffect(syncState) {
+        when (syncState?.phase) {
+            SessionSyncCoordinator.Phase.DONE, SessionSyncCoordinator.Phase.ERROR -> {
+                refreshList()
+                SessionSyncCoordinator.clearDoneState()
+            }
+            else -> Unit
+        }
+    }
+
+    detailSession?.let { session ->
+        RecordingDetailScreen(
+            session = session,
+            onBack = {
+                onStopPlayback()
+                detailSession = null
+                refreshList()
             },
+            playback = segmentPlayback?.takeIf { it.sessionDirPath == session.dir.absolutePath },
+            onPlaySegment = { index, rel -> onPlaySegment(session, index, rel) },
+            onStopPlayback = onStopPlayback,
+            modifier = Modifier.fillMaxSize()
+        )
+        return
+    }
+
+    entryToDelete?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { entryToDelete = null },
+            shape = RoundedCornerShape(16.dp),
+            title = { Text("删除录音", fontWeight = FontWeight.SemiBold) },
             text = {
                 Text(
-                    "将删除「${file.nameWithoutExtension}」及其所有关联文件（含 GPS/IMU 数据），无法恢复。",
+                    when (entry) {
+                        is RecordingEntry.Session ->
+                            "将删除整个会话文件夹「${entry.displayName}」及其中所有分段、上下文与 VAD 预标注。"
+                        is RecordingEntry.LegacyOpus ->
+                            "将删除「${entry.displayName}」及同名关联文件。"
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    onDeleteFile(file) {
+                    onDeleteEntry(entry) {
                         refreshList()
-                        fileToDelete = null
+                        entryToDelete = null
                     }
                 }) {
                     Text("删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { fileToDelete = null }) { Text("取消") }
+                TextButton(onClick = { entryToDelete = null }) { Text("取消") }
             }
         )
     }
 
-    // ── Multimodal share/upload dialog ────────────────────────────────────
-    multiModalTarget?.let { file ->
-        val hasCtx = File(
-            file.parentFile,
-            "${file.nameWithoutExtension}$CONTEXT_DATA_SUFFIX"
-        ).exists()
+    multiModalTarget?.let { entry ->
+        val hasCtx = when (entry) {
+            is RecordingEntry.Session -> entry.hasContext
+            is RecordingEntry.LegacyOpus -> entry.hasContext
+        }
+        val hasVad = when (entry) {
+            is RecordingEntry.Session -> SessionPaths.vadPrelabelFile(entry.dir).exists()
+            is RecordingEntry.LegacyOpus -> false
+        }
+        val isSession = entry is RecordingEntry.Session
         val actionLabel = if (multiModalAction == MultiModalAction.SHARE) "分享" else "上传"
 
         AlertDialog(
             onDismissRequest = { multiModalTarget = null },
             shape = RoundedCornerShape(16.dp),
-            title = {
-                Text("选择${actionLabel}内容", fontWeight = FontWeight.SemiBold)
-            },
+            title = { Text("选择${actionLabel}内容", fontWeight = FontWeight.SemiBold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Outlined.PlayArrow,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "音频文件 (.opus)  ✓",
-                            style = MaterialTheme.typography.bodyMedium
+                    ModalOptionRow(
+                        checked = true,
+                        enabled = false,
+                        onChecked = {},
+                        icon = { Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp)) },
+                        label = if (isSession) "音频分段 + manifest" else "音频 (.opus)"
+                    )
+                    if (hasCtx) {
+                        ModalOptionRow(
+                            checked = includeContextData,
+                            enabled = true,
+                            onChecked = { includeContextData = it },
+                            icon = { Icon(Icons.Outlined.Info, null, Modifier.size(18.dp)) },
+                            label = "上下文 (GPS + IMU + 活动)"
                         )
                     }
-                    if (hasCtx) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(
-                                checked = includeContextData,
-                                onCheckedChange = { includeContextData = it }
-                            )
-                            Icon(
-                                Icons.Outlined.Info,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "上下文数据 (.bin)  GPS + IMU",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                    } else {
-                        Text(
-                            "（未发现 GPS/IMU 上下文数据文件）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    if (hasVad) {
+                        ModalOptionRow(
+                            checked = includeVadPrelabel,
+                            enabled = true,
+                            onChecked = { includeVadPrelabel = it },
+                            icon = { Icon(Icons.Outlined.Info, null, Modifier.size(18.dp)) },
+                            label = "VAD 预标注"
                         )
                     }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val withCtx = hasCtx && includeContextData
+                    val ctx = hasCtx && includeContextData
+                    val vad = hasVad && includeVadPrelabel
                     if (multiModalAction == MultiModalAction.SHARE) {
-                        if (withCtx) onShareFileWithContext(file) else onShareFile(file)
+                        onShareEntry(entry, ctx, vad)
                     } else {
-                        if (withCtx) onUploadFileWithContext(file) else onUploadFile(file)
+                        onUploadEntry(entry, ctx, vad)
                     }
                     multiModalTarget = null
                 }) {
@@ -181,77 +211,125 @@ fun RecordingsScreen(
         )
     }
 
-    // ── Main content ───────────────────────────────────────────────────────
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
+        Text("录音文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            text = "录音文件",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "${recordings.size} 个文件",
+            "${entries.size} 项",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f)
         )
         Spacer(Modifier.height(12.dp))
 
-        if (recordings.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    "暂无录音文件",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f)
-                )
+        if (entries.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无录音", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f))
             }
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(recordings, key = { it.absolutePath }) { file ->
-                    val hasContextData = File(
-                        file.parentFile,
-                        "${file.nameWithoutExtension}$CONTEXT_DATA_SUFFIX"
-                    ).exists()
+                items(entries, key = {
+                    when (it) {
+                        is RecordingEntry.Session -> it.dir.absolutePath
+                        is RecordingEntry.LegacyOpus -> it.opusFile.absolutePath
+                    }
+                }) { entry ->
+                    val entryKey = when (entry) {
+                        is RecordingEntry.Session -> entry.dir.absolutePath
+                        is RecordingEntry.LegacyOpus -> entry.opusFile.absolutePath
+                    }
+                    val syncing = syncState?.targetKey == entryKey &&
+                        syncState?.phase == SessionSyncCoordinator.Phase.SYNCING
+                    val syncProgress = if (syncing) syncState?.progress else null
+                    val syncMessage = if (syncing) syncState?.message else null
+                    val persistedSync = when (entry) {
+                        is RecordingEntry.Session -> entry.syncStatus
+                        is RecordingEntry.LegacyOpus -> null
+                    }
+
                     RecordingItem(
-                        file = file,
-                        hasContextData = hasContextData,
-                        onPlay = {
-                            convertingFile = file
-                            convertProgress = 0f
-                            onPlayFile(file) { current, total ->
-                                if (total > 0) convertProgress =
-                                    ((current + 1f) / total).coerceIn(0f, 1f)
-                            }
-                        },
+                        entry = entry,
+                        syncStatus = persistedSync,
+                        isSyncing = syncing,
+                        syncProgress = syncProgress,
+                        syncMessage = syncMessage,
                         onShare = {
-                            includeContextData = hasContextData
+                            includeContextData = when (entry) {
+                                is RecordingEntry.Session -> entry.hasContext
+                                is RecordingEntry.LegacyOpus -> entry.hasContext
+                            }
+                            includeVadPrelabel = entry is RecordingEntry.Session &&
+                                SessionPaths.vadPrelabelFile(entry.dir).exists()
                             multiModalAction = MultiModalAction.SHARE
-                            multiModalTarget = file
+                            multiModalTarget = entry
                         },
-                        onDelete = { fileToDelete = file },
+                        onDelete = { entryToDelete = entry },
                         onUpload = {
-                            includeContextData = hasContextData
+                            includeContextData = when (entry) {
+                                is RecordingEntry.Session -> entry.hasContext
+                                is RecordingEntry.LegacyOpus -> entry.hasContext
+                            }
+                            includeVadPrelabel = entry is RecordingEntry.Session &&
+                                SessionPaths.vadPrelabelFile(entry.dir).exists()
                             multiModalAction = MultiModalAction.UPLOAD
-                            multiModalTarget = file
-                        }
+                            multiModalTarget = entry
+                        },
+                        onMigrate = if (entry is RecordingEntry.LegacyOpus) {
+                            { onMigrateLegacy(entry.opusFile) }
+                        } else null,
+                        migrateEnabled = !(entry is RecordingEntry.LegacyOpus &&
+                            MigrationCoordinator.isActiveFor(entry.opusFile.absolutePath)),
+                        onOpenDetail = if (entry is RecordingEntry.Session) {
+                            { detailSession = entry }
+                        } else null
                     )
-                    if (convertingFile == file && convertProgress != null) {
-                        LinearProgressIndicator(
-                            progress = { convertProgress!! },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 4.dp),
-                            trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    val legacyMigrating = entry is RecordingEntry.LegacyOpus &&
+                        migrationState?.opusPath == entry.opusFile.absolutePath &&
+                        migrationState?.phase !in setOf(
+                            MigrationCoordinator.Phase.DONE,
+                            MigrationCoordinator.Phase.ERROR
                         )
+                    val legacyMigrateProgress = if (legacyMigrating) migrationState?.progress else null
+                    val legacyMigrateMessage = if (legacyMigrating) migrationState?.message else null
+                    if (legacyMigrateProgress != null) {
+                        LinearProgressIndicator(
+                            progress = { legacyMigrateProgress },
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        )
+                        legacyMigrateMessage?.let { msg ->
+                            Text(
+                                msg,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
                     }
                 }
                 item { Spacer(Modifier.height(8.dp)) }
             }
         }
+    }
+}
+
+@Composable
+private fun ModalOptionRow(
+    checked: Boolean,
+    enabled: Boolean,
+    onChecked: (Boolean) -> Unit,
+    icon: @Composable () -> Unit,
+    label: String
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = onChecked, enabled = enabled)
+        Spacer(Modifier.width(4.dp))
+        icon()
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium)
     }
 }

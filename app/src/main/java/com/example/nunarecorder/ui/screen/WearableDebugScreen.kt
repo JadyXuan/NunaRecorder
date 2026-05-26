@@ -16,7 +16,9 @@ import com.example.nunarecorder.ui.MainViewModel
 
 /**
  * 临时调试验证页：WearableRecordingController + AudioChunkProvider。
- * 整页可注释/删除；日志仅写入 [MainViewModel.wearableDebugLogLines]，与主 Log 分离。
+ * 日志仅写入 [MainViewModel.wearableDebugLogLines]，与主 Log 分离。
+ *
+ * 恢复主导航：在 [BottomNavBar] 增加第 4 项，并在 [com.example.nunarecorder.MainActivity] 的 `when (selectedTab)` 中挂载本页，回调 [MainActivity] 内现有 `wearableDebug*` 方法。
  */
 // DEBUG_WEARABLE_START
 @Composable

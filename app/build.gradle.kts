@@ -59,4 +59,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation(libs.concentus)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.onnxruntime.android)
+    implementation(libs.play.services.location)
 }
