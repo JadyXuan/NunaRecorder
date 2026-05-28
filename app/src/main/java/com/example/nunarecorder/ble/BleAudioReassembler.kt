@@ -19,6 +19,7 @@ class BleAudioReassembler(
 
         private const val MIN_HEADER_LEN = 7       // AA + type + len(2) + ver + checksum(2)
         private const val MIN_AUDIO_BIZ_HEADER = 14
+        private const val OPUS_FRAME_SIZE = 80
     }
 
     private var fos: FileOutputStream? = null
@@ -147,11 +148,21 @@ class BleAudioReassembler(
             pos += chunk.size
         }
 
+        val remainder = concatenated.size % OPUS_FRAME_SIZE
+        if (remainder != 0) {
+            onLog("[reassembler] frame size ${concatenated.size} not multiple of $OPUS_FRAME_SIZE, trimming $remainder bytes")
+        }
+        val toWrite = if (remainder == 0) concatenated else concatenated.copyOf(concatenated.size - remainder)
+        if (toWrite.isEmpty()) {
+            onLog("[reassembler] frame trimmed to empty, skip")
+            return
+        }
+
         try {
-            fos?.write(concatenated)
+            fos?.write(toWrite)
             fos?.flush()
             validFrameCount++
-            opusBytesWritten += concatenated.size
+            opusBytesWritten += toWrite.size
         } catch (e: Exception) {
             Log.e(TAG, "Error writing opus frame", e)
         }

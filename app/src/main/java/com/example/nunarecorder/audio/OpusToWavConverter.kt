@@ -88,11 +88,18 @@ object OpusToWavConverter {
                 onProgress?.invoke(i, frameCount)
                 val read = input.read(frameBuffer)
                 if (read < FRAME_SIZE_BYTES) break
-                val decoded = decoder.decode(
-                    frameBuffer, 0, FRAME_SIZE_BYTES,
-                    pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
-                    false
-                )
+                val decoded = try {
+                    decoder.decode(
+                        frameBuffer, 0, FRAME_SIZE_BYTES,
+                        pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
+                        false
+                    )
+                } catch (e: Exception) {
+                    Log.w("OpusToWav", "Frame $i decode failed (${e.message}), using PLC")
+                    try {
+                        decoder.decode(null, 0, 0, pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL, false)
+                    } catch (e2: Exception) { 0 }
+                }
                 if (decoded <= 0) {
                     Log.w("OpusToWav", "Frame $i: decoded <= 0 ($decoded), skip")
                     continue
@@ -141,11 +148,17 @@ object OpusToWavConverter {
         for (i in 0 until frameCount) {
             System.arraycopy(opusStream, offset, frameBuffer, 0, FRAME_SIZE_BYTES)
             offset += FRAME_SIZE_BYTES
-            val decoded = decoder.decode(
-                frameBuffer, 0, FRAME_SIZE_BYTES,
-                pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
-                false
-            )
+            val decoded = try {
+                decoder.decode(
+                    frameBuffer, 0, FRAME_SIZE_BYTES,
+                    pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
+                    false
+                )
+            } catch (e: Exception) {
+                try {
+                    decoder.decode(null, 0, 0, pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL, false)
+                } catch (e2: Exception) { 0 }
+            }
             if (decoded <= 0) continue
             val samplesToWrite = (decoded.toLong() * CHANNELS).toInt()
             val chunk = ByteArray(samplesToWrite * 2)

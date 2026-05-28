@@ -29,11 +29,17 @@ object OpusToPcmMono {
             for (i in 0 until frameCount) {
                 val read = input.read(frameBuffer)
                 if (read < FRAME_SIZE_BYTES) break
-                val decoded = decoder.decode(
-                    frameBuffer, 0, FRAME_SIZE_BYTES,
-                    pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
-                    false
-                )
+                val decoded = try {
+                    decoder.decode(
+                        frameBuffer, 0, FRAME_SIZE_BYTES,
+                        pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL,
+                        false
+                    )
+                } catch (e: Exception) {
+                    try {
+                        decoder.decode(null, 0, 0, pcmBuffer, 0, SAMPLES_PER_FRAME_PER_CHANNEL, false)
+                    } catch (e2: Exception) { 0 }
+                }
                 if (decoded <= 0) continue
                 for (ch in 0 until decoded) {
                     val left = pcmBuffer[ch * 2]
