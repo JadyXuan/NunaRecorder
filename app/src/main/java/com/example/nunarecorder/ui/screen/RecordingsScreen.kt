@@ -1,5 +1,8 @@
 package com.example.nunarecorder.ui.screen
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +25,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -30,19 +37,24 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.nunarecorder.audio.SegmentPlaybackState
 import com.example.nunarecorder.data.RecordingEntry
-import java.io.File
+import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.ui.components.RecordingItem
+import java.io.File
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private enum class MultiModalAction { SHARE, UPLOAD }
 
@@ -54,9 +66,14 @@ fun RecordingsScreen(
     onShareEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
     onDeleteEntry: (RecordingEntry, () -> Unit) -> Unit,
     onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
-    onMigrateLegacy: (File) -> Unit,
+    onMigrateLegacy: (File, MigrateOptions) -> Unit,
+    activeRecordingPath: String?,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
     var entries by remember { mutableStateOf(listOf<RecordingEntry>()) }
     var entryToDelete by remember { mutableStateOf<RecordingEntry?>(null) }
     var multiModalTarget by remember { mutableStateOf<RecordingEntry?>(null) }
@@ -64,6 +81,11 @@ fun RecordingsScreen(
     var includeContextData by remember { mutableStateOf(true) }
     var includeVadPrelabel by remember { mutableStateOf(true) }
     var detailSession by remember { mutableStateOf<RecordingEntry.Session?>(null) }
+
+    var migrateTarget by remember { mutableStateOf<RecordingEntry.LegacyOpus?>(null) }
+    var migrateDoSplit by remember { mutableStateOf(true) }
+    var migrateDoVad by remember { mutableStateOf(true) }
+    var migrateSegmentSec by remember { mutableStateOf("60") }
 
     fun refreshList() {
         val sessions = SessionPaths.listSessionDirs().mapNotNull { dir ->
@@ -76,6 +98,13 @@ fun RecordingsScreen(
     }
 
     LaunchedEffect(Unit) { refreshList() }
+
+    LaunchedEffect(activeRecordingPath) {
+        while (activeRecordingPath != null) {
+            refreshList()
+            delay(1500)
+        }
+    }
 
     val migrationState by MigrationCoordinator.state.collectAsState()
     val syncState by SessionSyncCoordinator.state.collectAsState()
@@ -98,9 +127,18 @@ fun RecordingsScreen(
         }
     }
 
+    fun copyPath(entry: RecordingEntry) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("recording_path", entry.localPath))
+        scope.launch {
+            snackbarHostState.showSnackbar("已复制路径:\n${entry.localPath}")
+        }
+    }
+
     detailSession?.let { session ->
         RecordingDetailScreen(
             session = session,
+            isLiveRecording = session.dir.absolutePath == activeRecordingPath,
             onBack = {
                 onStopPlayback()
                 detailSession = null
@@ -142,6 +180,56 @@ fun RecordingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { entryToDelete = null }) { Text("取消") }
+            }
+        )
+    }
+
+    migrateTarget?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { migrateTarget = null },
+            shape = RoundedCornerShape(16.dp),
+            title = { Text("后处理选项", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ModalOptionRow(
+                        checked = migrateDoSplit,
+                        enabled = true,
+                        onChecked = { migrateDoSplit = it },
+                        icon = { Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp)) },
+                        label = "切片（转为会话目录 + 分段）"
+                    )
+                    if (migrateDoSplit) {
+                        OutlinedTextField(
+                            value = migrateSegmentSec,
+                            onValueChange = { migrateSegmentSec = it },
+                            label = { Text("切片时长（秒）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    ModalOptionRow(
+                        checked = migrateDoVad,
+                        enabled = true,
+                        onChecked = { migrateDoVad = it },
+                        icon = { Icon(Icons.Outlined.Info, null, Modifier.size(18.dp)) },
+                        label = "VAD 预标注"
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val sec = migrateSegmentSec.toIntOrNull()?.coerceIn(10, 600) ?: 60
+                    onMigrateLegacy(
+                        entry.opusFile,
+                        MigrateOptions(migrateDoSplit, migrateDoVad, sec)
+                    )
+                    migrateTarget = null
+                }) {
+                    Text("开始", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { migrateTarget = null }) { Text("取消") }
             }
         )
     }
@@ -211,107 +299,132 @@ fun RecordingsScreen(
         )
     }
 
-    Column(
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        Text("录音文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text(
-            "${entries.size} 项",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f)
-        )
-        Spacer(Modifier.height(12.dp))
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text("录音文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "${entries.size} 项",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f)
+            )
+            Spacer(Modifier.height(12.dp))
 
-        if (entries.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("暂无录音", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f))
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(entries, key = {
-                    when (it) {
-                        is RecordingEntry.Session -> it.dir.absolutePath
-                        is RecordingEntry.LegacyOpus -> it.opusFile.absolutePath
-                    }
-                }) { entry ->
-                    val entryKey = when (entry) {
-                        is RecordingEntry.Session -> entry.dir.absolutePath
-                        is RecordingEntry.LegacyOpus -> entry.opusFile.absolutePath
-                    }
-                    val syncing = syncState?.targetKey == entryKey &&
-                        syncState?.phase == SessionSyncCoordinator.Phase.SYNCING
-                    val syncProgress = if (syncing) syncState?.progress else null
-                    val syncMessage = if (syncing) syncState?.message else null
-                    val persistedSync = when (entry) {
-                        is RecordingEntry.Session -> entry.syncStatus
-                        is RecordingEntry.LegacyOpus -> null
-                    }
-
-                    RecordingItem(
-                        entry = entry,
-                        syncStatus = persistedSync,
-                        isSyncing = syncing,
-                        syncProgress = syncProgress,
-                        syncMessage = syncMessage,
-                        onShare = {
-                            includeContextData = when (entry) {
-                                is RecordingEntry.Session -> entry.hasContext
-                                is RecordingEntry.LegacyOpus -> entry.hasContext
-                            }
-                            includeVadPrelabel = entry is RecordingEntry.Session &&
-                                SessionPaths.vadPrelabelFile(entry.dir).exists()
-                            multiModalAction = MultiModalAction.SHARE
-                            multiModalTarget = entry
-                        },
-                        onDelete = { entryToDelete = entry },
-                        onUpload = {
-                            includeContextData = when (entry) {
-                                is RecordingEntry.Session -> entry.hasContext
-                                is RecordingEntry.LegacyOpus -> entry.hasContext
-                            }
-                            includeVadPrelabel = entry is RecordingEntry.Session &&
-                                SessionPaths.vadPrelabelFile(entry.dir).exists()
-                            multiModalAction = MultiModalAction.UPLOAD
-                            multiModalTarget = entry
-                        },
-                        onMigrate = if (entry is RecordingEntry.LegacyOpus) {
-                            { onMigrateLegacy(entry.opusFile) }
-                        } else null,
-                        migrateEnabled = !(entry is RecordingEntry.LegacyOpus &&
-                            MigrationCoordinator.isActiveFor(entry.opusFile.absolutePath)),
-                        onOpenDetail = if (entry is RecordingEntry.Session) {
-                            { detailSession = entry }
+            if (entries.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("暂无录音", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f))
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(entries, key = {
+                        when (it) {
+                            is RecordingEntry.Session -> it.dir.absolutePath
+                            is RecordingEntry.LegacyOpus -> it.opusFile.absolutePath
+                        }
+                    }) { entry ->
+                        val entryKey = when (entry) {
+                            is RecordingEntry.Session -> entry.dir.absolutePath
+                            is RecordingEntry.LegacyOpus -> entry.opusFile.absolutePath
+                        }
+                        val isLive = entry is RecordingEntry.Session &&
+                            entry.dir.absolutePath == activeRecordingPath
+                        val liveBytes = if (isLive && entry is RecordingEntry.Session) {
+                            entry.manifest.segments.sumOf { it.bytes } + entry.manifest.openSegmentBytes
                         } else null
-                    )
-                    val legacyMigrating = entry is RecordingEntry.LegacyOpus &&
-                        migrationState?.opusPath == entry.opusFile.absolutePath &&
-                        migrationState?.phase !in setOf(
-                            MigrationCoordinator.Phase.DONE,
-                            MigrationCoordinator.Phase.ERROR
+                        val liveSegs = if (isLive && entry is RecordingEntry.Session) {
+                            entry.manifest.segments.size +
+                                if (entry.manifest.openSegmentBytes > 0) 1 else 0
+                        } else null
+
+                        val syncing = syncState?.targetKey == entryKey &&
+                            syncState?.phase == SessionSyncCoordinator.Phase.SYNCING
+                        val syncProgress = if (syncing) syncState?.progress else null
+                        val syncMessage = if (syncing) syncState?.message else null
+                        val persistedSync = when (entry) {
+                            is RecordingEntry.Session -> entry.syncStatus
+                            is RecordingEntry.LegacyOpus -> null
+                        }
+
+                        RecordingItem(
+                            entry = entry,
+                            isLiveRecording = isLive,
+                            liveTotalBytes = liveBytes,
+                            liveSegmentCount = liveSegs,
+                            onCopyPath = { copyPath(entry) },
+                            syncStatus = persistedSync,
+                            isSyncing = syncing,
+                            syncProgress = syncProgress,
+                            syncMessage = syncMessage,
+                            onShare = {
+                                includeContextData = when (entry) {
+                                    is RecordingEntry.Session -> entry.hasContext
+                                    is RecordingEntry.LegacyOpus -> entry.hasContext
+                                }
+                                includeVadPrelabel = entry is RecordingEntry.Session &&
+                                    SessionPaths.vadPrelabelFile(entry.dir).exists()
+                                multiModalAction = MultiModalAction.SHARE
+                                multiModalTarget = entry
+                            },
+                            onDelete = { entryToDelete = entry },
+                            onUpload = {
+                                includeContextData = when (entry) {
+                                    is RecordingEntry.Session -> entry.hasContext
+                                    is RecordingEntry.LegacyOpus -> entry.hasContext
+                                }
+                                includeVadPrelabel = entry is RecordingEntry.Session &&
+                                    SessionPaths.vadPrelabelFile(entry.dir).exists()
+                                multiModalAction = MultiModalAction.UPLOAD
+                                multiModalTarget = entry
+                            },
+                            onMigrate = if (entry is RecordingEntry.LegacyOpus) {
+                                {
+                                    migrateDoSplit = true
+                                    migrateDoVad = true
+                                    migrateSegmentSec = "60"
+                                    migrateTarget = entry
+                                }
+                            } else null,
+                            migrateEnabled = !(entry is RecordingEntry.LegacyOpus &&
+                                MigrationCoordinator.isActiveFor(entry.opusFile.absolutePath)),
+                            onOpenDetail = if (entry is RecordingEntry.Session) {
+                                { detailSession = entry }
+                            } else null
                         )
-                    val legacyMigrateProgress = if (legacyMigrating) migrationState?.progress else null
-                    val legacyMigrateMessage = if (legacyMigrating) migrationState?.message else null
-                    if (legacyMigrateProgress != null) {
-                        LinearProgressIndicator(
-                            progress = { legacyMigrateProgress },
-                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                        )
-                        legacyMigrateMessage?.let { msg ->
-                            Text(
-                                msg,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(top = 2.dp)
+                        val legacyMigrating = entry is RecordingEntry.LegacyOpus &&
+                            migrationState?.opusPath == entry.opusFile.absolutePath &&
+                            migrationState?.phase !in setOf(
+                                MigrationCoordinator.Phase.DONE,
+                                MigrationCoordinator.Phase.ERROR
                             )
+                        val legacyMigrateProgress = if (legacyMigrating) migrationState?.progress else null
+                        val legacyMigrateMessage = if (legacyMigrating) migrationState?.message else null
+                        if (legacyMigrateProgress != null) {
+                            LinearProgressIndicator(
+                                progress = { legacyMigrateProgress },
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                            )
+                            legacyMigrateMessage?.let { msg ->
+                                Text(
+                                    msg,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
                         }
                     }
+                    item { Spacer(Modifier.height(8.dp)) }
                 }
-                item { Spacer(Modifier.height(8.dp)) }
             }
         }
     }

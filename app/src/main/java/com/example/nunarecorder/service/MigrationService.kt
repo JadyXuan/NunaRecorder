@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import com.example.nunarecorder.migration.LegacySessionMigrator
+import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.util.BatteryOptimizationHelper
 import java.io.File
@@ -21,11 +22,14 @@ class MigrationService : Service() {
 
         const val ACTION_START = "com.example.nunarecorder.action.START_MIGRATION"
         const val EXTRA_OPUS_PATH = "extra_opus_path"
+        const val EXTRA_DO_SPLIT = "extra_do_split"
+        const val EXTRA_DO_VAD = "extra_do_vad"
+        const val EXTRA_SEGMENT_SEC = "extra_segment_sec"
 
         @Volatile
         private var migrationRunning = false
 
-        fun enqueue(context: Context, opusPath: String) {
+        fun enqueue(context: Context, opusPath: String, options: MigrateOptions = MigrateOptions()) {
             val app = context.applicationContext
             ProcessingNotifications.ensureChannels(app)
             if (!BatteryOptimizationHelper.isIgnoringOptimizations(app)) {
@@ -35,6 +39,9 @@ class MigrationService : Service() {
                 Intent(app, MigrationService::class.java).apply {
                     action = ACTION_START
                     putExtra(EXTRA_OPUS_PATH, opusPath)
+                    putExtra(EXTRA_DO_SPLIT, options.doSplit)
+                    putExtra(EXTRA_DO_VAD, options.doVad)
+                    putExtra(EXTRA_SEGMENT_SEC, options.segmentDurationSec)
                 }
             )
         }
@@ -71,17 +78,22 @@ class MigrationService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                val options = MigrateOptions(
+                    doSplit = intent.getBooleanExtra(EXTRA_DO_SPLIT, true),
+                    doVad = intent.getBooleanExtra(EXTRA_DO_VAD, true),
+                    segmentDurationSec = intent.getIntExtra(EXTRA_SEGMENT_SEC, 60).coerceIn(10, 600)
+                )
                 migrationRunning = true
-                Log.d(TAG, "start migration: ${opus.name} size=${opus.length()}")
+                Log.d(TAG, "start migration: ${opus.name} split=${options.doSplit} vad=${options.doVad}")
                 acquireServiceWakeLock()
                 promoteToForeground("准备迁移…", 0, indeterminate = true)
-                runMigration(path)
+                runMigration(path, options)
             }
         }
         return START_STICKY
     }
 
-    private fun runMigration(opusPath: String) {
+    private fun runMigration(opusPath: String, options: MigrateOptions) {
         val opus = File(opusPath)
         val displayName = opus.name
         val appCtx = applicationContext
@@ -91,6 +103,7 @@ class MigrationService : Service() {
             try {
                 val result = LegacySessionMigrator.migrate(
                     legacyOpus = opus,
+                    options = options,
                     onLog = { MigrationCoordinator.log(it) },
                     onProgress = { phase, current, total ->
                         val (coordPhase, progress, msg) = when (phase) {

@@ -39,7 +39,9 @@ import com.example.nunarecorder.audio.SegmentAudioPlayer
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.ble.HandshakeClient
 import com.example.nunarecorder.data.RecordingEntry
+import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
+import com.example.nunarecorder.recording.RecordingOptions
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.recording.SessionRecorder
 import com.example.nunarecorder.session.SessionPaths
@@ -72,8 +74,7 @@ class MainActivity : ComponentActivity() {
         private val CCCD_UUID: UUID get() = UUID.fromString(ProtoConfig.Service.CCCD_UUID)
     }
 
-    // 记录当前选中的设备 MAC 地址（来自列表点击）
-    private var selectedDeviceAddress: String? = null
+    // 记录当前选中的设备 MAC 地址（来自列表点击，存于 ViewModel）
 
     // 当前连接设备名（用于文件命名）
     private var currentDeviceName: String = "unknown"
@@ -100,13 +101,15 @@ class MainActivity : ComponentActivity() {
     private var totalPacketCount = 0L
     private var totalBytesCount = 0L
 
-    private fun appendLog(msg: String) {
+    private fun appendLog(msg: String, level: LogLevel = LogLevel.INFO) {
         Log.d(TAG, msg)
-        viewModel.appendLog(msg)
+        runOnUiThread { viewModel.appendLog(msg, level) }
     }
 
-    private val sessionRecorder = SessionRecorder { appendLog(it) }
-    private val segmentPlayer = SegmentAudioPlayer { appendLog(it) }
+    private fun appendDebug(msg: String) = appendLog(msg, LogLevel.DEBUG)
+
+    private val sessionRecorder = SessionRecorder { appendDebug(it) }
+    private val segmentPlayer = SegmentAudioPlayer { appendDebug(it) }
 
     private val httpClient by lazy { OkHttpClient() }
 
@@ -137,7 +140,13 @@ class MainActivity : ComponentActivity() {
         isTransferNotificationEnabled = false
 
         handshakeClient = HandshakeClient(this) { msg ->
-            appendLog(msg)
+            when {
+                msg.contains("handshake success") || msg.contains("Command success") ->
+                    appendLog("握手成功，设备已就绪")
+                msg.contains("failed") || msg.contains("mismatch") || msg.contains("ERROR") ->
+                    appendLog(msg.removePrefix("HS: ").trim())
+                else -> appendDebug(msg)
+            }
         }
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -186,28 +195,23 @@ class MainActivity : ComponentActivity() {
                         when (selectedTab) {
                             0 -> MainScreen(
                                 logText = viewModel.logText.value,
-                                targetName = viewModel.targetName.value,
-                                onTargetNameChange = { viewModel.setTargetName(it) },
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,
+                                selectedDeviceAddress = viewModel.selectedDeviceAddress.value,
                                 connectionStatus = viewModel.connectionStatus.value,
                                 onDeviceClick = { scanned ->
-                                    val name = scanned.name ?: ""
-                                    viewModel.setTargetName(name)
-                                    selectedDeviceAddress = scanned.address
-                                    appendLog("Selected device from list: $name (${scanned.address})")
+                                    viewModel.selectDevice(scanned.address)
+                                    appendLog("已选择: ${scanned.name ?: scanned.address}")
                                 },
                                 onPairedDeviceClick = { pd ->
                                     selectedPairedDevice = pd
-                                    selectedDeviceAddress = pd.address
-                                    viewModel.setTargetName(pd.name ?: "")
-                                    appendLog("Selected paired device: ${pd.name} (${pd.address})")
+                                    viewModel.selectDevice(pd.address)
+                                    appendLog("已选择: ${pd.name ?: pd.address}")
                                 },
                                 onScanClick = { startScanForList() },
                                 onConnectClick = { startConnectFlow() },
                                 onStartRecordingClick = { startRecordingOnly() },
                                 onStopRecordingClick = { stopRecordingFlow() },
-                                onHandshakeClick = { performHandshake() },
                                 modifier = Modifier.fillMaxSize()
                             )
                         1 -> RecordingsScreen(
@@ -224,31 +228,50 @@ class MainActivity : ComponentActivity() {
                             onShareEntry = { entry, withContext, withVad -> shareRecordingEntry(entry, withContext, withVad) },
                             onDeleteEntry = { entry, onDeleted -> deleteRecordingEntry(entry, onDeleted) },
                             onUploadEntry = { entry, withContext, withVad -> uploadRecordingEntry(entry, withContext, withVad) },
-                            onMigrateLegacy = { opus -> MigrationCoordinator.start(this@MainActivity, opus) },
+                            onMigrateLegacy = { opus, options ->
+                                MigrationCoordinator.start(this@MainActivity, opus, options)
+                            },
+                            activeRecordingPath = viewModel.activeRecordingPath.value,
                             modifier = Modifier.fillMaxSize()
                         )
                             2 -> SettingsScreen(
                                 userSettings = viewModel.userSettings.value,
                                 onUserIdChange = { newId ->
-                                    val current = viewModel.userSettings.value
-                                    viewModel.setUserSettings(current.copy(userId = newId))
-                                },
-                                onMacChange = { newMac ->
-                                    val current = viewModel.userSettings.value
-                                    viewModel.setUserSettings(current.copy(mac = newMac))
+                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(userId = newId))
                                 },
                                 onServerHostChange = { newHost ->
-                                    val current = viewModel.userSettings.value
-                                    viewModel.setUserSettings(current.copy(serverHost = newHost))
+                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(serverHost = newHost))
                                 },
                                 onServerPortChange = { newPortStr ->
-                                    val port = newPortStr.toIntOrNull() ?: viewModel.userSettings.value.serverPort
-                                    val current = viewModel.userSettings.value
-                                    viewModel.setUserSettings(current.copy(serverPort = port))
+                                    val port = newPortStr.toIntOrNull()
+                                        ?: viewModel.userSettings.value.serverPort
+                                    viewModel.setUserSettings(
+                                        viewModel.userSettings.value.copy(serverPort = port)
+                                    )
+                                },
+                                onLogLevelChange = { level ->
+                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(logLevel = level))
+                                },
+                                onAutoVadChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        viewModel.userSettings.value.copy(autoVadOnRecord = enabled)
+                                    )
+                                },
+                                onSegmentEnabledChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        viewModel.userSettings.value.copy(segmentEnabled = enabled)
+                                    )
+                                },
+                                onSegmentDurationChange = { secStr ->
+                                    val sec = secStr.toIntOrNull()?.coerceIn(10, 600)
+                                        ?: viewModel.userSettings.value.segmentDurationSec
+                                    viewModel.setUserSettings(
+                                        viewModel.userSettings.value.copy(segmentDurationSec = sec)
+                                    )
                                 },
                                 onSave = {
                                     userSettingsStorage.save(viewModel.userSettings.value)
-                                    appendLog("User settings saved.")
+                                    appendLog("设置已保存")
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -292,39 +315,28 @@ class MainActivity : ComponentActivity() {
      */
     private fun startScanForList() {
         viewModel.clearDeviceList()
-        appendLog("Start scanning for nearby BLE devices...")
+        appendLog("开始扫描附近设备…")
         startScan(targetNameFilter = null)
     }
 
-    /**
-     * 点击"Connect"时调用：
-     * 按输入框里的设备名 scan + 连接，但不立即握手或录制。
-     */
     private fun startConnectFlow() {
         stopScan()
-        autoHandshakeOnConnect = true   // 连接后自动触发握手
+        autoHandshakeOnConnect = true
 
-        val name = viewModel.targetName.value.trim()
         if (bluetoothAdapter == null || !bluetoothAdapter!!.isEnabled) {
-            appendLog("Bluetooth not enabled")
+            appendLog("请先开启蓝牙")
             return
         }
 
-        val addr = selectedDeviceAddress
-        if (!addr.isNullOrEmpty()) {
-            appendLog("[1/4] 开始连接设备: $addr (name hint='$name')")
-            val device = bluetoothAdapter!!.getRemoteDevice(addr)
-            window.decorView.postDelayed({ connectToDevice(device) }, 300)
+        val addr = viewModel.selectedDeviceAddress.value
+        if (addr.isNullOrEmpty()) {
+            appendLog("请先从列表点选要连接的设备")
             return
         }
 
-        if (name.isEmpty()) {
-            appendLog("请先输入设备名称或从列表中选择一台设备。")
-            return
-        }
-
-        appendLog("[1/4] 扫描目标设备: $name")
-        startScan(targetNameFilter = name)
+        appendLog("正在连接 $addr …")
+        val device = bluetoothAdapter!!.getRemoteDevice(addr)
+        window.decorView.postDelayed({ connectToDevice(device) }, 300)
     }
 
     /**
@@ -332,16 +344,15 @@ class MainActivity : ComponentActivity() {
      * 在已连接且 A002 通知已开启的情况下，执行握手流程（包含 settime）
      */
     private fun performHandshake() {
-        val g = gatt
-        if (g == null) {
-            appendLog("Handshake: gatt is null, please Connect first.")
+        val g = gatt ?: run {
+            appendLog("未连接设备，请先连接")
             return
         }
         if (!isTransferNotificationEnabled) {
-            appendLog("Handshake: TRANSFER (A002) notifications not enabled yet.")
+            appendDebug("握手: A002 通知尚未就绪")
             return
         }
-        appendLog("Handshake button clicked, starting handshake...")
+        appendLog("握手中…")
         handshakeClient.startHandshake(g)
     }
 
@@ -356,47 +367,47 @@ class MainActivity : ComponentActivity() {
      */
     private fun startRecordingOnly() {
         if (gatt == null) {
-            appendLog("Not connected to any device, please Connect first.")
+            appendLog("未连接，请先「连接 + 握手」")
             return
         }
         if (recording) {
-            appendLog("Already recording.")
+            appendLog("已在录制中")
             return
         }
         resetStreamingStats()
-        appendLog("Starting recording on connected device...")
+        appendLog("准备开始录制…")
 
         val g = gatt ?: return
         val service = g.getService(SERVICE_UUID)
         if (service == null) {
-            appendLog("Service $SERVICE_UUID not found")
+            appendLog("未找到音频服务，连接可能未完成")
             return
         }
         val characteristic = service.getCharacteristic(CHAR_UUID)
         if (characteristic == null) {
-            appendLog("Characteristic $CHAR_UUID not found")
+            appendLog("未找到音频特征")
             return
         }
-        appendLog("Target characteristic found, enabling notifications...")
+        appendDebug("启用 A003 音频通知…")
         enableNotifications(g, characteristic)
     }
 
-    /**
-     * 点击"Stop Recording"时调用：停止 notify+断开+关文件。
-     */
     private fun stopRecordingFlow() {
-        appendLog("Stopping recording...")
-        appendLog("Total received: packets=$totalPacketCount, bytes=$totalBytesCount")
+        appendLog("停止录制（共 ${totalPacketCount} 包 · ${formatBytes(totalBytesCount)}）")
 
         recording = false
-        // _recordingState.value = false
-
-        // 关闭重组器（完成最后 flush）
         sessionRecorder.stop()
+        viewModel.setActiveRecordingPath(null)
         com.example.nunarecorder.service.ContextDataService.stop(this)
 
         stopScan()
         stopNotifyAndDisconnect()
+    }
+
+    private fun formatBytes(n: Long): String = when {
+        n >= 1_048_576 -> "%.1f MB".format(n / 1_048_576.0)
+        n >= 1024 -> "%.1f KB".format(n / 1024.0)
+        else -> "$n B"
     }
 
     // ----------------- 扫描逻辑 -----------------
@@ -444,10 +455,7 @@ class MainActivity : ComponentActivity() {
         scanning = true
 
         appendLog(
-            if (targetNameFilter == null)
-                "Scanning started (no name filter)."
-            else
-                "Scanning started (filter name = '$targetNameFilter')."
+            if (targetNameFilter == null) "扫描中…" else "扫描目标设备…"
         )
     }
 
@@ -470,7 +478,7 @@ class MainActivity : ComponentActivity() {
 
         bluetoothLeScanner?.stopScan(scanCallback)
         scanning = false
-        appendLog("Scanning stopped.")
+        appendDebug("扫描已停止")
     }
 
     // 为了在 scanCallback 中知道当前是否有名字过滤
@@ -489,7 +497,7 @@ class MainActivity : ComponentActivity() {
 
                 val filterName = currentTargetNameFilter
                 if (!filterName.isNullOrEmpty() && name == filterName) {
-                    appendLog("Found target device: $name ($address), stop scan and connect.")
+                    appendLog("找到设备 $name，正在连接…")
                     stopScan()
                     connectToDevice(device)
                 }
@@ -498,7 +506,7 @@ class MainActivity : ComponentActivity() {
 
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
-            appendLog("Scan failed: error=$errorCode")
+            appendLog("扫描失败 (code=$errorCode)")
         }
     }
 
@@ -520,7 +528,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        appendLog("Connecting to ${device.name ?: "(no name)"} (${device.address})...")
+        appendDebug("正在连接 ${device.name ?: device.address}…")
 
         // 关闭之前的 GATT
         gatt?.let {
@@ -538,7 +546,7 @@ class MainActivity : ComponentActivity() {
             device.connectGatt(this, false, gattCallback)
         }
 
-        appendLog("Connect request sent, waiting for response...")
+        appendDebug("连接请求已发送")
     }
 
 
@@ -552,24 +560,20 @@ class MainActivity : ComponentActivity() {
             super.onConnectionStateChange(gatt, status, newState)
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                when (status) {
-                    4 -> appendLog("Connection error (4: GATT_FAILURE).")
-                    133 -> appendLog("Connection error (133: internal error).")
-                    else -> appendLog("Connection error: status=$status")
-                }
-                appendLog("Closing GATT due to error.")
+                appendLog("连接失败 (status=$status)")
+                appendDebug("关闭 GATT")
                 try {
                     gatt.disconnect()
                     gatt.close()
                 } catch (_: Exception) {}
-                viewModel.setConnectionStatus("Disconnected (error)")
+                viewModel.setConnectionStatus("连接失败")
                 return
             }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 val dev = gatt.device
                 currentDeviceName = dev.name ?: dev.address ?: "unknown"
-                appendLog("[2/4] GATT 已连接: ${dev.name ?: "(no name)"} (${dev.address})，正在发现服务...")
+                appendLog("已连接 ${dev.name ?: dev.address}")
 
                 val paired = PairedDevice(
                     name = dev.name,
@@ -579,7 +583,7 @@ class MainActivity : ComponentActivity() {
                 deviceStorage.saveOrUpdateDevice(paired)
                 refreshPairedDeviceList()
 
-                viewModel.setConnectionStatus("Connected: ${dev.name ?: "(no name)"} (${dev.address})")
+                viewModel.setConnectionStatus("已连接 · ${dev.name ?: dev.address}")
 
                 val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
                     Manifest.permission.BLUETOOTH_CONNECT
@@ -588,22 +592,20 @@ class MainActivity : ComponentActivity() {
                 if (ActivityCompat.checkSelfPermission(this@MainActivity, perm)
                     != PackageManager.PERMISSION_GRANTED
                 ) {
-                    appendLog("discoverServices: no permission.")
+                    appendDebug("discoverServices: 无权限")
                     return
                 }
                 val ok = gatt.discoverServices()
-                if (!ok) {
-                    appendLog("Service discovery start failed.")
-                }
+                if (!ok) appendLog("服务发现启动失败")
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                appendLog("Disconnected from device.")
+                appendLog("已断开连接")
                 recording = false
                 isTransferNotificationEnabled = false
 
                 sessionRecorder.stop()
+                viewModel.setActiveRecordingPath(null)
                 com.example.nunarecorder.service.ContextDataService.stop(this@MainActivity)
-                // closeFile()
-                viewModel.setConnectionStatus("Disconnected")
+                viewModel.setConnectionStatus("未连接")
             }
         }
 
@@ -611,10 +613,10 @@ class MainActivity : ComponentActivity() {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             super.onServicesDiscovered(gatt, status)
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                appendLog("服务发现失败: status=$status")
+                appendLog("服务发现失败 (status=$status)")
                 return
             }
-            appendLog("[3/4] 服务发现成功，正在启用 A002 通知...")
+            appendDebug("服务发现完成，启用 A002 通知…")
             enableTransferNotifications(gatt)
         }
 
@@ -651,18 +653,16 @@ class MainActivity : ComponentActivity() {
             ) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     isTransferNotificationEnabled = true
-                    appendLog("[4/4] A002 通知已启用。")
+                    appendDebug("A002 通知已启用")
                     if (autoHandshakeOnConnect) {
                         autoHandshakeOnConnect = false
-                        appendLog("[4/4] 自动握手：延时 800 ms 后执行握手...")
+                        appendLog("自动握手中…")
                         runOnUiThread {
                             window.decorView.postDelayed({ performHandshake() }, 800)
                         }
-                    } else {
-                        appendLog("A002 通知就绪，可手动执行握手。")
                     }
                 } else {
-                    appendLog("启用 A002 通知失败: status=$status")
+                    appendLog("启用 A002 通知失败 (status=$status)")
                 }
             }
         }
@@ -696,9 +696,10 @@ class MainActivity : ComponentActivity() {
             if (success) {
                 openFileForRecording()
                 recording = true
-                appendLog("Recording started: listening to audio stream...")
+                viewModel.setConnectionStatus("录制中 · ${currentDeviceName}")
+                appendLog("录制已开始")
             } else {
-                appendLog("Failed to enable recording notifications.")
+                appendLog("无法启用音频通知")
             }
         } else {
             appendLog("Recording CCCD not found, cannot enable notifications.")
@@ -766,15 +767,22 @@ class MainActivity : ComponentActivity() {
 
     private fun openFileForRecording() {
         try {
-            val addr = gatt?.device?.address ?: selectedDeviceAddress
-            sessionRecorder.start(currentDeviceName, addr)
+            val addr = gatt?.device?.address ?: viewModel.selectedDeviceAddress.value
+            val options = RecordingOptions.from(viewModel.userSettings.value)
+            sessionRecorder.start(currentDeviceName, addr, options)
             val dir = sessionRecorder.activeSessionDir
             if (dir != null) {
                 com.example.nunarecorder.service.ContextDataService.start(this, dir)
-                appendLog("Session + context capture started: ${dir.name}")
+                viewModel.setActiveRecordingPath(dir.absolutePath)
+                val mode = buildString {
+                    if (options.segmentEnabled) append("切片 ${options.segmentDurationMs / 1000}s")
+                    else append("整段")
+                    append(if (options.autoVadOnRecord) " · 自动VAD" else " · 无VAD")
+                }
+                appendLog("会话 ${dir.name} ($mode)")
             }
         } catch (e: Exception) {
-            appendLog("Failed to start session recording: ${e.message}")
+            appendLog("开始录制失败: ${e.message}")
         }
     }
 

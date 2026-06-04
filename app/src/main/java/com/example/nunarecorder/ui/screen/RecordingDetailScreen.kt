@@ -72,6 +72,7 @@ data class SegmentDetailRow(
 @Composable
 fun RecordingDetailScreen(
     session: RecordingEntry.Session,
+    isLiveRecording: Boolean = false,
     onBack: () -> Unit,
     playback: SegmentPlaybackState?,
     onPlaySegment: (segmentIndex: Int, audioRelPath: String) -> Unit,
@@ -87,7 +88,7 @@ fun RecordingDetailScreen(
         manifest = SessionManifest.load(SessionPaths.manifestFile(session.dir)) ?: session.manifest
         vadData = VadPrelabelReader.load(session.dir)
         val vadByIndex = vadData?.segments?.associateBy { it.index } ?: emptyMap()
-        rows = manifest.segments.map { seg ->
+        val list = manifest.segments.map { seg ->
             SegmentDetailRow(
                 index = seg.index,
                 audioFile = seg.file,
@@ -97,10 +98,40 @@ fun RecordingDetailScreen(
                 bytes = seg.bytes,
                 vad = vadByIndex[seg.index]
             )
+        }.toMutableList()
+        if (manifest.recordingActive && manifest.openSegmentBytes > 0) {
+            val idx = manifest.openSegmentIndex ?: list.size
+            val rel = if (manifest.segmentDurationMs < Long.MAX_VALUE / 2) {
+                SessionPaths.segmentRelativePath(idx)
+            } else {
+                SessionPaths.STREAM_OPUS_FILE
+            }
+            list.add(
+                SegmentDetailRow(
+                    index = idx,
+                    audioFile = rel,
+                    startMs = idx * manifest.segmentDurationMs.coerceAtMost(Long.MAX_VALUE),
+                    endMs = 0L,
+                    durationMs = manifest.openSegmentBytes / 80 * 20L,
+                    bytes = manifest.openSegmentBytes,
+                    vad = null
+                )
+            )
         }
+        rows = list
     }
 
     LaunchedEffect(session.dir.absolutePath) { reload() }
+
+    LaunchedEffect(isLiveRecording, manifest.recordingActive) {
+        if (isLiveRecording || manifest.recordingActive) {
+            while (true) {
+                delay(1200)
+                reload()
+                if (!isLiveRecording && manifest.recordingActive != true) break
+            }
+        }
+    }
 
     // VAD 仍在队列中时定时刷新列表
     LaunchedEffect(manifest.vad.status) {
@@ -148,6 +179,7 @@ fun RecordingDetailScreen(
             vadData = vadData,
             hasContext = session.hasContext,
             vadComplete = VadResumeHelper.isVadComplete(session.dir),
+            isLiveRecording = isLiveRecording || manifest.recordingActive,
             onResumeVad = {
                 val n = VadJobQueue.enqueuePendingSegments(session.dir)
                 resumeMessage = if (n > 0) "已加入队列：$n 段待分析" else "没有待分析的段"
@@ -183,7 +215,10 @@ fun RecordingDetailScreen(
 
         if (rows.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("暂无音频分段", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                Text(
+                    if (isLiveRecording) "等待音频数据…" else "暂无音频分段",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                )
             }
         } else {
             LazyColumn(
@@ -198,6 +233,7 @@ fun RecordingDetailScreen(
                         row = row,
                         isPlaying = isPlaying,
                         isConverting = isConverting,
+                        isLiveOpen = row.endMs == 0L && (isLiveRecording || manifest.recordingActive),
                         onClick = { onPlaySegment(row.index, row.audioFile) }
                     )
                 }
@@ -213,6 +249,7 @@ private fun SummaryCard(
     vadData: VadPrelabelData?,
     hasContext: Boolean,
     vadComplete: Boolean,
+    isLiveRecording: Boolean = false,
     onResumeVad: () -> Unit
 ) {
     val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
@@ -231,9 +268,23 @@ private fun SummaryCard(
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("会话信息", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+            if (isLiveRecording) {
+                Text(
+                    "● 正在录制 · 当前 ${formatBytes(manifest.openSegmentBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NunaSuccess,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
             InfoLine("设备", manifest.deviceName)
+            manifest.deviceAddress?.let { InfoLine("MAC", it) }
             InfoLine("开始时间", dateStr)
-            InfoLine("音频段数", "$total 段（每段约 1 分钟）")
+            val segLabel = if (manifest.segmentDurationMs >= Long.MAX_VALUE / 2) {
+                "${total} 段（整段录制）"
+            } else {
+                "$total 段（约 ${manifest.segmentDurationMs / 1000}s/段）"
+            }
+            InfoLine("音频", segLabel)
             InfoLine("上下文", if (hasContext) "GPS + IMU + 活动 (${SessionPaths.CONTEXT_FILE})" else "无")
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
             Text("VAD (Silero)", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
@@ -255,6 +306,12 @@ private fun SummaryCard(
             }
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable
@@ -316,6 +373,7 @@ private fun SegmentVadCard(
     row: SegmentDetailRow,
     isPlaying: Boolean,
     isConverting: Boolean,
+    isLiveOpen: Boolean = false,
     onClick: () -> Unit
 ) {
     val vad = row.vad
@@ -324,12 +382,14 @@ private fun SegmentVadCard(
     val failed = vad?.status == "failed"
 
     val accent = when {
+        isLiveOpen -> NunaSuccess
         failed -> MaterialTheme.colorScheme.error
         pending -> MaterialTheme.colorScheme.outline
         hasSpeech -> NunaSuccess
         else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     }
     val statusLabel = when {
+        isLiveOpen -> "写入中"
         vad == null -> "待分析"
         failed -> "分析失败"
         vad.status != "ok" -> vad.status

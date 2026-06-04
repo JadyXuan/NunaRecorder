@@ -37,7 +37,11 @@ data class SessionManifest(
     val segments: MutableList<AudioSegmentEntry> = mutableListOf(),
     var vad: VadSummary = VadSummary(),
     val legacy: Boolean = false,
-    val sourceOpus: String? = null
+    val sourceOpus: String? = null,
+    /** 录制进行中（用于 UI 实时展示） */
+    var recordingActive: Boolean = false,
+    var openSegmentIndex: Int? = null,
+    var openSegmentBytes: Long = 0L
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("format_version", formatVersion)
@@ -77,6 +81,13 @@ data class SessionManifest(
             put("speech_segments", vad.speechSegments)
             put("total_segments", vad.totalSegments)
         })
+        if (recordingActive) {
+            put("recording", JSONObject().apply {
+                put("active", true)
+                put("open_segment_index", openSegmentIndex ?: JSONObject.NULL)
+                put("open_segment_bytes", openSegmentBytes)
+            })
+        }
     }
 
     companion object {
@@ -99,6 +110,7 @@ data class SessionManifest(
                 )
             }
             val vadJ = j.optJSONObject("vad")
+            val recJ = j.optJSONObject("recording")
             SessionManifest(
                 formatVersion = j.optInt("format_version", 1),
                 sessionId = j.getString("session_id"),
@@ -115,7 +127,10 @@ data class SessionManifest(
                     totalSegments = vadJ?.optInt("total_segments") ?: segments.size
                 ),
                 legacy = j.optBoolean("legacy", false),
-                sourceOpus = j.optString("source_opus").takeIf { it.isNotEmpty() }
+                sourceOpus = j.optString("source_opus").takeIf { it.isNotEmpty() },
+                recordingActive = recJ?.optBoolean("active") == true,
+                openSegmentIndex = recJ?.optInt("open_segment_index", -1)?.takeIf { it >= 0 },
+                openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L
             )
         } catch (_: Exception) {
             null

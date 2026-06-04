@@ -13,3 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Local Opus diagnosis samples (do not commit)
+analysis/opus_samples/*.opus
+analysis/opus_samples/*.bin
+analysis/opus_samples/_reports/
+analysis/opus_samples/notes.txt

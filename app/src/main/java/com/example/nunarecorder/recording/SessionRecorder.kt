@@ -11,8 +11,16 @@ import com.example.nunarecorder.vad.VadJobQueue
 import com.example.nunarecorder.vad.VadPrelabelWriter
 import java.io.File
 
+data class LiveRecordingStats(
+    val sessionDir: File,
+    val closedSegmentCount: Int,
+    val closedBytes: Long,
+    val openSegmentBytes: Long,
+    val totalBytes: Long
+)
+
 /**
- * 会话录制：按墙钟 60s 轮转 Opus 段；段封口后入队 Silero VAD（即时标注）。
+ * 会话录制：可选按墙钟时长轮转 Opus 段；段封口后可选入队 Silero VAD。
  */
 class SessionRecorder(
     private val onLog: (String) -> Unit
@@ -24,49 +32,88 @@ class SessionRecorder(
     private var currentSegmentFile: File? = null
     private var currentSegmentStartMs = 0L
     private var sessionStartMs = 0L
+    private var options: RecordingOptions = RecordingOptions(
+        segmentEnabled = true,
+        segmentDurationMs = SessionPaths.SEGMENT_DURATION_MS,
+        autoVadOnRecord = true
+    )
+    private var lastManifestFlushMs = 0L
 
     val activeSessionDir: File? get() = sessionDir
 
-    fun start(deviceName: String, deviceAddress: String?) {
+    val isRecording: Boolean get() = sessionDir != null
+
+    fun liveStats(): LiveRecordingStats? {
+        val dir = sessionDir ?: return null
+        val closedBytes = manifest?.segments?.sumOf { it.bytes } ?: 0L
+        val openBytes = currentSegmentFile?.takeIf { it.exists() }?.length() ?: 0L
+        return LiveRecordingStats(
+            sessionDir = dir,
+            closedSegmentCount = manifest?.segments?.size ?: 0,
+            closedBytes = closedBytes,
+            openSegmentBytes = openBytes,
+            totalBytes = closedBytes + openBytes
+        )
+    }
+
+    fun start(
+        deviceName: String,
+        deviceAddress: String?,
+        recordingOptions: RecordingOptions
+    ) {
         stop()
+        options = recordingOptions
         sessionStartMs = System.currentTimeMillis()
-        val dir = SessionPaths.newSessionDir(deviceName, sessionStartMs)
+        val dir = SessionPaths.newSessionDir(deviceName, deviceAddress, sessionStartMs)
         sessionDir = dir
         manifest = SessionManifest(
             sessionId = dir.name,
             deviceName = deviceName,
             deviceAddress = deviceAddress,
             startedAtMs = sessionStartMs,
-            vad = VadSummary(status = "pending")
+            segmentDurationMs = if (options.segmentEnabled) options.segmentDurationMs
+            else Long.MAX_VALUE,
+            vad = VadSummary(
+                status = if (options.autoVadOnRecord) "pending" else "disabled"
+            ),
+            recordingActive = true
         )
         SessionManifestIO.write(dir, manifest!!)
-        VadPrelabelWriter.markRunning(dir, 0, sessionStartMs)
+        if (options.autoVadOnRecord) {
+            VadPrelabelWriter.markRunning(dir, 0, sessionStartMs)
+        }
         openNextSegment()
-        onLog("Session recording started: ${dir.absolutePath}")
+        onLog("开始录制 → ${dir.name}")
     }
 
     fun feed(data: ByteArray) {
-        maybeRotateSegment()
+        if (options.segmentEnabled) {
+            maybeRotateSegment()
+        }
         reassembler?.feed(data)
+        maybeFlushManifest()
     }
 
     fun stop() {
         val dir = sessionDir ?: return
-        closeCurrentSegment(enqueueVad = true)
+        closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
         manifest?.endedAtMs = System.currentTimeMillis()
+        manifest?.recordingActive = false
+        manifest?.openSegmentIndex = null
+        manifest?.openSegmentBytes = 0L
         manifest?.let { SessionManifestIO.write(dir, it) }
         reassembler = null
         sessionDir = null
         manifest = null
-        onLog("Session recording stopped.")
+        onLog("录制已停止")
     }
 
     private fun maybeRotateSegment() {
-        val dir = sessionDir ?: return
         val elapsed = System.currentTimeMillis() - sessionStartMs
-        val expectedIndex = (elapsed / SessionPaths.SEGMENT_DURATION_MS).toInt()
+        val duration = options.segmentDurationMs
+        val expectedIndex = (elapsed / duration).toInt()
         while (currentSegmentIndex < expectedIndex) {
-            closeCurrentSegment(enqueueVad = true)
+            closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
             openNextSegment()
         }
     }
@@ -75,13 +122,21 @@ class SessionRecorder(
         val dir = sessionDir ?: return
         SessionPaths.audioDir(dir).mkdirs()
         currentSegmentIndex = manifest?.segments?.size ?: 0
-        currentSegmentStartMs = currentSegmentIndex * SessionPaths.SEGMENT_DURATION_MS
-        val rel = SessionPaths.segmentRelativePath(currentSegmentIndex)
+        currentSegmentStartMs = if (options.segmentEnabled) {
+            currentSegmentIndex * options.segmentDurationMs
+        } else {
+            0L
+        }
+        val rel = if (options.segmentEnabled) {
+            SessionPaths.segmentRelativePath(currentSegmentIndex)
+        } else {
+            SessionPaths.STREAM_OPUS_FILE
+        }
         val file = File(dir, rel)
         currentSegmentFile = file
         reassembler?.close()
         reassembler = BleAudioReassembler(file) { onLog(it) }
-        onLog("Opened segment $currentSegmentIndex: ${file.name}")
+        flushManifestNow()
     }
 
     private fun closeCurrentSegment(enqueueVad: Boolean) {
@@ -94,20 +149,26 @@ class SessionRecorder(
             return
         }
         val bytes = file.length()
-        val durationMs = bytes / 80 * 20L // 80 bytes/frame, 20ms/frame
-        val endMs = currentSegmentStartMs + durationMs.coerceAtMost(SessionPaths.SEGMENT_DURATION_MS)
+        val durationMs = bytes / 80 * 20L
+        val maxDuration = if (options.segmentEnabled) options.segmentDurationMs else Long.MAX_VALUE
+        val endMs = currentSegmentStartMs + durationMs.coerceAtMost(maxDuration)
+        val rel = if (options.segmentEnabled) {
+            SessionPaths.segmentRelativePath(currentSegmentIndex)
+        } else {
+            SessionPaths.STREAM_OPUS_FILE
+        }
         val entry = AudioSegmentEntry(
             index = currentSegmentIndex,
-            file = SessionPaths.segmentRelativePath(currentSegmentIndex),
+            file = rel,
             startMs = currentSegmentStartMs,
             endMs = endMs,
             bytes = bytes,
-            durationMs = durationMs.coerceAtMost(SessionPaths.SEGMENT_DURATION_MS)
+            durationMs = durationMs.coerceAtMost(maxDuration)
         )
         manifest?.segments?.add(entry)
         SessionManifestIO.write(dir, manifest!!)
-        onLog("Closed segment ${entry.index}: ${bytes} bytes, ~${durationMs}ms")
-        if (enqueueVad) {
+        onLog("分段 ${entry.index} 已保存 · ${formatSize(bytes)}")
+        if (enqueueVad && options.autoVadOnRecord) {
             VadJobQueue.enqueue(
                 VadJob(
                     sessionDir = dir,
@@ -122,5 +183,27 @@ class SessionRecorder(
             )
         }
         currentSegmentFile = null
+    }
+
+    private fun maybeFlushManifest() {
+        val now = System.currentTimeMillis()
+        if (now - lastManifestFlushMs < 2000L) return
+        flushManifestNow()
+    }
+
+    private fun flushManifestNow() {
+        val dir = sessionDir ?: return
+        val m = manifest ?: return
+        lastManifestFlushMs = System.currentTimeMillis()
+        m.recordingActive = true
+        m.openSegmentIndex = currentSegmentIndex
+        m.openSegmentBytes = currentSegmentFile?.takeIf { it.exists() }?.length() ?: 0L
+        SessionManifestIO.write(dir, m)
+    }
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+        bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
+        else -> "$bytes B"
     }
 }

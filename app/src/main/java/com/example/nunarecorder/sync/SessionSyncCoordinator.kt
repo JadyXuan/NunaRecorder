@@ -118,10 +118,8 @@ object SessionSyncCoordinator {
             httpClient,
             baseUrl,
             settings.userId.ifBlank { "mock-user-001" },
-            settings.mac.ifBlank { "AA:BB:CC:DD:EE:FF" }
+            resolveDeviceMac(manifest)
         )
-
-        update(dir.absolutePath, entry.displayName, 0.05f, "登记上传清单…", "syncing")
 
         val commit = uploader.tryV1Sync(
             dir,
@@ -203,7 +201,7 @@ object SessionSyncCoordinator {
             httpClient,
             baseUrl,
             settings.userId.ifBlank { "mock-user-001" },
-            settings.mac.ifBlank { "AA:BB:CC:DD:EE:FF" }
+            resolveDeviceMac(null, entry.opusFile)
         )
         var okCount = 0
         files.forEachIndexed { i, f ->
@@ -233,6 +231,15 @@ object SessionSyncCoordinator {
 
     internal fun log(msg: String) {
         onLog?.invoke(msg)
+    }
+
+    /** 优先 manifest.device_address；旧目录名若为 MAC 格式则解析 */
+    private fun resolveDeviceMac(manifest: SessionManifest?, legacyFile: File? = null): String {
+        manifest?.deviceAddress?.takeIf { it.isNotBlank() }?.let { return it }
+        manifest?.sessionId?.let { SessionPaths.macFromSessionDirName(it) }?.let { return it }
+        legacyFile?.nameWithoutExtension?.let { SessionPaths.macFromSessionDirName(it) }
+            ?.let { return it }
+        return "unknown"
     }
 
     fun clearDoneState() {

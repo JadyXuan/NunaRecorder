@@ -23,6 +23,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -45,6 +46,7 @@ import java.util.Locale
 @Composable
 fun RecordingItem(
     entry: RecordingEntry,
+    onCopyPath: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
     onUpload: () -> Unit,
@@ -55,6 +57,9 @@ fun RecordingItem(
     isSyncing: Boolean = false,
     syncProgress: Float? = null,
     syncMessage: String? = null,
+    isLiveRecording: Boolean = false,
+    liveTotalBytes: Long? = null,
+    liveSegmentCount: Int? = null,
     modifier: Modifier = Modifier
 ) {
     val subtitle = when (entry) {
@@ -62,7 +67,18 @@ fun RecordingItem(
             val m = entry.manifest
             val date = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
                 .format(Date(m.startedAtMs))
-            "$date · ${m.segments.size} 段 · VAD ${m.vad.speechSegments}/${m.segments.size} 有人声"
+            if (isLiveRecording) {
+                val bytes = liveTotalBytes ?: m.openSegmentBytes
+                val segs = liveSegmentCount ?: m.segments.size
+                "$date · 录制中 · $segs 段 · ${formatSize(bytes)}"
+            } else {
+                val vadLabel = when (m.vad.status) {
+                    "disabled" -> "未做 VAD"
+                    "complete" -> "VAD ${m.vad.speechSegments}/${m.segments.size} 有人声"
+                    else -> "VAD ${m.vad.status}"
+                }
+                "$date · ${m.segments.size} 段 · $vadLabel"
+            }
         }
         is RecordingEntry.LegacyOpus -> {
             val date = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
@@ -75,31 +91,36 @@ fun RecordingItem(
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isLiveRecording) {
+                NunaSuccess.copy(alpha = 0.06f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .then(
-                        if (onOpenDetail != null) {
-                            Modifier.clickable { onOpenDetail() }
-                        } else Modifier
-                    ),
+                    .clickable { onCopyPath() },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(RoundedCornerShape(9.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)),
+                        .background(
+                            if (isLiveRecording) NunaSuccess.copy(alpha = 0.15f)
+                            else MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         Icons.Outlined.List,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = if (isLiveRecording) NunaSuccess else MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -114,27 +135,43 @@ fun RecordingItem(
                     Text(
                         subtitle,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        color = if (isLiveRecording) NunaSuccess
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Text(
+                        "点击复制路径",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                     )
                 }
                 Spacer(Modifier.width(6.dp))
-                if (entry.let { it is RecordingEntry.Session && it.hasContext || it is RecordingEntry.LegacyOpus && it.hasContext }) {
+                if (isLiveRecording) {
+                    ModalBadge("录制中", NunaSuccess)
+                    Spacer(Modifier.width(4.dp))
+                }
+                if (entry.let {
+                        it is RecordingEntry.Session && it.hasContext ||
+                            it is RecordingEntry.LegacyOpus && it.hasContext
+                    }
+                ) {
                     ModalBadge("上下文", NunaSuccess)
                     Spacer(Modifier.width(4.dp))
                 }
                 when {
                     isSyncing -> {
-                        Spacer(Modifier.width(4.dp))
                         ModalBadge("同步中", MaterialTheme.colorScheme.primary)
                     }
                     syncStatus != null -> {
-                        Spacer(Modifier.width(4.dp))
                         SyncBadge(syncStatus.status, syncStatus.summary)
                     }
                 }
                 when (entry) {
                     is RecordingEntry.Session -> {
-                        ModalBadge("分段", MaterialTheme.colorScheme.primary)
+                        if (!isLiveRecording && entry.manifest.segments.isNotEmpty()) {
+                            Spacer(Modifier.width(4.dp))
+                            ModalBadge("分段", MaterialTheme.colorScheme.primary)
+                        }
                         if (entry.manifest.vad.status == "complete") {
                             Spacer(Modifier.width(4.dp))
                             ModalBadge("VAD", MaterialTheme.colorScheme.secondary)
@@ -146,6 +183,14 @@ fun RecordingItem(
                 }
             }
 
+            if (isLiveRecording) {
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NunaSuccess
+                )
+            }
+
             if (onMigrate != null) {
                 Spacer(Modifier.height(6.dp))
                 OutlinedButton(
@@ -155,7 +200,7 @@ fun RecordingItem(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        if (migrateEnabled) "转为新格式（分段 + VAD）" else "迁移进行中…",
+                        if (migrateEnabled) "后处理（切片 / VAD）" else "处理进行中…",
                         fontSize = 12.sp
                     )
                 }
@@ -168,7 +213,10 @@ fun RecordingItem(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("查看 VAD 预标注", fontSize = 12.sp)
+                    Text(
+                        if (isLiveRecording) "查看实时进度" else "查看详情 / VAD",
+                        fontSize = 12.sp
+                    )
                 }
             }
 
@@ -183,7 +231,7 @@ fun RecordingItem(
 
             if (syncProgress != null) {
                 Spacer(Modifier.height(6.dp))
-                androidx.compose.material3.LinearProgressIndicator(
+                LinearProgressIndicator(
                     progress = { syncProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -218,6 +266,12 @@ fun RecordingItem(
             }
         }
     }
+}
+
+private fun formatSize(bytes: Long): String = when {
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable

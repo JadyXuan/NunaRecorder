@@ -8,6 +8,7 @@ import java.io.File
 sealed class RecordingEntry {
     abstract val displayName: String
     abstract val sortKey: Long
+    abstract val localPath: String
 
     data class Session(
         val dir: File,
@@ -15,6 +16,8 @@ sealed class RecordingEntry {
     ) : RecordingEntry() {
         override val displayName: String = dir.name
         override val sortKey: Long = manifest.startedAtMs
+        override val localPath: String = dir.absolutePath
+        val isRecordingActive: Boolean get() = manifest.recordingActive
         val hasContext: Boolean get() = SessionPaths.contextFile(dir).exists()
         val vadComplete: Boolean get() = manifest.vad.status == "complete"
         val speechSegments: Int get() = manifest.vad.speechSegments
@@ -29,6 +32,7 @@ sealed class RecordingEntry {
     ) : RecordingEntry() {
         override val displayName: String = opusFile.name
         override val sortKey: Long = opusFile.lastModified()
+        override val localPath: String = opusFile.absolutePath
         val hasContext: Boolean get() = File(
             opusFile.parentFile,
             "${opusFile.nameWithoutExtension}${SessionPaths.LEGACY_BIN_SUFFIX}"

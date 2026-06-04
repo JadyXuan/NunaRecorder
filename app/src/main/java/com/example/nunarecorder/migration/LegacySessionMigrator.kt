@@ -6,6 +6,7 @@ import com.example.nunarecorder.session.SessionManifestIO
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.session.VadSummary
 import android.util.Log
+import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.vad.VadJobQueue
 import com.example.nunarecorder.vad.VadResumeHelper
 import java.io.File
@@ -19,7 +20,6 @@ object LegacySessionMigrator {
 
     private const val TAG = "LegacySessionMigrator"
     private const val FRAME_BYTES = 80
-    private const val FRAMES_PER_SEGMENT = 3000 // 60s @ 20ms/frame
 
     enum class ProgressPhase { SPLITTING, VAD_ONLY, FINISHING }
 
@@ -31,9 +31,11 @@ object LegacySessionMigrator {
 
     fun migrate(
         legacyOpus: File,
+        options: MigrateOptions = MigrateOptions(),
         onLog: (String) -> Unit = {},
         onProgress: (phase: ProgressPhase, current: Int, total: Int) -> Unit = { _, _, _ -> }
     ): Result {
+        require(options.doSplit || options.doVad) { "Need at least split or VAD" }
         require(legacyOpus.isFile && legacyOpus.name.endsWith(SessionPaths.LEGACY_OPUS_SUFFIX, ignoreCase = true)) {
             "Not a legacy opus file"
         }
@@ -44,10 +46,13 @@ object LegacySessionMigrator {
         val devicePart = base.removePrefix("nuna_").substringBeforeLast("_")
         val sessionDir = File(legacyOpus.parentFile, base)
 
-        // 已有完整迁移结果：仅续传未完成的 VAD，不删文件夹、不重新切分
+        // 已有完整迁移结果：仅续传未完成的 VAD
         if (sessionDir.exists() && VadResumeHelper.hasValidManifest(sessionDir)) {
             val manifest = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
             if (manifest.sourceOpus == legacyOpus.name) {
+                if (!options.doVad) {
+                    return Result(sessionDir, manifest.segments.size, "会话已存在，未选择 VAD")
+                }
                 if (VadResumeHelper.isVadComplete(sessionDir)) {
                     onLog("已迁移且 VAD 已完成: ${sessionDir.name}")
                     onProgress(ProgressPhase.VAD_ONLY, 1, 1)
@@ -59,6 +64,10 @@ object LegacySessionMigrator {
                 onProgress(ProgressPhase.VAD_ONLY, 1, 1)
                 return Result(sessionDir, manifest.segments.size, "续传 VAD: $n 段待分析")
             }
+        }
+
+        if (!options.doSplit && options.doVad) {
+            throw IllegalArgumentException("无法仅 VAD：需先切片或已有会话目录")
         }
 
         // 无 manifest 的半成品目录（切分中断）或来源不一致：删掉重做
@@ -80,32 +89,44 @@ object LegacySessionMigrator {
         }
 
         Log.d(TAG, "split start: ${legacyOpus.name} bytes=${legacyOpus.length()}")
-        val segments = splitOpusIntoSegments(legacyOpus, sessionDir, onLog, onProgress)
+        val segmentDurationMs = options.segmentDurationSec.coerceIn(10, 600) * 1000L
+        val segments = splitOpusIntoSegments(
+            legacyOpus, sessionDir, segmentDurationMs, onLog, onProgress
+        )
         Log.d(TAG, "split done: ${segments.size} segments")
         onProgress(ProgressPhase.FINISHING, 1, 1)
+        val mac = SessionPaths.macFromSessionDirName(sessionDir.name)
         val manifest = SessionManifest(
             sessionId = sessionDir.name,
             deviceName = devicePart,
-            deviceAddress = null,
+            deviceAddress = mac,
             startedAtMs = startedAtMs,
             endedAtMs = startedAtMs + segments.sumOf { it.durationMs },
+            segmentDurationMs = segmentDurationMs,
             segments = segments.toMutableList(),
-            vad = VadSummary(status = "running"),
+            vad = VadSummary(
+                status = if (options.doVad) "running" else "disabled"
+            ),
             legacy = true,
             sourceOpus = legacyOpus.name
         )
         SessionManifestIO.write(sessionDir, manifest)
-        onLog("Migrated ${segments.size} segments to ${sessionDir.name}")
-        VadJobQueue.enqueueSessionSegments(sessionDir)
-        return Result(sessionDir, segments.size, "OK: ${segments.size} segments, VAD queued")
+        onLog("已切片 ${segments.size} 段 → ${sessionDir.name}")
+        if (options.doVad) {
+            VadJobQueue.enqueueSessionSegments(sessionDir)
+            return Result(sessionDir, segments.size, "OK: ${segments.size} 段，VAD 已入队")
+        }
+        return Result(sessionDir, segments.size, "OK: ${segments.size} 段（未执行 VAD）")
     }
 
     private fun splitOpusIntoSegments(
         legacyOpus: File,
         sessionDir: File,
+        segmentDurationMs: Long,
         onLog: (String) -> Unit,
         onProgress: (phase: ProgressPhase, current: Int, total: Int) -> Unit
     ): List<AudioSegmentEntry> {
+        val framesPerSegment = (segmentDurationMs / 20).toInt().coerceAtLeast(1)
         val totalBytes = legacyOpus.length()
         val totalFrames = (totalBytes / FRAME_BYTES).toInt()
         if (totalFrames == 0) throw IllegalArgumentException("Opus file empty")
@@ -124,7 +145,7 @@ object LegacySessionMigrator {
                 val rel = SessionPaths.segmentRelativePath(segIndex)
                 out = FileOutputStream(File(sessionDir, rel))
                 segBytes = 0
-                segStartMs = segIndex * SessionPaths.SEGMENT_DURATION_MS
+                segStartMs = segIndex * segmentDurationMs
                 framesInSeg = 0
             }
 
@@ -161,7 +182,7 @@ object LegacySessionMigrator {
                     lastReportedPercent = pct
                     onProgress(ProgressPhase.SPLITTING, f, totalFrames)
                 }
-                if (framesInSeg >= FRAMES_PER_SEGMENT) {
+                if (framesInSeg >= framesPerSegment) {
                     closeSeg()
                     openSeg()
                 }

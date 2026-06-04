@@ -1,6 +1,7 @@
 package com.example.nunarecorder.migration
 
 import android.content.Context
+import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.service.MigrationService
 import com.example.nunarecorder.util.BatteryOptimizationHelper
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,10 +39,14 @@ object MigrationCoordinator {
         return s.opusPath == opusPath && s.phase !in setOf(Phase.DONE, Phase.ERROR)
     }
 
-    fun start(context: Context, legacyOpus: File) {
+    fun start(context: Context, legacyOpus: File, options: MigrateOptions = MigrateOptions()) {
         val path = legacyOpus.absolutePath
         if (isActiveFor(path)) {
             log("迁移已在进行中: ${legacyOpus.name}")
+            return
+        }
+        if (!options.doSplit && !options.doVad) {
+            log("请至少选择「切片」或「VAD」之一")
             return
         }
         _state.value = State(
@@ -56,7 +61,7 @@ object MigrationCoordinator {
             log("提示：请在下一步允许「忽略电池优化」，否则息屏可能中断迁移")
             BatteryOptimizationHelper.requestIgnoreOptimizations(context)
         }
-        MigrationService.enqueue(app, path)
+        MigrationService.enqueue(app, path, options)
     }
 
     internal fun updateProgress(

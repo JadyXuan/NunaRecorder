@@ -23,14 +23,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -40,9 +40,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,10 +61,9 @@ import com.example.nunarecorder.ui.theme.NunaSuccess
 @Composable
 fun MainScreen(
     logText: String,
-    targetName: String,
-    onTargetNameChange: (String) -> Unit,
     deviceList: List<ScannedDevice>,
     pairedDevices: List<PairedDevice>,
+    selectedDeviceAddress: String?,
     connectionStatus: String,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
@@ -72,16 +71,16 @@ fun MainScreen(
     onConnectClick: () -> Unit,
     onStartRecordingClick: () -> Unit,
     onStopRecordingClick: () -> Unit,
-    onHandshakeClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val logScrollState = rememberScrollState()
-    val isConnected = connectionStatus.contains("connected", ignoreCase = true) &&
-            !connectionStatus.contains("not", ignoreCase = true) &&
-            !connectionStatus.contains("dis", ignoreCase = true)
-    val isRecording = connectionStatus.contains("recording", ignoreCase = true)
+    val isConnected = connectionStatus.contains("已连接")
+    val isRecording = connectionStatus.contains("录制中")
 
-    // Only show nuna devices in the scanned list
+    LaunchedEffect(logText) {
+        logScrollState.animateScrollTo(logScrollState.maxValue)
+    }
+
     val nunaDevices = deviceList.filter {
         it.name?.contains("nuna", ignoreCase = true) == true
     }
@@ -92,137 +91,56 @@ fun MainScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-
-        // ── Connection status bar ──────────────────────────────────────────
         ConnectionStatusCard(
             status = connectionStatus,
             isConnected = isConnected,
             isRecording = isRecording
         )
 
-        // ── Scan + Target name row ─────────────────────────────────────────
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        FilledTonalButton(
+            onClick = onScanClick,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
         ) {
-            OutlinedTextField(
-                value = targetName,
-                onValueChange = onTargetNameChange,
-                label = { Text("设备名称过滤") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
-            )
-            FilledTonalButton(
-                onClick = onScanClick,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.height(52.dp)
-            ) {
-                Text("扫描", fontWeight = FontWeight.Medium)
-            }
+            Text("扫描附近 Nuna 设备", fontWeight = FontWeight.Medium)
         }
 
-        // ── Scanned nuna devices ───────────────────────────────────────────
         SectionLabel("附近的 Nuna 设备")
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(if (nunaDevices.isEmpty()) 52.dp else (nunaDevices.size * 48).coerceAtMost(144).dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-        ) {
-            if (nunaDevices.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "（未发现 Nuna 设备）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                    )
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(nunaDevices) { item ->
-                        DeviceRow(
-                            name = item.name ?: "(no name)",
-                            address = item.address,
-                            onClick = { onDeviceClick(item) }
-                        )
-                        if (nunaDevices.last() != item) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                thickness = 0.5.dp
-                            )
-                        }
-                    }
-                }
+        DeviceListCard(
+            emptyText = "（未发现 Nuna 设备，请先扫描）",
+            items = nunaDevices.map { Pair(it.name ?: "(no name)", it.address) },
+            selectedAddress = selectedDeviceAddress,
+            onItemClick = { addr ->
+                nunaDevices.find { it.address == addr }?.let { onDeviceClick(it) }
             }
-        }
+        )
 
-        // ── Paired devices ─────────────────────────────────────────────────
         SectionLabel("已配对设备")
-        Card(
+        DeviceListCard(
+            emptyText = "（暂无配对设备）",
+            items = pairedDevices
+                .sortedByDescending { it.lastConnectedTime }
+                .map { Pair(it.name ?: "(no name)", it.address) },
+            selectedAddress = selectedDeviceAddress,
+            onItemClick = { addr ->
+                pairedDevices.find { it.address == addr }?.let { onPairedDeviceClick(it) }
+            }
+        )
+
+        ElevatedButton(
+            onClick = onConnectClick,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (pairedDevices.isEmpty()) 52.dp else (pairedDevices.size * 48).coerceAtMost(120).dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                .height(48.dp),
+            shape = RoundedCornerShape(10.dp),
+            enabled = selectedDeviceAddress != null
         ) {
-            if (pairedDevices.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "（暂无配对设备）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                    )
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    val sorted = pairedDevices.sortedByDescending { it.lastConnectedTime }
-                    items(sorted) { pd ->
-                        DeviceRow(
-                            name = pd.name ?: "(no name)",
-                            address = pd.address,
-                            onClick = { onPairedDeviceClick(pd) }
-                        )
-                        if (sorted.last() != pd) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                thickness = 0.5.dp
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Action buttons ─────────────────────────────────────────────────
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            ElevatedButton(
-                onClick = onConnectClick,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text("连接 + 握手", fontWeight = FontWeight.Medium, maxLines = 1)
-            }
-            OutlinedButton(
-                onClick = onHandshakeClick,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text("重新握手", fontWeight = FontWeight.Medium, maxLines = 1)
-            }
+            Text(
+                if (selectedDeviceAddress != null) "连接 + 握手" else "请先在上方选择设备",
+                fontWeight = FontWeight.SemiBold
+            )
         }
 
         Row(
@@ -238,15 +156,12 @@ fun MainScreen(
                 colors = ButtonDefaults.elevatedButtonColors(
                     containerColor = NunaSuccess,
                     contentColor = Color.White
-                )
+                ),
+                enabled = isConnected && !isRecording
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
+                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("开始录制", fontWeight = FontWeight.Medium, maxLines = 1)
+                Text("开始录制", fontWeight = FontWeight.Medium)
             }
             OutlinedButton(
                 onClick = onStopRecordingClick,
@@ -259,33 +174,27 @@ fun MainScreen(
                 ),
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
-                )
+                ),
+                enabled = isRecording
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.Close,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
+                Icon(Icons.Outlined.Close, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("停止录制", fontWeight = FontWeight.Medium, maxLines = 1)
+                Text("停止录制", fontWeight = FontWeight.Medium)
             }
         }
 
-        // ── Log ────────────────────────────────────────────────────────────
         SectionLabel("日志")
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
             shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            ),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
         ) {
             SelectionContainer(modifier = Modifier.fillMaxSize()) {
                 Text(
-                    text = logText,
+                    text = logText.ifEmpty { "（暂无日志）" },
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -300,9 +209,50 @@ fun MainScreen(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sub-composables
-// ─────────────────────────────────────────────────────────────────────────────
+@Composable
+private fun DeviceListCard(
+    emptyText: String,
+    items: List<Pair<String, String>>,
+    selectedAddress: String?,
+    onItemClick: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(if (items.isEmpty()) 52.dp else (items.size * 52).coerceAtMost(156).dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    emptyText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                )
+            }
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(items, key = { it.second }) { (name, address) ->
+                    DeviceRow(
+                        name = name,
+                        address = address,
+                        selected = address == selectedAddress,
+                        onClick = { onItemClick(address) }
+                    )
+                    if (items.last().second != address) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                            thickness = 0.5.dp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun SectionLabel(text: String) {
@@ -316,27 +266,55 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun DeviceRow(name: String, address: String, onClick: () -> Unit) {
+private fun DeviceRow(
+    name: String,
+    address: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val borderColor = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+    val bgColor = if (selected) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+    } else {
+        Color.Transparent
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .border(
+                width = if (selected) 2.dp else 0.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(8.dp)
+            )
             .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(
-            text = name,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = address,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = address,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+            )
+        }
+        if (selected) {
+            Text(
+                "已选",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
     }
 }
 
@@ -380,7 +358,7 @@ private fun ConnectionStatusCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isConnected)
+            containerColor = if (isConnected || isRecording)
                 NunaSuccess.copy(alpha = 0.08f)
             else
                 MaterialTheme.colorScheme.surface
@@ -393,9 +371,8 @@ private fun ConnectionStatusCard(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Ripple dot
             Box(contentAlignment = Alignment.Center) {
-                if (isConnected) {
+                if (isConnected || isRecording) {
                     Box(
                         modifier = Modifier
                             .size(14.dp)
@@ -415,10 +392,15 @@ private fun ConnectionStatusCard(
             Spacer(Modifier.width(12.dp))
             Column {
                 Text(
-                    text = if (isConnected) "设备已连接" else "未连接",
+                    text = when {
+                        isRecording -> "正在录制"
+                        isConnected -> "设备已连接"
+                        else -> "未连接"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isConnected) NunaSuccess else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    color = if (isConnected || isRecording) NunaSuccess
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Text(
                     text = status,

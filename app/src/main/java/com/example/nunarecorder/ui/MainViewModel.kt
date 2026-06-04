@@ -3,37 +3,37 @@ package com.example.nunarecorder.ui
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
+import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.data.UserSettings
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 主界面 UI 状态，与 BLE/录音逻辑解耦。
- * 由 MainActivity 在 BLE 回调和用户操作时更新。
  */
 class MainViewModel : ViewModel() {
 
     companion object {
-        const val DEFAULT_TARGET_NAME = "nuna device_01AF"
+        private const val MAX_LOG_LINES = 120
         private const val WEARABLE_DEBUG_MAX_LINES = 250
     }
 
-    val logText = mutableStateOf("Log...\n")
-    val targetName = mutableStateOf(DEFAULT_TARGET_NAME)
+    val logText = mutableStateOf("")
     val deviceList = mutableStateListOf<ScannedDevice>()
     val pairedDevices = mutableStateListOf<PairedDevice>()
-    val connectionStatus = mutableStateOf("Not connected")
+    val connectionStatus = mutableStateOf("未连接")
     val userSettings = mutableStateOf(UserSettings())
+    val selectedDeviceAddress = mutableStateOf<String?>(null)
+    /** 正在录制的会话目录绝对路径（供录音列表实时刷新） */
+    val activeRecordingPath = mutableStateOf<String?>(null)
 
-    /**
-     * Wearable 调试页专用日志（与 appendLog / NunaRecorder 主日志分离）。
-     * 可随时整段删除 DEBUG_WEARABLE 相关代码。
-     */
     val wearableDebugLogLines = mutableStateListOf<String>()
 
-    /** 须在主线程调用，以便 Compose 能订阅 mutableStateListOf 变化 */
     fun appendWearableDebugLog(msg: String) {
-        val line = "${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())} $msg"
+        val line = "${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())} $msg"
         wearableDebugLogLines.add(line)
         while (wearableDebugLogLines.size > WEARABLE_DEBUG_MAX_LINES) {
             wearableDebugLogLines.removeAt(0)
@@ -44,16 +44,29 @@ class MainViewModel : ViewModel() {
         wearableDebugLogLines.clear()
     }
 
-    fun appendLog(msg: String) {
-        logText.value = logText.value + msg + "\n"
-    }
-
-    fun setTargetName(name: String) {
-        targetName.value = name
+    fun appendLog(msg: String, level: LogLevel = LogLevel.INFO) {
+        if (!userSettings.value.logLevel.allows(level)) return
+        val prefix = when (level) {
+            LogLevel.INFO -> ""
+            LogLevel.DEBUG -> "[调试] "
+        }
+        val line = "${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())} $prefix$msg"
+        val existing = logText.value
+        val combined = if (existing.isEmpty()) line else "$existing\n$line"
+        val lines = combined.split('\n')
+        logText.value = if (lines.size > MAX_LOG_LINES) {
+            lines.takeLast(MAX_LOG_LINES).joinToString("\n")
+        } else {
+            combined
+        }
     }
 
     fun setConnectionStatus(status: String) {
         connectionStatus.value = status
+    }
+
+    fun selectDevice(address: String?) {
+        selectedDeviceAddress.value = address
     }
 
     fun clearDeviceList() {
@@ -73,5 +86,9 @@ class MainViewModel : ViewModel() {
 
     fun setUserSettings(newSettings: UserSettings) {
         userSettings.value = newSettings
+    }
+
+    fun setActiveRecordingPath(path: String?) {
+        activeRecordingPath.value = path
     }
 }
