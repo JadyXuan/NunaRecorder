@@ -52,6 +52,7 @@ import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.ui.components.RecordingItem
+import com.example.nunarecorder.ui.LiveRecordingUiStats
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -68,6 +69,7 @@ fun RecordingsScreen(
     onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
     onMigrateLegacy: (File, MigrateOptions) -> Unit,
     activeRecordingPath: String?,
+    liveRecordingStats: LiveRecordingUiStats? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -102,7 +104,17 @@ fun RecordingsScreen(
     LaunchedEffect(activeRecordingPath) {
         while (activeRecordingPath != null) {
             refreshList()
-            delay(1500)
+            delay(1000)
+        }
+    }
+
+    LaunchedEffect(activeRecordingPath, entries) {
+        detailSession?.let { current ->
+            if (activeRecordingPath == current.dir.absolutePath) {
+                entries.filterIsInstance<RecordingEntry.Session>()
+                    .find { it.dir.absolutePath == current.dir.absolutePath }
+                    ?.let { detailSession = it }
+            }
         }
     }
 
@@ -139,6 +151,7 @@ fun RecordingsScreen(
         RecordingDetailScreen(
             session = session,
             isLiveRecording = session.dir.absolutePath == activeRecordingPath,
+            liveStats = liveRecordingStats?.takeIf { it.sessionPath == session.dir.absolutePath },
             onBack = {
                 onStopPlayback()
                 detailSession = null
@@ -339,11 +352,19 @@ fun RecordingsScreen(
                         val isLive = entry is RecordingEntry.Session &&
                             entry.dir.absolutePath == activeRecordingPath
                         val liveBytes = if (isLive && entry is RecordingEntry.Session) {
-                            entry.manifest.segments.sumOf { it.bytes } + entry.manifest.openSegmentBytes
+                            liveRecordingStats
+                                ?.takeIf { it.sessionPath == entry.dir.absolutePath }
+                                ?.totalBytes
+                                ?: (entry.manifest.segments.sumOf { it.bytes } + entry.manifest.openSegmentBytes)
                         } else null
                         val liveSegs = if (isLive && entry is RecordingEntry.Session) {
-                            entry.manifest.segments.size +
-                                if (entry.manifest.openSegmentBytes > 0) 1 else 0
+                            val stats = liveRecordingStats?.takeIf { it.sessionPath == entry.dir.absolutePath }
+                            if (stats != null) {
+                                stats.closedSegmentCount + if (stats.openSegmentBytes > 0 || isLive) 1 else 0
+                            } else {
+                                entry.manifest.segments.size +
+                                    if (entry.manifest.recordingActive || entry.manifest.openSegmentBytes > 0) 1 else 0
+                            }
                         } else null
 
                         val syncing = syncState?.targetKey == entryKey &&

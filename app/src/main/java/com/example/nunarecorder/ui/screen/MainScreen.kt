@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
+import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.theme.NunaSuccess
 
 @Composable
@@ -65,6 +66,7 @@ fun MainScreen(
     pairedDevices: List<PairedDevice>,
     selectedDeviceAddress: String?,
     connectionStatus: String,
+    liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
     onScanClick: () -> Unit,
@@ -75,7 +77,7 @@ fun MainScreen(
 ) {
     val logScrollState = rememberScrollState()
     val isConnected = connectionStatus.contains("已连接")
-    val isRecording = connectionStatus.contains("录制中")
+    val isRecording = connectionStatus.contains("录制中") || liveRecordingStats != null
 
     LaunchedEffect(logText) {
         logScrollState.animateScrollTo(logScrollState.maxValue)
@@ -94,7 +96,8 @@ fun MainScreen(
         ConnectionStatusCard(
             status = connectionStatus,
             isConnected = isConnected,
-            isRecording = isRecording
+            isRecording = isRecording,
+            liveStats = liveRecordingStats
         )
 
         FilledTonalButton(
@@ -322,7 +325,8 @@ private fun DeviceRow(
 private fun ConnectionStatusCard(
     status: String,
     isConnected: Boolean,
-    isRecording: Boolean
+    isRecording: Boolean,
+    liveStats: LiveRecordingUiStats? = null
 ) {
     val dotColor by animateColorAsState(
         targetValue = when {
@@ -407,6 +411,19 @@ private fun ConnectionStatusCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                 )
+                if (liveStats != null) {
+                    val segHint = if (liveStats.closedSegmentCount > 0) {
+                        "${liveStats.closedSegmentCount} 段已封口 · "
+                    } else {
+                        ""
+                    }
+                    Text(
+                        text = "${liveStats.formatTotalBytes()} · ${segHint}${liveStats.blePacketCount} 包",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = NunaSuccess
+                    )
+                }
             }
         }
     }

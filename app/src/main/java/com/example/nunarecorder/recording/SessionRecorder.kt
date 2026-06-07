@@ -187,7 +187,7 @@ class SessionRecorder(
 
     private fun maybeFlushManifest() {
         val now = System.currentTimeMillis()
-        if (now - lastManifestFlushMs < 2000L) return
+        if (now - lastManifestFlushMs < 1000L) return
         flushManifestNow()
     }
 

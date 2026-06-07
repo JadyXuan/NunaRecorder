@@ -53,6 +53,7 @@ import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.ui.components.BottomNavBar
 import com.example.nunarecorder.ui.screen.MainScreen
 import com.example.nunarecorder.ui.MainViewModel
+import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.screen.RecordingsScreen
 import com.example.nunarecorder.ui.screen.SettingsScreen
 import com.example.wearable.TranscriptionProvider
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
     // 统计接收到的音频数据
     private var totalPacketCount = 0L
     private var totalBytesCount = 0L
+    private var lastStatsUiUpdateMs = 0L
 
     private fun appendLog(msg: String, level: LogLevel = LogLevel.INFO) {
         Log.d(TAG, msg)
@@ -171,6 +173,13 @@ class MainActivity : ComponentActivity() {
         SessionSyncCoordinator.onLog = { appendLog(it) }
 
         setContent {
+            val logText by viewModel.logText
+            val selectedDeviceAddress by viewModel.selectedDeviceAddress
+            val connectionStatus by viewModel.connectionStatus
+            val activeRecordingPath by viewModel.activeRecordingPath
+            val liveRecordingStats by viewModel.liveRecordingStats
+            val userSettings by viewModel.userSettings
+
             NunaRecorderTheme {
                 // 0 设备 1 录音 2 设置（Wearable 调试页已从导航移除，代码见 DEBUG_WEARABLE 注释块）
                 var selectedTab by remember { mutableStateOf(0) }
@@ -194,11 +203,12 @@ class MainActivity : ComponentActivity() {
                     ) {
                         when (selectedTab) {
                             0 -> MainScreen(
-                                logText = viewModel.logText.value,
+                                logText = logText,
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,
-                                selectedDeviceAddress = viewModel.selectedDeviceAddress.value,
-                                connectionStatus = viewModel.connectionStatus.value,
+                                selectedDeviceAddress = selectedDeviceAddress,
+                                connectionStatus = connectionStatus,
+                                liveRecordingStats = liveRecordingStats,
                                 onDeviceClick = { scanned ->
                                     viewModel.selectDevice(scanned.address)
                                     appendLog("已选择: ${scanned.name ?: scanned.address}")
@@ -231,46 +241,38 @@ class MainActivity : ComponentActivity() {
                             onMigrateLegacy = { opus, options ->
                                 MigrationCoordinator.start(this@MainActivity, opus, options)
                             },
-                            activeRecordingPath = viewModel.activeRecordingPath.value,
+                            activeRecordingPath = activeRecordingPath,
+                            liveRecordingStats = liveRecordingStats,
                             modifier = Modifier.fillMaxSize()
                         )
                             2 -> SettingsScreen(
-                                userSettings = viewModel.userSettings.value,
+                                userSettings = userSettings,
                                 onUserIdChange = { newId ->
-                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(userId = newId))
+                                    viewModel.setUserSettings(userSettings.copy(userId = newId))
                                 },
                                 onServerHostChange = { newHost ->
-                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(serverHost = newHost))
+                                    viewModel.setUserSettings(userSettings.copy(serverHost = newHost))
                                 },
                                 onServerPortChange = { newPortStr ->
-                                    val port = newPortStr.toIntOrNull()
-                                        ?: viewModel.userSettings.value.serverPort
-                                    viewModel.setUserSettings(
-                                        viewModel.userSettings.value.copy(serverPort = port)
-                                    )
+                                    val port = newPortStr.toIntOrNull() ?: userSettings.serverPort
+                                    viewModel.setUserSettings(userSettings.copy(serverPort = port))
                                 },
                                 onLogLevelChange = { level ->
-                                    viewModel.setUserSettings(viewModel.userSettings.value.copy(logLevel = level))
+                                    viewModel.setUserSettings(userSettings.copy(logLevel = level))
                                 },
                                 onAutoVadChange = { enabled ->
-                                    viewModel.setUserSettings(
-                                        viewModel.userSettings.value.copy(autoVadOnRecord = enabled)
-                                    )
+                                    viewModel.setUserSettings(userSettings.copy(autoVadOnRecord = enabled))
                                 },
                                 onSegmentEnabledChange = { enabled ->
-                                    viewModel.setUserSettings(
-                                        viewModel.userSettings.value.copy(segmentEnabled = enabled)
-                                    )
+                                    viewModel.setUserSettings(userSettings.copy(segmentEnabled = enabled))
                                 },
                                 onSegmentDurationChange = { secStr ->
                                     val sec = secStr.toIntOrNull()?.coerceIn(10, 600)
-                                        ?: viewModel.userSettings.value.segmentDurationSec
-                                    viewModel.setUserSettings(
-                                        viewModel.userSettings.value.copy(segmentDurationSec = sec)
-                                    )
+                                        ?: userSettings.segmentDurationSec
+                                    viewModel.setUserSettings(userSettings.copy(segmentDurationSec = sec))
                                 },
                                 onSave = {
-                                    userSettingsStorage.save(viewModel.userSettings.value)
+                                    userSettingsStorage.save(userSettings)
                                     appendLog("设置已保存")
                                 },
                                 modifier = Modifier.fillMaxSize()
@@ -390,6 +392,26 @@ class MainActivity : ComponentActivity() {
         }
         appendDebug("启用 A003 音频通知…")
         enableNotifications(g, characteristic)
+    }
+
+    private fun updateLiveRecordingStatsUi() {
+        if (!recording) return
+        val now = System.currentTimeMillis()
+        if (now - lastStatsUiUpdateMs < 400L) return
+        lastStatsUiUpdateMs = now
+        val stats = sessionRecorder.liveStats() ?: return
+        viewModel.updateLiveRecordingStats(
+            LiveRecordingUiStats(
+                sessionPath = stats.sessionDir.absolutePath,
+                totalBytes = stats.totalBytes,
+                closedSegmentCount = stats.closedSegmentCount,
+                openSegmentBytes = stats.openSegmentBytes,
+                blePacketCount = totalPacketCount
+            )
+        )
+        viewModel.setConnectionStatus(
+            "录制中 · ${LiveRecordingUiStats.formatBytes(stats.totalBytes)} · $totalPacketCount 包"
+        )
     }
 
     private fun stopRecordingFlow() {
@@ -774,6 +796,7 @@ class MainActivity : ComponentActivity() {
             if (dir != null) {
                 com.example.nunarecorder.service.ContextDataService.start(this, dir)
                 viewModel.setActiveRecordingPath(dir.absolutePath)
+                updateLiveRecordingStatsUi()
                 val mode = buildString {
                     if (options.segmentEnabled) append("切片 ${options.segmentDurationMs / 1000}s")
                     else append("整段")
@@ -788,6 +811,7 @@ class MainActivity : ComponentActivity() {
 
     private fun writeToFile(data: ByteArray) {
         sessionRecorder.feed(data)
+        updateLiveRecordingStatsUi()
     }
 
     private fun shareRecordingEntry(entry: RecordingEntry, withContext: Boolean, withVad: Boolean) {

@@ -29,6 +29,8 @@ class MainViewModel : ViewModel() {
     val selectedDeviceAddress = mutableStateOf<String?>(null)
     /** 正在录制的会话目录绝对路径（供录音列表实时刷新） */
     val activeRecordingPath = mutableStateOf<String?>(null)
+    /** 内存中的实时统计（比 manifest 刷新更及时） */
+    val liveRecordingStats = mutableStateOf<LiveRecordingUiStats?>(null)
 
     val wearableDebugLogLines = mutableStateListOf<String>()
 
@@ -90,5 +92,12 @@ class MainViewModel : ViewModel() {
 
     fun setActiveRecordingPath(path: String?) {
         activeRecordingPath.value = path
+        if (path == null) {
+            liveRecordingStats.value = null
+        }
+    }
+
+    fun updateLiveRecordingStats(stats: LiveRecordingUiStats?) {
+        liveRecordingStats.value = stats
     }
 }
