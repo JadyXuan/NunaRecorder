@@ -79,17 +79,42 @@ class SessionSyncUploader(
             AudioMetaUtil.computeDurationMsForOpusFile(file)
         } else 0L
         val endTimeMs = startTimeMs + durationMs
+        return uploadAudioSegment(
+            file = file,
+            remoteName = file.name,
+            startTimeMs = startTimeMs,
+            endTimeMs = endTimeMs,
+            clientUploadId = null
+        )
+    }
+
+    /**
+     * 上传一个已经封口的音频切片。显式时间戳避免 seg_000.opus 依赖文件名推断；
+     * remoteName 必须跨会话唯一，clientUploadId 供服务端做幂等去重。
+     */
+    fun uploadAudioSegment(
+        file: File,
+        remoteName: String,
+        startTimeMs: Long,
+        endTimeMs: Long,
+        clientUploadId: String?
+    ): Boolean {
         val metadataJson = JSONObject().apply {
             put("userId", userId)
-            put("name", file.name)
+            put("name", remoteName)
             put("startTime", startTimeMs)
             put("endTime", endTimeMs)
             put("mac", deviceMac)
             put("size", file.length())
+            if (clientUploadId != null) put("clientUploadId", clientUploadId)
         }.toString()
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("file", file.name, file.asRequestBody("application/octet-stream".toMediaType()))
+            .addFormDataPart(
+                "file",
+                remoteName,
+                file.asRequestBody("application/octet-stream".toMediaType())
+            )
             .addFormDataPart(
                 "metadata",
                 "metadata.json",
@@ -98,6 +123,9 @@ class SessionSyncUploader(
             .build()
         val request = Request.Builder()
             .url("$baseUrl/thingx/api/file/upload/audio")
+            .apply {
+                if (clientUploadId != null) header("Idempotency-Key", clientUploadId)
+            }
             .post(body)
             .build()
         return try {

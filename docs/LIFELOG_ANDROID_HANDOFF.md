@@ -16,6 +16,14 @@ in `audio-rag/docs/LIFELOG_INTEGRATION_HANDOFF.md`.
 - Deduplicated local notifications for new pending prompts.
 - Notification tap opens the Lifelog destination.
 - Settings switches for Lifelog UI and background annotation polling.
+- Optional periodic upload of sealed Opus segments:
+  - disabled by default because it transfers private raw audio;
+  - Wi-Fi/unmetered network by default;
+  - battery-not-low constraint;
+  - uploads at most 12 segments per run;
+  - never reads the currently open segment;
+  - local path-to-SHA state plus a stable `Idempotency-Key`;
+  - exact manifest timestamps and a cross-session unique remote filename.
 - Versioned `/api/v1/*` endpoints with temporary fallback to the Mac prototype:
   - `/api/timeline`
   - `/api/pending`
@@ -88,20 +96,15 @@ Verified on 2026-07-28:
 
 ## Deliberately not implemented yet
 
-### Automatic periodic recording upload
+### Automatic upload scope
 
-The existing `SessionSyncCoordinator` uploads only after an explicit user
-action in the recordings UI. WorkManager added in this branch polls annotation
-queries; it does not scan and upload local recording sessions.
+V1 automatic upload sends sealed Opus audio only. It does not automatically
+upload context/GPS/VAD files. The existing manual session sync remains available
+for explicit full-session uploads.
 
-Automatic upload should be a separate task because it needs explicit policy:
-
-- Wi-Fi only versus any network;
-- charging only versus battery allowed;
-- minimum segment age;
-- storage and retry limits;
-- whether context/GPS/VAD files are included;
-- consent and raw-audio retention policy.
+The server should deduplicate using the `Idempotency-Key` header or the
+`metadata.clientUploadId` field. A worker crash after server acceptance but
+before local state persistence must not create a duplicate session.
 
 ### Production authentication
 

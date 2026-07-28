@@ -11,6 +11,7 @@ import android.os.Build
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.edit
 import com.example.nunarecorder.MainActivity
 import com.example.nunarecorder.R
 
@@ -20,7 +21,6 @@ object LifelogNotifications {
     private const val PREFS = "lifelog_notification_state"
 
     fun createChannel(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
@@ -73,9 +73,8 @@ object LifelogNotifications {
 
         NotificationManagerCompat.from(context).notify(first.eventId.toInt(), notification)
         fresh.forEach { notified += it.eventId.toString() }
-        prefs.edit().putStringSet(
-            "notified_ids",
-            notified.toList().takeLast(200).toSet()
-        ).apply()
+        prefs.edit {
+            putStringSet("notified_ids", notified.toList().takeLast(200).toSet())
+        }
     }
 }

@@ -5,6 +5,7 @@ import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.lifelog.LifelogNotifications
 import com.example.nunarecorder.lifelog.LifelogPollWorker
 import com.example.nunarecorder.service.ScreenOffKeepAlive
+import com.example.nunarecorder.sync.SessionAutoUploadWorker
 
 class NunaApplication : Application() {
     override fun onCreate() {
@@ -16,5 +17,6 @@ class NunaApplication : Application() {
             this,
             enabled = settings.lifelogEnabled && settings.annotationPollingEnabled
         )
+        SessionAutoUploadWorker.schedule(this, settings)
     }
 }

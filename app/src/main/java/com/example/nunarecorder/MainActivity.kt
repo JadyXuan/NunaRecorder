@@ -63,6 +63,7 @@ import com.example.nunarecorder.ui.screen.SettingsScreen
 import com.example.nunarecorder.lifelog.LifelogCoordinator
 import com.example.nunarecorder.lifelog.LifelogNotifications
 import com.example.nunarecorder.lifelog.LifelogPollWorker
+import com.example.nunarecorder.sync.SessionAutoUploadWorker
 import com.example.wearable.TranscriptionProvider
 import com.example.wearable.WearableConnectionConfig
 import com.example.wearable.impl.NunaWearableServiceImpl
@@ -305,6 +306,16 @@ class MainActivity : ComponentActivity() {
                                         userSettings.copy(annotationPollingEnabled = enabled)
                                     )
                                 },
+                                onAutoUploadChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(autoUploadEnabled = enabled)
+                                    )
+                                },
+                                onAutoUploadWifiOnlyChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(autoUploadWifiOnly = enabled)
+                                    )
+                                },
                                 onSave = {
                                     userSettingsStorage.save(userSettings)
                                     LifelogCoordinator.configure(httpClient, userSettings)
@@ -313,6 +324,7 @@ class MainActivity : ComponentActivity() {
                                         enabled = userSettings.lifelogEnabled &&
                                             userSettings.annotationPollingEnabled
                                     )
+                                    SessionAutoUploadWorker.schedule(this@MainActivity, userSettings)
                                     appendLog("设置已保存")
                                 },
                                 modifier = Modifier.fillMaxSize()

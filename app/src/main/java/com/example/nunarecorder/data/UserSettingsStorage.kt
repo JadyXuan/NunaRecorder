@@ -27,7 +27,9 @@ class UserSettingsStorage(context: Context) {
                 segmentEnabled = obj.optBoolean("segmentEnabled", true),
                 segmentDurationSec = obj.optInt("segmentDurationSec", 60).coerceIn(10, 600),
                 lifelogEnabled = obj.optBoolean("lifelogEnabled", true),
-                annotationPollingEnabled = obj.optBoolean("annotationPollingEnabled", true)
+                annotationPollingEnabled = obj.optBoolean("annotationPollingEnabled", true),
+                autoUploadEnabled = obj.optBoolean("autoUploadEnabled", false),
+                autoUploadWifiOnly = obj.optBoolean("autoUploadWifiOnly", true)
             )
         } catch (_: Exception) {
             UserSettings()
@@ -45,6 +47,8 @@ class UserSettingsStorage(context: Context) {
             put("segmentDurationSec", settings.segmentDurationSec)
             put("lifelogEnabled", settings.lifelogEnabled)
             put("annotationPollingEnabled", settings.annotationPollingEnabled)
+            put("autoUploadEnabled", settings.autoUploadEnabled)
+            put("autoUploadWifiOnly", settings.autoUploadWifiOnly)
         }
         sp.edit().putString(KEY_SETTINGS, obj.toString()).apply()
     }

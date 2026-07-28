@@ -39,6 +39,8 @@ fun SettingsScreen(
     onSegmentDurationChange: (String) -> Unit,
     onLifelogEnabledChange: (Boolean) -> Unit,
     onAnnotationPollingChange: (Boolean) -> Unit,
+    onAutoUploadChange: (Boolean) -> Unit,
+    onAutoUploadWifiOnlyChange: (Boolean) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -155,6 +157,22 @@ fun SettingsScreen(
             label = "后台检查待标注事件",
             subtitle = "联网时约每 15 分钟检查一次；不确定的事件可以跳过"
         )
+        Spacer(Modifier.height(8.dp))
+        SettingsCheckboxRow(
+            checked = userSettings.autoUploadEnabled,
+            onChecked = onAutoUploadChange,
+            label = "自动上传已完成的录音切片",
+            subtitle = "默认关闭；开启后会上传个人原始音频，请确认服务器可信"
+        )
+        if (userSettings.autoUploadEnabled) {
+            Spacer(Modifier.height(8.dp))
+            SettingsCheckboxRow(
+                checked = userSettings.autoUploadWifiOnly,
+                onChecked = onAutoUploadWifiOnlyChange,
+                label = "仅使用 Wi-Fi 自动上传",
+                subtitle = "避免消耗移动网络流量"
+            )
+        }
 
         Spacer(Modifier.height(20.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))

@@ -14,5 +14,9 @@ data class UserSettings(
     /** 是否从 lifelog 服务拉取活动时间轴与主动标注问题 */
     val lifelogEnabled: Boolean = true,
     /** 是否允许 WorkManager 在后台轮询待标注事件 */
-    val annotationPollingEnabled: Boolean = true
+    val annotationPollingEnabled: Boolean = true,
+    /** 是否自动上传已经封口的 Opus 分段。默认关闭，需用户明确开启。 */
+    val autoUploadEnabled: Boolean = false,
+    /** 自动上传是否仅使用非计费网络（通常为 Wi-Fi）。 */
+    val autoUploadWifiOnly: Boolean = true
 )
