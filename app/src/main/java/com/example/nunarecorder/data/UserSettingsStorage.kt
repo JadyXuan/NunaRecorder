@@ -25,7 +25,9 @@ class UserSettingsStorage(context: Context) {
                 } ?: LogLevel.INFO,
                 autoVadOnRecord = obj.optBoolean("autoVadOnRecord", true),
                 segmentEnabled = obj.optBoolean("segmentEnabled", true),
-                segmentDurationSec = obj.optInt("segmentDurationSec", 60).coerceIn(10, 600)
+                segmentDurationSec = obj.optInt("segmentDurationSec", 60).coerceIn(10, 600),
+                lifelogEnabled = obj.optBoolean("lifelogEnabled", true),
+                annotationPollingEnabled = obj.optBoolean("annotationPollingEnabled", true)
             )
         } catch (_: Exception) {
             UserSettings()
@@ -41,6 +43,8 @@ class UserSettingsStorage(context: Context) {
             put("autoVadOnRecord", settings.autoVadOnRecord)
             put("segmentEnabled", settings.segmentEnabled)
             put("segmentDurationSec", settings.segmentDurationSec)
+            put("lifelogEnabled", settings.lifelogEnabled)
+            put("annotationPollingEnabled", settings.annotationPollingEnabled)
         }
         sp.edit().putString(KEY_SETTINGS, obj.toString()).apply()
     }

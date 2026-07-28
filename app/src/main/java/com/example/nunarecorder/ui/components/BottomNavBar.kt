@@ -2,6 +2,7 @@ package com.example.nunarecorder.ui.components
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.DateRange
 import androidx.compose.material.icons.outlined.List
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -25,6 +26,7 @@ fun BottomNavBar(
     val tabs = listOf(
         TabItem(Icons.Outlined.LocationOn, "设备"),
         TabItem(Icons.Outlined.List, "录音"),
+        TabItem(Icons.Outlined.DateRange, "生活"),
         TabItem(Icons.Outlined.Settings, "设置")
     )
 

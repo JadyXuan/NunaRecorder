@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-28",
+  "taxonomy": [
+    {"id": "work", "name": "工作/学习"},
+    {"id": "meeting", "name": "会议/讨论"},
+    {"id": "other", "name": "其他/未知"}
+  ],
+  "segments": [
+    {
+      "segment_id": 101,
+      "t_start_ms": 1785200400000,
+      "t_end_ms": 1785200430000,
+      "pred_label": "meeting",
+      "pred_conf": 0.82,
+      "pred_source": "rag",
+      "label": null,
+      "asr_text": "我们先看一下今天的任务。",
+      "sound_events": [
+        {"name": "Speech", "prob": 0.91},
+        {"name": "Typing", "probability": 0.44}
+      ]
+    }
+  ]
+}

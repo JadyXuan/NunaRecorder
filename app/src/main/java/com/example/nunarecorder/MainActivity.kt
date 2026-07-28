@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -26,6 +27,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.example.nunarecorder.audio.SegmentPlaybackState
@@ -52,10 +55,14 @@ import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.ui.components.BottomNavBar
 import com.example.nunarecorder.ui.screen.MainScreen
+import com.example.nunarecorder.ui.screen.LifelogScreen
 import com.example.nunarecorder.ui.MainViewModel
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.screen.RecordingsScreen
 import com.example.nunarecorder.ui.screen.SettingsScreen
+import com.example.nunarecorder.lifelog.LifelogCoordinator
+import com.example.nunarecorder.lifelog.LifelogNotifications
+import com.example.nunarecorder.lifelog.LifelogPollWorker
 import com.example.wearable.TranscriptionProvider
 import com.example.wearable.WearableConnectionConfig
 import com.example.wearable.impl.NunaWearableServiceImpl
@@ -164,6 +171,11 @@ class MainActivity : ComponentActivity() {
         // 加载用户设置
         val initialSettings = userSettingsStorage.load()
         viewModel.setUserSettings(initialSettings)
+        LifelogCoordinator.configure(httpClient, initialSettings)
+        LifelogCoordinator.onLog = { appendLog(it) }
+        if (intent.getBooleanExtra(LifelogNotifications.EXTRA_OPEN_LIFELOG, false)) {
+            viewModel.selectTab(2)
+        }
 
         requestBlePermissions()
         VadJobQueue.start(this)
@@ -179,15 +191,19 @@ class MainActivity : ComponentActivity() {
             val activeRecordingPath by viewModel.activeRecordingPath
             val liveRecordingStats by viewModel.liveRecordingStats
             val userSettings by viewModel.userSettings
+            val selectedTab by viewModel.selectedTab
+            val lifelogState by LifelogCoordinator.state.collectAsState()
 
             NunaRecorderTheme {
-                // 0 设备 1 录音 2 设置（Wearable 调试页已从导航移除，代码见 DEBUG_WEARABLE 注释块）
-                var selectedTab by remember { mutableStateOf(0) }
+                // 0 设备 1 录音 2 生活 3 设置
                 var segmentPlayback by remember { mutableStateOf<SegmentPlaybackState?>(null) }
 
                 DisposableEffect(Unit) {
                     segmentPlayer.setOnStateChanged { segmentPlayback = it }
                     onDispose { segmentPlayer.stop() }
+                }
+                LaunchedEffect(selectedTab) {
+                    if (selectedTab == 2) LifelogCoordinator.refresh()
                 }
 
                 // 主内容在上、底栏在下，边界对齐，避免主界面盖住导航按钮
@@ -245,7 +261,17 @@ class MainActivity : ComponentActivity() {
                             liveRecordingStats = liveRecordingStats,
                             modifier = Modifier.fillMaxSize()
                         )
-                            2 -> SettingsScreen(
+                            2 -> LifelogScreen(
+                                state = lifelogState,
+                                onRefresh = { LifelogCoordinator.refresh() },
+                                onPreviousDay = { LifelogCoordinator.previousDay() },
+                                onNextDay = { LifelogCoordinator.nextDay() },
+                                onAnnotate = { prompt, action, label ->
+                                    LifelogCoordinator.annotate(prompt, action, label)
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            3 -> SettingsScreen(
                                 userSettings = userSettings,
                                 onUserIdChange = { newId ->
                                     viewModel.setUserSettings(userSettings.copy(userId = newId))
@@ -271,8 +297,22 @@ class MainActivity : ComponentActivity() {
                                         ?: userSettings.segmentDurationSec
                                     viewModel.setUserSettings(userSettings.copy(segmentDurationSec = sec))
                                 },
+                                onLifelogEnabledChange = { enabled ->
+                                    viewModel.setUserSettings(userSettings.copy(lifelogEnabled = enabled))
+                                },
+                                onAnnotationPollingChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(annotationPollingEnabled = enabled)
+                                    )
+                                },
                                 onSave = {
                                     userSettingsStorage.save(userSettings)
+                                    LifelogCoordinator.configure(httpClient, userSettings)
+                                    LifelogPollWorker.schedule(
+                                        this@MainActivity,
+                                        enabled = userSettings.lifelogEnabled &&
+                                            userSettings.annotationPollingEnabled
+                                    )
                                     appendLog("设置已保存")
                                 },
                                 modifier = Modifier.fillMaxSize()
@@ -281,11 +321,20 @@ class MainActivity : ComponentActivity() {
                     }
                     BottomNavBar(
                         selectedTab = selectedTab,
-                        onTabSelected = { selectedTab = it },
+                        onTabSelected = { viewModel.selectTab(it) },
                         modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(LifelogNotifications.EXTRA_OPEN_LIFELOG, false)) {
+            viewModel.selectTab(2)
+            LifelogCoordinator.refresh()
         }
     }
 

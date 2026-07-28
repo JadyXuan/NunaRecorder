@@ -26,6 +26,8 @@ class MainViewModel : ViewModel() {
     val pairedDevices = mutableStateListOf<PairedDevice>()
     val connectionStatus = mutableStateOf("未连接")
     val userSettings = mutableStateOf(UserSettings())
+    /** 0 设备、1 录音、2 生活、3 设置。放在 ViewModel 以支持通知 Intent 切页。 */
+    val selectedTab = mutableStateOf(0)
     val selectedDeviceAddress = mutableStateOf<String?>(null)
     /** 正在录制的会话目录绝对路径（供录音列表实时刷新） */
     val activeRecordingPath = mutableStateOf<String?>(null)
@@ -88,6 +90,10 @@ class MainViewModel : ViewModel() {
 
     fun setUserSettings(newSettings: UserSettings) {
         userSettings.value = newSettings
+    }
+
+    fun selectTab(index: Int) {
+        selectedTab.value = index.coerceIn(0, 3)
     }
 
     fun setActiveRecordingPath(path: String?) {

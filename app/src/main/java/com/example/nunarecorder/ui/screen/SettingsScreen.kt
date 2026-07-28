@@ -37,6 +37,8 @@ fun SettingsScreen(
     onAutoVadChange: (Boolean) -> Unit,
     onSegmentEnabledChange: (Boolean) -> Unit,
     onSegmentDurationChange: (String) -> Unit,
+    onLifelogEnabledChange: (Boolean) -> Unit,
+    onAnnotationPollingChange: (Boolean) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -132,6 +134,26 @@ fun SettingsScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
+        )
+
+        Spacer(Modifier.height(20.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        Spacer(Modifier.height(16.dp))
+
+        SettingsSectionLabel("生活记录")
+        Spacer(Modifier.height(8.dp))
+        SettingsCheckboxRow(
+            checked = userSettings.lifelogEnabled,
+            onChecked = onLifelogEnabledChange,
+            label = "显示活动时间轴与标注",
+            subtitle = "从同一服务器读取模型推断、日记和待确认事件"
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsCheckboxRow(
+            checked = userSettings.annotationPollingEnabled,
+            onChecked = onAnnotationPollingChange,
+            label = "后台检查待标注事件",
+            subtitle = "联网时约每 15 分钟检查一次；不确定的事件可以跳过"
         )
 
         Spacer(Modifier.height(20.dp))

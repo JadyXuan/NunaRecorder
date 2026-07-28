@@ -61,4 +61,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(libs.onnxruntime.android)
     implementation(libs.play.services.location)
+    implementation(libs.androidx.work.runtime.ktx)
+    testImplementation("org.json:json:20240303")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

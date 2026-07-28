@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "taxonomy": [
+    {"id": "work", "name": "工作/学习"},
+    {"id": "meeting", "name": "会议/讨论"},
+    {"id": "other", "name": "其他/未知"}
+  ],
+  "pending": [
+    {
+      "event_id": 42,
+      "kind": "block",
+      "question": "检测到活动变化：判定为「会议/讨论」，对吗？",
+      "suggested_label": "meeting",
+      "suggested_name": "会议/讨论",
+      "t_start_ms": 1785200400000,
+      "t_end_ms": 1785200460000,
+      "asr_text": "我们先看一下今天的任务。",
+      "created_ms": 1785200465000,
+      "expires_ms": 1785286865000
+    }
+  ]
+}
