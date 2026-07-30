@@ -37,6 +37,11 @@ class ContextDataService : Service() {
 
     companion object {
         private const val TAG = "ContextDataService"
+
+        /** 25 Hz：HAR 够用，且把 16 小时的 context.jsonl 从 ~830 MB 压到 ~276 MB */
+        private const val IMU_PERIOD_US = 40_000
+        /** 5 Hz：磁力计对 wearer activity 贡献很小，没必要按 IMU 频率采 */
+        private const val MAG_PERIOD_US = 200_000
         private const val CHANNEL_ID = "nuna_context_channel"
         private const val NOTIFICATION_ID = 1002
 
@@ -148,13 +153,18 @@ class ContextDataService : Service() {
         }
         sensorListener = listener
 
+        // 采样率按全天采集选择，不是按传感器能力拉满。
+        // SENSOR_DELAY_GAME 约 50 Hz，三个传感器合计 150 行/秒；一个 16 小时的
+        // 佩戴日会写出约 830 MB 的 context.jsonl，是音频本身的 3.6 倍，而且是
+        // 单个文件一次性上传。HAR 常用 20–50 Hz，25 Hz 已经足够；磁力计对
+        // wearer activity 贡献很小，降到 5 Hz。
         listOf(
-            Sensor.TYPE_ACCELEROMETER,
-            Sensor.TYPE_GYROSCOPE,
-            Sensor.TYPE_MAGNETIC_FIELD
-        ).forEach { type ->
+            Sensor.TYPE_ACCELEROMETER to IMU_PERIOD_US,
+            Sensor.TYPE_GYROSCOPE to IMU_PERIOD_US,
+            Sensor.TYPE_MAGNETIC_FIELD to MAG_PERIOD_US
+        ).forEach { (type, periodUs) ->
             sensorManager?.getDefaultSensor(type)?.also {
-                sensorManager?.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME)
+                sensorManager?.registerListener(listener, it, periodUs)
             }
         }
         Log.d(TAG, "IMU listeners registered")

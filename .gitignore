@@ -19,3 +19,6 @@ analysis/opus_samples/*.opus
 analysis/opus_samples/*.bin
 analysis/opus_samples/_reports/
 analysis/opus_samples/notes.txt
+
+# Kotlin compiler daemon scratch output
+.kotlin/

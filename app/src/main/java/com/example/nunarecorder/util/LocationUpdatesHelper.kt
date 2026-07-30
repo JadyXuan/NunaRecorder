@@ -36,8 +36,10 @@ object LocationUpdatesHelper {
         context: Context,
         locationManager: LocationManager,
         listener: LocationListener,
-        minTimeMs: Long = 1000L,
-        minDistanceM: Float = 0f
+        // 全天采集下 1 Hz 连续定位是电池杀手，而场景上下文并不需要秒级精度。
+        // 30 秒 + 10 米触发已经足够回答"在哪类环境"，也降低最高隐私等级数据的密度。
+        minTimeMs: Long = 30_000L,
+        minDistanceM: Float = 10f
     ): Boolean {
         if (!hasLocationPermission(context)) {
             Log.w(TAG, "startUpdates: no location permission")

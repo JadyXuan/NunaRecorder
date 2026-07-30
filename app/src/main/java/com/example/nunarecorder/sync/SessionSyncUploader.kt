@@ -18,8 +18,19 @@ class SessionSyncUploader(
     private val client: OkHttpClient,
     private val baseUrl: String,
     private val userId: String,
-    private val deviceMac: String
+    private val deviceMac: String,
+    /** 对应 Receiver 的 UPLOAD_TOKEN；为空时服务端返回 503 */
+    private val uploadToken: String = ""
 ) {
+
+    /**
+     * EgoAudio 自有命名空间。历史上这里是 `/thingx/api/v1/...`，那是旧 Nuna 官方
+     * 接口的路径，不是本项目的契约（见 ../doc/plan/TODO.md P0）。
+     */
+    private fun v1(path: String): String = "$baseUrl/v1/session/sync/$path"
+
+    private fun Request.Builder.withToken(): Request.Builder =
+        if (uploadToken.isNotBlank()) header("X-Upload-Token", uploadToken) else this
 
     data class CommitResult(
         val ok: Boolean,
@@ -27,6 +38,12 @@ class SessionSyncUploader(
         val missing: List<String>,
         val message: String
     )
+
+    /** 最近一次 init 的 HTTP 状态与响应体，用于把失败原因显示给用户而不是静默回退。 */
+    var lastInitCode: Int = 0
+        private set
+    var lastInitBody: String = ""
+        private set
 
     fun tryV1Sync(
         sessionDir: File,
@@ -38,7 +55,14 @@ class SessionSyncUploader(
     ): CommitResult {
         val initResp = postInit(sessionDir, manifest, files, clientUploadId)
         if (initResp == null) {
-            return CommitResult(false, "v1_not_supported", emptyList(), "服务端未实现 v1 init")
+            val reason = when (lastInitCode) {
+                404 -> "服务端未实现 v1 同步（404）。请升级 Receiver，不要用旧接口上传会话。"
+                401 -> "上传令牌无效（401）。请在设置里填写正确的上传令牌。"
+                503 -> "服务端未配置上传令牌（503）。请先在 Receiver 上设置 UPLOAD_TOKEN。"
+                -1 -> "无法连接服务器：$lastInitBody"
+                else -> "init 失败（HTTP $lastInitCode）：${lastInitBody.take(160)}"
+            }
+            return CommitResult(false, "init_failed", emptyList(), reason)
         }
         val uploadId = initResp.getString("upload_id")
         onInit(uploadId)
@@ -137,20 +161,20 @@ class SessionSyncUploader(
             put("files", filesArr)
         }.toString()
         val request = Request.Builder()
-            .url("$baseUrl/thingx/api/v1/session/sync/init")
+            .url(v1("init"))
+            .withToken()
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
-                when (resp.code) {
-                    404 -> null
-                    else -> {
-                        if (!resp.isSuccessful) return null
-                        JSONObject(resp.body?.string() ?: return null)
-                    }
-                }
+                lastInitCode = resp.code
+                lastInitBody = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) return null
+                JSONObject(lastInitBody.ifBlank { return null })
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastInitCode = -1
+            lastInitBody = e.message.orEmpty()
             null
         }
     }
@@ -164,7 +188,8 @@ class SessionSyncUploader(
             .addFormDataPart("file", file.name, file.asRequestBody(entry.mediaType.toMediaType()))
             .build()
         val request = Request.Builder()
-            .url("$baseUrl/thingx/api/v1/session/sync/file")
+            .url(v1("file"))
+            .withToken()
             .post(body)
             .build()
         return try {
@@ -193,7 +218,8 @@ class SessionSyncUploader(
             put("files", filesArr)
         }.toString()
         val request = Request.Builder()
-            .url("$baseUrl/thingx/api/v1/session/sync/commit")
+            .url(v1("commit"))
+            .withToken()
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {

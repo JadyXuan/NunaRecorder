@@ -33,6 +33,7 @@ fun SettingsScreen(
     onUserIdChange: (String) -> Unit,
     onServerHostChange: (String) -> Unit,
     onServerPortChange: (String) -> Unit,
+    onUploadTokenChange: (String) -> Unit,
     onLogLevelChange: (LogLevel) -> Unit,
     onAutoVadChange: (Boolean) -> Unit,
     onSegmentEnabledChange: (Boolean) -> Unit,
@@ -132,6 +133,21 @@ fun SettingsScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = userSettings.uploadToken,
+            onValueChange = onUploadTokenChange,
+            label = { Text("上传令牌") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp)
+        )
+        Text(
+            text = "留空则服务端拒绝同步（Receiver 的 UPLOAD_TOKEN）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+            modifier = Modifier.padding(top = 4.dp, start = 4.dp)
         )
 
         Spacer(Modifier.height(20.dp))

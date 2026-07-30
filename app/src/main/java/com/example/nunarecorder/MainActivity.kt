@@ -257,6 +257,9 @@ class MainActivity : ComponentActivity() {
                                     val port = newPortStr.toIntOrNull() ?: userSettings.serverPort
                                     viewModel.setUserSettings(userSettings.copy(serverPort = port))
                                 },
+                                onUploadTokenChange = { token ->
+                                    viewModel.setUserSettings(userSettings.copy(uploadToken = token.trim()))
+                                },
                                 onLogLevelChange = { level ->
                                     viewModel.setUserSettings(userSettings.copy(logLevel = level))
                                 },

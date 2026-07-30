@@ -118,7 +118,8 @@ object SessionSyncCoordinator {
             httpClient,
             baseUrl,
             settings.userId.ifBlank { "mock-user-001" },
-            resolveDeviceMac(manifest)
+            resolveDeviceMac(manifest),
+            settings.uploadToken
         )
 
         val commit = uploader.tryV1Sync(
@@ -143,43 +144,16 @@ object SessionSyncCoordinator {
             return SyncOutcome(true, commit.message, "synced")
         }
 
-        if (commit.serverStatus == "v1_not_supported") {
-            log("v1 同步不可用，回退逐文件上传")
-            syncStatus.files.forEach { it.status = "pending"; it.error = null }
-            return syncSessionFallback(dir, entry.displayName, syncStatus, uploader)
-        }
+        // 会话级 legacy 回退已删除。它会把 manifest/context/VAD 当成音频上传，
+        // 并让每个会话的 seg_000.opus 互相覆盖、时间戳全部落到 1970-01-01，
+        // 而服务端全程返回 success。实测证据见
+        // ../doc/status/PIPELINE_STATUS_2026-07-27.md §3。
+        // 服务端没有 v1 时正确的做法是停下来报错，把数据留在手机上。
 
         syncStatus.status = "partial"
         syncStatus.lastError = commit.message
         SessionSyncStatusIO.write(dir, syncStatus)
         return SyncOutcome(false, commit.message, "partial")
-    }
-
-    private fun syncSessionFallback(
-        dir: File,
-        displayName: String,
-        syncStatus: SessionSyncStatus,
-        uploader: SessionSyncUploader
-    ): SyncOutcome {
-        val pending = syncStatus.files.filter { it.status != "synced" }
-        val total = pending.size.coerceAtLeast(1)
-        pending.forEachIndexed { index, entry ->
-            entry.status = "uploading"
-            update(dir.absolutePath, displayName, 0.2f + 0.7f * (index + 1) / total, "回退上传 ${entry.path}", "syncing")
-            val ok = uploader.fallbackLegacyUpload(File(dir, entry.path))
-            entry.status = if (ok) "synced" else "failed"
-            if (!ok) entry.error = "legacy upload failed"
-            SessionSyncStatusIO.write(dir, syncStatus)
-        }
-        val failed = syncStatus.files.count { it.status == "failed" }
-        syncStatus.status = if (failed == 0) "partial" else "partial"
-        syncStatus.lastError = "服务端未升级 v1；已用旧接口上传（无 commit 确认）"
-        SessionSyncStatusIO.write(dir, syncStatus)
-        return if (failed == 0) {
-            SyncOutcome(true, "已用旧接口上传（无服务器 commit 确认）", "partial")
-        } else {
-            SyncOutcome(false, "$failed 个文件上传失败", "partial")
-        }
     }
 
     private fun syncLegacy(

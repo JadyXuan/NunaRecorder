@@ -1,14 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- 仅在开发/内网调试时允许对特定 IP 的 HTTP 明文访问 -->
-    <domain-config cleartextTrafficPermitted="true">
-        <!-- 你当前局域网服务器 IP，例如 172.20.7.253 -->
-        <domain includeSubdomains="false">172.20.10.3</domain>
-        <!-- 常用的本机映射，方便模拟器调试 -->
-        <domain includeSubdomains="false">10.0.2.2</domain>
-        <!-- anlan的测试服务器ip-->
-        <domain includeSubdomains="false">120.79.196.171</domain>
+    <!--
+      Android 9+ 默认禁止明文 HTTP。调试期 Receiver 只发布在 Tailscale/内网地址上，
+      没有 TLS，所以这些地址必须逐个放行；不在列表里的地址会被系统直接拒绝连接，
+      表现为"连不上服务器"而不是任何应用层错误。
 
+      正式采集走管理员的上传域名（HTTPS，网关终止 TLS），届时不需要任何明文例外，
+      本列表只保留给调试。
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- RTX5060-QBS1250 Tailscale -->
+        <domain includeSubdomains="false">100.107.60.40</domain>
+        <!-- RTX5060-QBS1250 IE 内网 -->
+        <domain includeSubdomains="false">192.168.85.238</domain>
+        <!-- 模拟器回环 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- 历史调试地址 -->
+        <domain includeSubdomains="false">172.20.10.3</domain>
+        <domain includeSubdomains="false">120.79.196.171</domain>
     </domain-config>
 </network-security-config>
-
