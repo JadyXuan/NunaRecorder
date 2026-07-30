@@ -11,8 +11,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 object LifelogCoordinator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -45,21 +47,24 @@ object LifelogCoordinator {
         _state.value = _state.value.copy(date = date, loading = true, error = null)
         scope.launch {
             try {
-                val pair = withContext(Dispatchers.IO) {
-                    client.timeline(date) to client.pending()
+                val payloads = withContext(Dispatchers.IO) {
+                    Triple(client.timeline(date), client.pending(), client.diary(date))
                 }
-                val timeline = pair.first
-                val pending = pair.second
+                val timeline = payloads.first
+                val pending = payloads.second
+                val diary = payloads.third
                 _state.value = LifelogUiState(
                     date = date,
                     loading = false,
                     timeline = timeline.entries,
                     pending = pending.prompts,
-                    taxonomy = when {
-                        pending.taxonomy.isNotEmpty() -> pending.taxonomy
-                        else -> timeline.taxonomy
-                    },
-                    schemaVersion = maxOf(timeline.schemaVersion, pending.schemaVersion),
+                    diary = diary.entries,
+                    taxonomy = timeline.taxonomy,
+                    schemaVersion = maxOf(
+                        timeline.schemaVersion,
+                        pending.schemaVersion,
+                        diary.schemaVersion
+                    ),
                     lastUpdatedMs = System.currentTimeMillis()
                 )
             } catch (e: Exception) {
@@ -88,7 +93,9 @@ object LifelogCoordinator {
                 onLog?.invoke(
                     when (action) {
                         "skip" -> "已跳过本次标注"
-                        else -> "活动标签已更新: ${result.label ?: prompt.suggestedName}"
+                        else -> "活动标签已更新: ${
+                            result.effectiveLabel ?: prompt.suggestedName
+                        }"
                     }
                 )
                 _state.value = _state.value.copy(loading = false)
@@ -111,11 +118,20 @@ object LifelogCoordinator {
     }
 
     private fun shiftDate(date: String, days: Int): String {
-        val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val format = utcDateFormat()
         val current = format.parse(date) ?: Date()
-        return format.format(Date(current.time + days * 86_400_000L))
+        val calendar = Calendar.getInstance(UTC).apply {
+            time = current
+            add(Calendar.DAY_OF_MONTH, days)
+        }
+        return format.format(calendar.time)
     }
 
     private fun today(): String =
-        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        utcDateFormat().format(Date())
+
+    private fun utcDateFormat() =
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = UTC }
+
+    private val UTC: TimeZone = TimeZone.getTimeZone("UTC")
 }

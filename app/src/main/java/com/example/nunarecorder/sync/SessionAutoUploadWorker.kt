@@ -12,6 +12,7 @@ import com.example.nunarecorder.data.UserSettings
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.session.AudioSegmentEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -57,16 +58,18 @@ class SessionAutoUploadWorker(
                 if (uploadedThisRun >= MAX_SEGMENTS_PER_RUN) break
                 val audioFile = File(sessionDir, segment.file)
                 if (!audioFile.isFile || audioFile.length() <= 0L) continue
+                if (!segment.integrityOk || audioFile.length() % OPUS_FRAME_BYTES != 0L) continue
                 val sha256 = SessionSyncStatus.sha256(audioFile)
                 if (state.isUploaded(segment.file, sha256)) continue
 
                 val idempotencyKey = "${manifest.sessionId}:${segment.index}:$sha256"
                 val remoteName = "${manifest.sessionId}_${audioFile.name}"
+                val timeRange = uploadTimeRange(manifest, segment, audioFile.length())
                 val ok = uploader.uploadAudioSegment(
                     file = audioFile,
                     remoteName = remoteName,
-                    startTimeMs = segment.startMs,
-                    endTimeMs = segment.endMs,
+                    startTimeMs = timeRange.startTimeMs,
+                    endTimeMs = timeRange.endTimeMs,
                     clientUploadId = idempotencyKey
                 )
                 if (!ok) {
@@ -85,6 +88,7 @@ class SessionAutoUploadWorker(
     companion object {
         private const val UNIQUE_WORK = "lifelog_auto_upload"
         private const val MAX_SEGMENTS_PER_RUN = 12
+        private const val OPUS_FRAME_BYTES = 80L
 
         fun schedule(context: Context, settings: UserSettings) {
             val manager = WorkManager.getInstance(context)
@@ -115,4 +119,22 @@ class SessionAutoUploadWorker(
             )
         }
     }
+}
+
+internal data class UploadTimeRange(
+    val startTimeMs: Long,
+    val endTimeMs: Long
+)
+
+internal fun uploadTimeRange(
+    manifest: SessionManifest,
+    segment: AudioSegmentEntry,
+    actualBytes: Long
+): UploadTimeRange {
+    val startTimeMs = manifest.startedAtMs + segment.startMs
+    val frameCount = actualBytes / 80L
+    return UploadTimeRange(
+        startTimeMs = startTimeMs,
+        endTimeMs = startTimeMs + frameCount * 20L
+    )
 }

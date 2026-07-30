@@ -3,8 +3,6 @@ package com.example.nunarecorder.ble
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 class BleAudioReassembler(
     private val outputFile: File,
@@ -32,8 +30,12 @@ class BleAudioReassembler(
     private var audioMsgCount = 0
     private var validFrameCount = 0
     private var opusBytesWritten = 0L
+    private var expectedFrameId: Int? = null
+    private var integrityIssue: String? = null
+    val integrityOk: Boolean get() = integrityIssue == null
 
     private data class FrameInfo(
+        val frameId: Int,
         var frameSize: Int,
         var totalChunks: Int,
         var timestamp: Long,
@@ -45,15 +47,23 @@ class BleAudioReassembler(
         onLog("BleAudioReassembler: output=${outputFile.absolutePath}")
     }
 
-    fun close() {
+    fun close(): String? {
         try {
+            if (frames.isNotEmpty() && integrityIssue == null) {
+                markIntegrityError("${frames.size} 个 BLE 音频帧未收齐")
+            }
             fos?.flush()
             fos?.close()
             fos = null
-            onLog("BleAudioReassembler closed. totalFrames=$validFrameCount, opusBytes=$opusBytesWritten")
+            onLog(
+                "BleAudioReassembler closed. totalFrames=$validFrameCount, " +
+                    "opusBytes=$opusBytesWritten, integrity=${integrityIssue ?: "ok"}"
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Error closing reassembler", e)
+            markIntegrityError("写入文件失败: ${e.message}")
         }
+        return integrityIssue
     }
 
     /**
@@ -80,7 +90,9 @@ class BleAudioReassembler(
             val msgTotalLen = MIN_HEADER_LEN + length
 
             if (idx + msgTotalLen > totalLen) {
-                // 当前 buffer 不够一条完整消息，下次再解析
+                markIntegrityError(
+                    "BLE notification 被截断：需要 $msgTotalLen B，仅收到 ${totalLen - idx} B"
+                )
                 break
             }
 
@@ -110,8 +122,20 @@ class BleAudioReassembler(
         val timestamp = readLeU64(payload, 6)
         val opusData = payload.copyOfRange(14, payload.size)
 
+        if (frameSize != OPUS_FRAME_SIZE) {
+            markIntegrityError("frameId=$frameId 长度=$frameSize，期望 $OPUS_FRAME_SIZE")
+            return
+        }
+        if (totalChunks <= 0 || chunkId >= totalChunks) {
+            markIntegrityError(
+                "frameId=$frameId 分片编号异常 chunk=$chunkId/$totalChunks"
+            )
+            return
+        }
+
         val frame = frames.getOrPut(frameId) {
             FrameInfo(
+                frameId = frameId,
                 frameSize = frameSize,
                 totalChunks = totalChunks,
                 timestamp = timestamp,
@@ -136,6 +160,14 @@ class BleAudioReassembler(
     }
 
     private fun writeFrameToFile(frame: FrameInfo) {
+        val currentExpected = expectedFrameId
+        if (currentExpected != null && frameIdDistance(currentExpected, frame.frameId) != 0) {
+            markIntegrityError(
+                "BLE 音频帧不连续：期望 $currentExpected，收到 ${frame.frameId}"
+            )
+        }
+        expectedFrameId = (frame.frameId + 1) and 0xFFFF
+
         val concatenated = ByteArray(frame.chunks.values.sumOf { it.size })
         var pos = 0
         for (cid in 0 until frame.totalChunks) {
@@ -148,23 +180,31 @@ class BleAudioReassembler(
             pos += chunk.size
         }
 
-        val remainder = concatenated.size % OPUS_FRAME_SIZE
-        if (remainder != 0) {
-            onLog("[reassembler] frame size ${concatenated.size} not multiple of $OPUS_FRAME_SIZE, trimming $remainder bytes")
-        }
-        val toWrite = if (remainder == 0) concatenated else concatenated.copyOf(concatenated.size - remainder)
-        if (toWrite.isEmpty()) {
-            onLog("[reassembler] frame trimmed to empty, skip")
+        if (concatenated.size != frame.frameSize) {
+            markIntegrityError(
+                "frameId=${frame.frameId} 重组后 ${concatenated.size} B，声明 ${frame.frameSize} B"
+            )
             return
         }
 
         try {
-            fos?.write(toWrite)
+            fos?.write(concatenated)
             fos?.flush()
             validFrameCount++
-            opusBytesWritten += toWrite.size
+            opusBytesWritten += concatenated.size
         } catch (e: Exception) {
             Log.e(TAG, "Error writing opus frame", e)
+            markIntegrityError("写入文件失败: ${e.message}")
+        }
+    }
+
+    private fun frameIdDistance(expected: Int, actual: Int): Int =
+        (actual - expected) and 0xFFFF
+
+    private fun markIntegrityError(message: String) {
+        if (integrityIssue == null) {
+            integrityIssue = message
+            onLog("[reassembler] 完整性错误：$message")
         }
     }
 

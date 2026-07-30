@@ -10,17 +10,19 @@ class LifelogJsonTest {
     fun parsesTimelineFixture() {
         val result = LifelogJson.parseTimeline(resource("lifelog/timeline.json"))
 
-        assertEquals("2026-07-28", result.date)
+        assertEquals("2026-04-07", result.date)
         assertEquals(1, result.schemaVersion)
-        assertEquals(3, result.taxonomy.size)
+        assertEquals(10, result.taxonomy.size)
         assertEquals(1, result.entries.size)
         val segment = result.entries.single()
-        assertEquals(101L, segment.segmentId)
+        assertEquals(1001L, segment.segmentId)
         assertEquals("meeting", segment.predictedLabel)
-        assertEquals("rag", segment.predictedSource)
+        assertEquals("personal_rag", segment.predictedSource)
         assertNull(segment.confirmedLabel)
-        assertEquals(2, segment.soundEvents.size)
-        assertEquals(0.44, segment.soundEvents[1].probability, 0.0001)
+        assertNull(segment.reviewAction)
+        assertEquals(1, segment.soundEvents.size)
+        assertEquals("Speech", segment.soundEvents.single().name)
+        assertEquals(0.91, segment.soundEvents.single().probability, 0.0001)
     }
 
     @Test
@@ -32,7 +34,21 @@ class LifelogJsonTest {
         assertEquals(42L, prompt.eventId)
         assertEquals("block", prompt.kind)
         assertEquals("meeting", prompt.suggestedLabel)
-        assertEquals(1785286865000L, prompt.expiresTimeMs)
+        assertEquals("会议/讨论", prompt.suggestedName)
+        assertEquals("讨论项目进度", prompt.asrText)
+        assertEquals(1775648941000L, prompt.expiresTimeMs)
+    }
+
+    @Test
+    fun parsesDiaryFixture() {
+        val result = LifelogJson.parseDiary(resource("lifelog/diary.json"))
+
+        assertEquals("2026-04-07", result.date)
+        assertEquals(1, result.schemaVersion)
+        val entry = result.entries.single()
+        assertEquals("meeting", entry.label)
+        assertEquals("会议/讨论", entry.displayName)
+        assertEquals("讨论项目进度", entry.summary)
     }
 
     private fun resource(path: String): String =

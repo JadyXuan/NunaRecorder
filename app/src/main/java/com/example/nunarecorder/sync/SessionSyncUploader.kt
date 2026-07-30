@@ -90,7 +90,8 @@ class SessionSyncUploader(
 
     /**
      * 上传一个已经封口的音频切片。显式时间戳避免 seg_000.opus 依赖文件名推断；
-     * remoteName 必须跨会话唯一，clientUploadId 供服务端做幂等去重。
+     * remoteName 必须跨会话唯一。clientUploadId 只作为 HTTP 幂等提示头发送；
+     * 冻结的 metadata 对象不允许加入额外字段。
      */
     fun uploadAudioSegment(
         file: File,
@@ -106,7 +107,6 @@ class SessionSyncUploader(
             put("endTime", endTimeMs)
             put("mac", deviceMac)
             put("size", file.length())
-            if (clientUploadId != null) put("clientUploadId", clientUploadId)
         }.toString()
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -118,7 +118,7 @@ class SessionSyncUploader(
             .addFormDataPart(
                 "metadata",
                 "metadata.json",
-                metadataJson.toRequestBody("text/plain".toMediaType())
+                metadataJson.toRequestBody("application/json".toMediaType())
             )
             .build()
         val request = Request.Builder()

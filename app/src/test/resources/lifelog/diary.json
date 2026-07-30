@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "date": "2026-04-07",
+  "entries": [
+    {
+      "start_time_ms": 1775562510923,
+      "end_time_ms": 1775562540923,
+      "label": "meeting",
+      "display_name": "会议/讨论",
+      "summary": "讨论项目进度"
+    }
+  ]
+}

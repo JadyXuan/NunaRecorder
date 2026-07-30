@@ -37,11 +37,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.nunarecorder.lifelog.ActivityLabel
 import com.example.nunarecorder.lifelog.AnnotationPrompt
+import com.example.nunarecorder.lifelog.DiaryEntry
 import com.example.nunarecorder.lifelog.LifelogUiState
 import com.example.nunarecorder.lifelog.TimelineEntry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 @Composable
 fun LifelogScreen(
@@ -97,12 +99,20 @@ fun LifelogScreen(
             ) {
                 OutlinedButton(onClick = onPreviousDay) { Text("前一天") }
                 Text(
-                    state.date,
+                    "${state.date} UTC",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
                 OutlinedButton(onClick = onNextDay) { Text("后一天") }
             }
+        }
+
+        item {
+            Text(
+                "当前试点契约按 UTC 日期查询和显示；服务端加入用户时区后再切换为本地日期。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         state.error?.let { error ->
@@ -132,6 +142,18 @@ fun LifelogScreen(
                     onCorrect = { correcting = prompt },
                     onSkip = { onAnnotate(prompt, "skip", null) }
                 )
+            }
+        }
+
+        if (state.diary.isNotEmpty()) {
+            item {
+                SectionTitle("当日日记", "${state.diary.size} 条")
+            }
+            items(
+                state.diary,
+                key = { "diary-${it.startTimeMs}-${it.endTimeMs}-${it.label}" }
+            ) { entry ->
+                DiaryCard(entry)
             }
         }
 
@@ -176,6 +198,39 @@ fun LifelogScreen(
                 onAnnotate(prompt, "correct", label)
             }
         )
+    }
+}
+
+@Composable
+private fun DiaryCard(entry: DiaryEntry) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    "${formatClock(entry.startTimeMs)}–${formatClock(entry.endTimeMs)}",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Text(
+                    entry.displayName,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(entry.summary, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 
@@ -373,4 +428,6 @@ private fun SectionTitle(title: String, detail: String) {
 }
 
 private fun formatClock(epochMs: Long): String =
-    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(epochMs))
+    SimpleDateFormat("HH:mm 'UTC'", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }.format(Date(epochMs))

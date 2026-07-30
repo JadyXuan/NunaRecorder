@@ -11,7 +11,9 @@ data class AudioSegmentEntry(
     val startMs: Long,
     val endMs: Long,
     val bytes: Long,
-    val durationMs: Long
+    val durationMs: Long,
+    val integrityOk: Boolean = true,
+    val integrityIssue: String? = null
 )
 
 data class VadSummary(
@@ -56,7 +58,7 @@ data class SessionManifest(
         put("audio", JSONObject().apply {
             put("codec", "opus_raw")
             put("sample_rate_hz", 16000)
-            put("channels", 2)
+            put("channels", 1)
             put("frame_duration_ms", 20)
             put("frame_size_bytes", 80)
             put("segments", JSONArray().apply {
@@ -68,6 +70,10 @@ data class SessionManifest(
                         put("end_ms", s.endMs)
                         put("bytes", s.bytes)
                         put("duration_ms", s.durationMs)
+                        put("integrity_ok", s.integrityOk)
+                        if (s.integrityIssue != null) {
+                            put("integrity_issue", s.integrityIssue)
+                        }
                     })
                 }
             })
@@ -105,7 +111,10 @@ data class SessionManifest(
                         startMs = s.getLong("start_ms"),
                         endMs = s.getLong("end_ms"),
                         bytes = s.getLong("bytes"),
-                        durationMs = s.getLong("duration_ms")
+                        durationMs = s.getLong("duration_ms"),
+                        integrityOk = s.optBoolean("integrity_ok", true),
+                        integrityIssue = s.optString("integrity_issue")
+                            .takeIf { it.isNotBlank() }
                     )
                 )
             }

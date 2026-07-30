@@ -644,6 +644,15 @@ class MainActivity : ComponentActivity() {
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 appendLog("连接失败 (status=$status)")
+                if (recording || sessionRecorder.isRecording) {
+                    appendLog("BLE 异常断开，当前录音会话已封口")
+                }
+                recording = false
+                isTransferNotificationEnabled = false
+                sessionRecorder.stop()
+                viewModel.setActiveRecordingPath(null)
+                com.example.nunarecorder.service.ContextDataService.stop(this@MainActivity)
+                this@MainActivity.gatt = null
                 appendDebug("关闭 GATT")
                 try {
                     gatt.disconnect()
@@ -688,6 +697,7 @@ class MainActivity : ComponentActivity() {
                 sessionRecorder.stop()
                 viewModel.setActiveRecordingPath(null)
                 com.example.nunarecorder.service.ContextDataService.stop(this@MainActivity)
+                this@MainActivity.gatt = null
                 viewModel.setConnectionStatus("未连接")
             }
         }
@@ -871,8 +881,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun writeToFile(data: ByteArray) {
-        sessionRecorder.feed(data)
+        val integrityOk = sessionRecorder.feed(data)
         updateLiveRecordingStatsUi()
+        if (!integrityOk && recording) {
+            appendLog("检测到 BLE 音频丢帧，本次会话已停止且不会自动上传")
+            runOnUiThread {
+                if (recording) stopRecordingFlow()
+            }
+        }
     }
 
     private fun shareRecordingEntry(entry: RecordingEntry, withContext: Boolean, withVad: Boolean) {

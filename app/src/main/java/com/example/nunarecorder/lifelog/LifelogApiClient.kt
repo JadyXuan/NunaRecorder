@@ -30,6 +30,12 @@ class LifelogApiClient(
         return LifelogJson.parsePending(body)
     }
 
+    fun diary(date: String): DiaryPayload {
+        val body = get("/api/v1/diary?date=$date", allowNotFound = false)
+            ?: throw IOException("empty diary response")
+        return LifelogJson.parseDiary(body)
+    }
+
     fun annotate(eventId: Long, action: String, label: String?): AnnotationResult {
         val json = JSONObject().apply {
             put("event_id", eventId)
@@ -69,7 +75,7 @@ class LifelogApiClient(
             .header("Accept", "application/json")
             .header("X-Lifelog-Client", "NunaRecorder-Android")
             .apply {
-                if (userId.isNotBlank()) header("X-User-ID", userId)
+                if (userId.isNotBlank()) header("X-User-Id", userId)
             }
 
     private fun execute(request: Request, allowNotFound: Boolean): String? {

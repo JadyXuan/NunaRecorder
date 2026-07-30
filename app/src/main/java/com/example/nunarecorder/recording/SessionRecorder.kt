@@ -31,6 +31,7 @@ class SessionRecorder(
     private var currentSegmentIndex = 0
     private var currentSegmentFile: File? = null
     private var currentSegmentStartMs = 0L
+    private var currentSegmentIntegrityIssue: String? = null
     private var sessionStartMs = 0L
     private var options: RecordingOptions = RecordingOptions(
         segmentEnabled = true,
@@ -86,12 +87,13 @@ class SessionRecorder(
         onLog("开始录制 → ${dir.name}")
     }
 
-    fun feed(data: ByteArray) {
+    fun feed(data: ByteArray): Boolean {
         if (options.segmentEnabled) {
             maybeRotateSegment()
         }
         reassembler?.feed(data)
         maybeFlushManifest()
+        return reassembler?.integrityOk ?: true
     }
 
     fun stop() {
@@ -134,6 +136,7 @@ class SessionRecorder(
         }
         val file = File(dir, rel)
         currentSegmentFile = file
+        currentSegmentIntegrityIssue = null
         reassembler?.close()
         reassembler = BleAudioReassembler(file) { onLog(it) }
         flushManifestNow()
@@ -142,7 +145,7 @@ class SessionRecorder(
     private fun closeCurrentSegment(enqueueVad: Boolean) {
         val dir = sessionDir ?: return
         val file = currentSegmentFile ?: return
-        reassembler?.close()
+        currentSegmentIntegrityIssue = reassembler?.close()
         reassembler = null
         if (!file.exists() || file.length() == 0L) {
             file.delete()
@@ -163,12 +166,14 @@ class SessionRecorder(
             startMs = currentSegmentStartMs,
             endMs = endMs,
             bytes = bytes,
-            durationMs = durationMs.coerceAtMost(maxDuration)
+            durationMs = durationMs.coerceAtMost(maxDuration),
+            integrityOk = currentSegmentIntegrityIssue == null,
+            integrityIssue = currentSegmentIntegrityIssue
         )
         manifest?.segments?.add(entry)
         SessionManifestIO.write(dir, manifest!!)
         onLog("分段 ${entry.index} 已保存 · ${formatSize(bytes)}")
-        if (enqueueVad && options.autoVadOnRecord) {
+        if (entry.integrityOk && enqueueVad && options.autoVadOnRecord) {
             VadJobQueue.enqueue(
                 VadJob(
                     sessionDir = dir,
@@ -181,6 +186,9 @@ class SessionRecorder(
                     sessionStartedAtMs = sessionStartMs
                 )
             )
+        }
+        if (!entry.integrityOk) {
+            onLog("分段 ${entry.index} 检测到 BLE 缺口，已禁止自动上传")
         }
         currentSegmentFile = null
     }

@@ -16,7 +16,7 @@ internal class SessionAutoUploadState(private val sessionDir: File) {
         stateFile.parentFile?.mkdirs()
         stateFile.writeTextAtomic(
             JSONObject()
-                .put("version", 1)
+                .put("version", CURRENT_VERSION)
                 .put("uploaded", uploaded)
                 .put("updated_ms", System.currentTimeMillis())
                 .toString(2)
@@ -24,8 +24,22 @@ internal class SessionAutoUploadState(private val sessionDir: File) {
     }
 
     private fun load(): JSONObject = try {
-        JSONObject(stateFile.readText()).optJSONObject("uploaded") ?: JSONObject()
+        val root = JSONObject(stateFile.readText())
+        if (root.optInt("version") != CURRENT_VERSION) {
+            JSONObject()
+        } else {
+            root.optJSONObject("uploaded") ?: JSONObject()
+        }
     } catch (_: Exception) {
         JSONObject()
+    }
+
+    companion object {
+        /*
+         * V2 changed segment timestamps from relative offsets to UTC epoch.
+         * Ignore V1 receipts so incorrectly timestamped pilot uploads can be
+         * retried with the corrected, stable metadata.
+         */
+        private const val CURRENT_VERSION = 2
     }
 }

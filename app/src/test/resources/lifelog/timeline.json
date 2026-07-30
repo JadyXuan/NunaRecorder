@@ -1,24 +1,64 @@
 {
   "schema_version": 1,
-  "date": "2026-07-28",
+  "date": "2026-04-07",
   "taxonomy": [
-    {"id": "work", "name": "工作/学习"},
-    {"id": "meeting", "name": "会议/讨论"},
-    {"id": "other", "name": "其他/未知"}
+    {
+      "id": "work",
+      "display_name": "工作/学习"
+    },
+    {
+      "id": "meeting",
+      "display_name": "会议/讨论"
+    },
+    {
+      "id": "commute",
+      "display_name": "通勤/移动"
+    },
+    {
+      "id": "eating",
+      "display_name": "吃饭"
+    },
+    {
+      "id": "cooking",
+      "display_name": "做饭/家务"
+    },
+    {
+      "id": "exercise",
+      "display_name": "运动"
+    },
+    {
+      "id": "leisure",
+      "display_name": "居家休闲"
+    },
+    {
+      "id": "social",
+      "display_name": "社交/聊天"
+    },
+    {
+      "id": "quiet",
+      "display_name": "安静/休息"
+    },
+    {
+      "id": "other",
+      "display_name": "其他/未知"
+    }
   ],
   "segments": [
     {
-      "segment_id": 101,
-      "t_start_ms": 1785200400000,
-      "t_end_ms": 1785200430000,
-      "pred_label": "meeting",
-      "pred_conf": 0.82,
-      "pred_source": "rag",
-      "label": null,
-      "asr_text": "我们先看一下今天的任务。",
-      "sound_events": [
-        {"name": "Speech", "prob": 0.91},
-        {"name": "Typing", "probability": 0.44}
+      "segment_id": 1001,
+      "start_time_ms": 1775562510923,
+      "end_time_ms": 1775562520923,
+      "predicted_label": "meeting",
+      "confidence": 0.78,
+      "source": "personal_rag",
+      "reviewed_label": null,
+      "review_action": null,
+      "asr_text": "讨论项目进度",
+      "top_sound_events": [
+        {
+          "label": "Speech",
+          "confidence": 0.91
+        }
       ]
     }
   ]

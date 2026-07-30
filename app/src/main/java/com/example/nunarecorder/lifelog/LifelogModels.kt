@@ -18,6 +18,7 @@ data class TimelineEntry(
     val predictedConfidence: Double?,
     val predictedSource: String?,
     val confirmedLabel: String?,
+    val reviewAction: String?,
     val asrText: String,
     val soundEvents: List<SoundEventSummary>
 ) {
@@ -47,14 +48,29 @@ data class TimelinePayload(
 
 data class PendingPayload(
     val prompts: List<AnnotationPrompt>,
-    val taxonomy: List<ActivityLabel>,
     val schemaVersion: Int
 )
 
 data class AnnotationResult(
-    val status: String,
-    val label: String?,
-    val memorySize: Int?
+    val annotationId: Long,
+    val eventId: Long,
+    val action: String,
+    val effectiveLabel: String?,
+    val memoryUpdated: Boolean
+)
+
+data class DiaryEntry(
+    val startTimeMs: Long,
+    val endTimeMs: Long,
+    val label: String,
+    val displayName: String,
+    val summary: String
+)
+
+data class DiaryPayload(
+    val date: String,
+    val entries: List<DiaryEntry>,
+    val schemaVersion: Int
 )
 
 data class LifelogUiState(
@@ -62,6 +78,7 @@ data class LifelogUiState(
     val loading: Boolean = false,
     val timeline: List<TimelineEntry> = emptyList(),
     val pending: List<AnnotationPrompt> = emptyList(),
+    val diary: List<DiaryEntry> = emptyList(),
     val taxonomy: List<ActivityLabel> = emptyList(),
     val schemaVersion: Int = 1,
     val error: String? = null,

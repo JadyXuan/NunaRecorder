@@ -46,7 +46,7 @@ class LifelogApiClientTest {
         assertEquals("/api/v1/annotations/pending", server.takeRequest().path)
         val fallback = server.takeRequest()
         assertEquals("/api/pending", fallback.path)
-        assertEquals("test-user", fallback.getHeader("X-User-ID"))
+        assertEquals("test-user", fallback.getHeader("X-User-Id"))
     }
 
     @Test
@@ -54,20 +54,39 @@ class LifelogApiClientTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""{"status":"answered","label":"work","memory_size":7}""")
+                .setBody(resource("lifelog/annotation_response.json"))
         )
 
-        val result = client.annotate(42, "correct", "work")
+        val result = client.annotate(42, "confirm", null)
 
-        assertEquals("work", result.label)
-        assertEquals(7, result.memorySize)
+        assertEquals(9L, result.annotationId)
+        assertEquals(42L, result.eventId)
+        assertEquals("confirm", result.action)
+        assertEquals("meeting", result.effectiveLabel)
+        assertTrue(result.memoryUpdated)
         val request = server.takeRequest()
         assertEquals("/api/v1/annotations", request.path)
         val body = JSONObject(request.body.readUtf8())
         assertEquals(42L, body.getLong("event_id"))
-        assertEquals("correct", body.getString("action"))
-        assertEquals("work", body.getString("label"))
+        assertEquals("confirm", body.getString("action"))
+        assertTrue(body.isNull("label"))
         assertTrue(request.getHeader("X-Lifelog-Client")!!.contains("NunaRecorder"))
+    }
+
+    @Test
+    fun requestsDiaryForSelectedUtcDate() {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(resource("lifelog/diary.json"))
+        )
+
+        val result = client.diary("2026-04-07")
+
+        assertEquals("讨论项目进度", result.entries.single().summary)
+        val request = server.takeRequest()
+        assertEquals("/api/v1/diary?date=2026-04-07", request.path)
+        assertEquals("test-user", request.getHeader("X-User-Id"))
     }
 
     private fun resource(path: String): String =
