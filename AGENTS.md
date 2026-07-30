@@ -4,7 +4,7 @@
 `../AGENTS.md`，本文件不复制也不覆盖它们**，只补充这个仓库自己的事实、边界和验证方式。
 
 Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取根 `AGENTS.md`。
-进入本仓库工作前，先读根 `AGENTS.md`、`../doc/PIPELINE_STATUS_2026-07-27.md`
+进入本仓库工作前，先读根 `AGENTS.md`、`../doc/status/PIPELINE_STATUS_2026-07-27.md`
 和本仓库的 `docs/SESSION_SYNC_PROTOCOL.md`。
 
 ## 1. 仓库身份与分支纪律
@@ -49,7 +49,7 @@ Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取�
 - `manifest.json` / `context/context.jsonl` / `labels/vad_prelabel.json` 也走同一个上传，
   被服务端当成 60 秒音频入库。
 
-完整证据和服务端落库结果见 `../doc/PIPELINE_STATUS_2026-07-27.md` §3。
+完整证据和服务端落库结果见 `../doc/status/PIPELINE_STATUS_2026-07-27.md` §3。
 
 **在 Data Platform 的 Receiver 实现 session v1 之前，不得用本 App 上传真实采集数据。**
 对齐新契约时应删除或禁用这条会话级 legacy 回退（`RecordingEntry.LegacyOpus` 的单文件路径
