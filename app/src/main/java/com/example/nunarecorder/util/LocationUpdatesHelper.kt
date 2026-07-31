@@ -37,9 +37,11 @@ object LocationUpdatesHelper {
         locationManager: LocationManager,
         listener: LocationListener,
         // 全天采集下 1 Hz 连续定位是电池杀手，而场景上下文并不需要秒级精度。
-        // 30 秒 + 10 米触发已经足够回答"在哪类环境"，也降低最高隐私等级数据的密度。
+        // minDistance 必须是 0：LocationManager 要求 minTime 和 minDistance 同时满足，
+        // 设成 10 米后静止不动的用户永远收不到定位——2026-07-31 首次实测四个会话
+        // 的 context.jsonl 里 GPS 行数全部为 0，就是这么来的。
         minTimeMs: Long = 30_000L,
-        minDistanceM: Float = 10f
+        minDistanceM: Float = 0f
     ): Boolean {
         if (!hasLocationPermission(context)) {
             Log.w(TAG, "startUpdates: no location permission")
