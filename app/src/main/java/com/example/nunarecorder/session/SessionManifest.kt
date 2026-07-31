@@ -8,10 +8,13 @@ import java.io.File
 data class AudioSegmentEntry(
     val index: Int,
     val file: String,
+    /** **相对会话开始的偏移**，不是 epoch。绝对时间 = `manifest.started_at_ms + start_ms` */
     val startMs: Long,
     val endMs: Long,
     val bytes: Long,
-    val durationMs: Long
+    val durationMs: Long,
+    /** 帧账目；旧会话没有这一段，为 null */
+    val frames: SegmentFrameStats? = null
 )
 
 data class VadSummary(
@@ -41,7 +44,14 @@ data class SessionManifest(
     /** 录制进行中（用于 UI 实时展示） */
     var recordingActive: Boolean = false,
     var openSegmentIndex: Int? = null,
-    var openSegmentBytes: Long = 0L
+    var openSegmentBytes: Long = 0L,
+    /** 链路中断区间与重组器诊断；研究者不该从"这段没数据"去猜发生了什么 */
+    var link: LinkHealth = LinkHealth(),
+    /**
+     * 完全没有音频的分段序号。分段序号由墙钟推导，所以 `segments[]` 里会出现空洞，
+     * 这里把空洞显式列出来，而不是让它看起来像会话本来就短。
+     */
+    var missingSegments: List<Int> = emptyList()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("format_version", formatVersion)
@@ -68,10 +78,13 @@ data class SessionManifest(
                         put("end_ms", s.endMs)
                         put("bytes", s.bytes)
                         put("duration_ms", s.durationMs)
+                        s.frames?.let { put("frames", it.toJson()) }
                     })
                 }
             })
+            put("missing_segments", JSONArray().apply { missingSegments.forEach { put(it) } })
         })
+        put("link", link.toJson())
         put("context", JSONObject().apply {
             put("file", SessionPaths.CONTEXT_FILE)
         })
@@ -105,10 +118,13 @@ data class SessionManifest(
                         startMs = s.getLong("start_ms"),
                         endMs = s.getLong("end_ms"),
                         bytes = s.getLong("bytes"),
-                        durationMs = s.getLong("duration_ms")
+                        durationMs = s.getLong("duration_ms"),
+                        frames = SegmentFrameStats.fromJson(s.optJSONObject("frames"))
                     )
                 )
             }
+            val missingArr = audio.optJSONArray("missing_segments") ?: JSONArray()
+            val missing = (0 until missingArr.length()).map { missingArr.getInt(it) }
             val vadJ = j.optJSONObject("vad")
             val recJ = j.optJSONObject("recording")
             SessionManifest(
@@ -130,7 +146,9 @@ data class SessionManifest(
                 sourceOpus = j.optString("source_opus").takeIf { it.isNotEmpty() },
                 recordingActive = recJ?.optBoolean("active") == true,
                 openSegmentIndex = recJ?.optInt("open_segment_index", -1)?.takeIf { it >= 0 },
-                openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L
+                openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L,
+                link = LinkHealth.fromJson(j.optJSONObject("link")),
+                missingSegments = missing
             )
         } catch (_: Exception) {
             null

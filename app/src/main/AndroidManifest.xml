@@ -28,6 +28,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- 采集服务持有 BLE 链路：Android 14+ 要求前台服务类型与权限一一对应 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <!-- 声明需要 BLE 硬件 -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
@@ -63,6 +65,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- 采集主服务：拥有 BLE 链路和会话录制，独立于 Activity 生命周期 -->
+        <service
+            android:name=".service.RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync">
+        </service>
         <service
             android:name=".service.ContextDataService"
             android:exported="false"

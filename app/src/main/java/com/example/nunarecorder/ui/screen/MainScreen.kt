@@ -1,11 +1,6 @@
 package com.example.nunarecorder.ui.screen
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,11 +39,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -56,8 +52,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
+import com.example.nunarecorder.recording.LinkPhase
+import com.example.nunarecorder.recording.LinkStatus
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.theme.NunaSuccess
+import kotlinx.coroutines.delay
 
 @Composable
 fun MainScreen(
@@ -65,19 +64,30 @@ fun MainScreen(
     deviceList: List<ScannedDevice>,
     pairedDevices: List<PairedDevice>,
     selectedDeviceAddress: String?,
-    connectionStatus: String,
+    linkStatus: LinkStatus,
     liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
     onScanClick: () -> Unit,
-    onConnectClick: () -> Unit,
     onStartRecordingClick: () -> Unit,
     onStopRecordingClick: () -> Unit,
+    onExportLog: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val logScrollState = rememberScrollState()
-    val isConnected = connectionStatus.contains("已连接")
-    val isRecording = connectionStatus.contains("录制中") || liveRecordingStats != null
+    // 状态一律取自服务发布的 LinkStatus。以前这里是
+    // `connectionStatus.contains("录制中")`——用字符串匹配推断状态，
+    // 于是停止录制后文案没被改掉，按钮就永远停在"录制中"。
+    val sessionActive = linkStatus.isSessionActive
+
+    // 每秒重组一次，让"多久没收到数据"是活的
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(sessionActive) {
+        while (sessionActive) {
+            nowMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
 
     LaunchedEffect(logText) {
         logScrollState.animateScrollTo(logScrollState.maxValue)
@@ -93,11 +103,10 @@ fun MainScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        ConnectionStatusCard(
-            status = connectionStatus,
-            isConnected = isConnected,
-            isRecording = isRecording,
-            liveStats = liveRecordingStats
+        LinkHealthPanel(
+            linkStatus = linkStatus,
+            liveStats = liveRecordingStats,
+            nowMs = nowMs
         )
 
         FilledTonalButton(
@@ -132,20 +141,8 @@ fun MainScreen(
             }
         )
 
-        ElevatedButton(
-            onClick = onConnectClick,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-            shape = RoundedCornerShape(10.dp),
-            enabled = selectedDeviceAddress != null
-        ) {
-            Text(
-                if (selectedDeviceAddress != null) "连接 + 握手" else "请先在上方选择设备",
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-
+        // 连接和录制合成一个动作：佩戴者不需要理解「先连接握手，再开始录制」，
+        // 而且分两步意味着中间那一步失败时没人会发现。
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -154,23 +151,26 @@ fun MainScreen(
                 onClick = onStartRecordingClick,
                 modifier = Modifier
                     .weight(1f)
-                    .height(44.dp),
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.elevatedButtonColors(
                     containerColor = NunaSuccess,
                     contentColor = Color.White
                 ),
-                enabled = isConnected && !isRecording
+                enabled = selectedDeviceAddress != null && !sessionActive
             ) {
                 Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("开始录制", fontWeight = FontWeight.Medium)
+                Text(
+                    if (selectedDeviceAddress == null) "请先选择设备" else "开始采集",
+                    fontWeight = FontWeight.Medium
+                )
             }
             OutlinedButton(
                 onClick = onStopRecordingClick,
                 modifier = Modifier
                     .weight(1f)
-                    .height(44.dp),
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = MaterialTheme.colorScheme.error
@@ -178,15 +178,32 @@ fun MainScreen(
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
                 ),
-                enabled = isRecording
+                enabled = sessionActive
             ) {
                 Icon(Icons.Outlined.Close, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("停止录制", fontWeight = FontWeight.Medium)
+                Text("停止采集", fontWeight = FontWeight.Medium)
             }
         }
 
-        SectionLabel("日志")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SectionLabel("日志")
+            OutlinedButton(
+                onClick = onExportLog,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 12.dp,
+                    vertical = 2.dp
+                ),
+                modifier = Modifier.height(30.dp)
+            ) {
+                Text("导出日志", style = MaterialTheme.typography.labelSmall)
+            }
+        }
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -321,110 +338,138 @@ private fun DeviceRow(
     }
 }
 
+/**
+ * 状态面板。要一眼能看到四件事：连接状态、录制状态、**采集链路是否健康**、上传状态。
+ *
+ * 第三项是重点。2026-07-31 实测里 UI 显示"录制中"的时候链路已经断了，
+ * 佩戴者毫无察觉地白戴了半天。所以"最近一次收到数据"必须是显式的一行，
+ * 而不是从"录制中"去推断。
+ */
 @Composable
-private fun ConnectionStatusCard(
-    status: String,
-    isConnected: Boolean,
-    isRecording: Boolean,
-    liveStats: LiveRecordingUiStats? = null
+private fun LinkHealthPanel(
+    linkStatus: LinkStatus,
+    liveStats: LiveRecordingUiStats?,
+    nowMs: Long
 ) {
+    val staleMs = liveStats?.staleForMs(nowMs)
+    val streaming = linkStatus.isStreaming &&
+        staleMs != null &&
+        staleMs < LiveRecordingUiStats.STALE_THRESHOLD_MS
+    val healthy = linkStatus.isStreaming && streaming
+
+    val headline = when (linkStatus.phase) {
+        LinkPhase.IDLE -> "未开始采集"
+        LinkPhase.CONNECTING -> "正在连接设备"
+        LinkPhase.CONNECTED -> "已连接，正在握手"
+        LinkPhase.RECONNECTING -> "链路中断，正在自动重连"
+        LinkPhase.RECORDING -> if (streaming) "正在采集" else "已订阅，但没有收到数据"
+    }
+
     val dotColor by animateColorAsState(
         targetValue = when {
-            isRecording -> NunaSuccess
-            isConnected -> NunaSuccess
+            healthy -> NunaSuccess
+            linkStatus.isSessionActive -> MaterialTheme.colorScheme.error
             else -> MaterialTheme.colorScheme.outline
         },
         animationSpec = tween(600),
         label = "dotColor"
     )
 
-    val infiniteTransition = rememberInfiniteTransition(label = "ripple")
-    val rippleScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.8f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rippleScale"
-    )
-    val rippleAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rippleAlpha"
-    )
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isConnected || isRecording)
-                NunaSuccess.copy(alpha = 0.08f)
-            else
-                MaterialTheme.colorScheme.surface
+            containerColor = when {
+                healthy -> NunaSuccess.copy(alpha = 0.08f)
+                linkStatus.isSessionActive -> MaterialTheme.colorScheme.error.copy(alpha = 0.08f)
+                else -> MaterialTheme.colorScheme.surface
+            }
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                if (isConnected || isRecording) {
-                    Box(
-                        modifier = Modifier
-                            .size(14.dp)
-                            .scale(rippleScale)
-                            .alpha(rippleAlpha)
-                            .clip(CircleShape)
-                            .background(dotColor)
-                    )
-                }
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .size(10.dp)
                         .clip(CircleShape)
                         .background(dotColor)
                 )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column {
+                Spacer(Modifier.width(12.dp))
                 Text(
-                    text = when {
-                        isRecording -> "正在录制"
-                        isConnected -> "设备已连接"
-                        else -> "未连接"
-                    },
+                    text = headline,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isConnected || isRecording) NunaSuccess
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-                Text(
-                    text = status,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                )
-                if (liveStats != null) {
-                    val segHint = if (liveStats.closedSegmentCount > 0) {
-                        "${liveStats.closedSegmentCount} 段已封口 · "
-                    } else {
-                        ""
+                    color = when {
+                        healthy -> NunaSuccess
+                        linkStatus.isSessionActive -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     }
-                    Text(
-                        text = "${liveStats.formatTotalBytes()} · ${segHint}${liveStats.blePacketCount} 包",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Medium,
-                        color = NunaSuccess
+                )
+            }
+
+            linkStatus.deviceName?.let {
+                StatusLine("设备", "$it${linkStatus.deviceAddress?.let { a -> " · $a" } ?: ""}")
+            }
+
+            if (linkStatus.phase == LinkPhase.RECONNECTING) {
+                StatusLine(
+                    "重连",
+                    "第 ${linkStatus.reconnectAttempt} 次 · " +
+                        "${linkStatus.nextRetryInMs / 1000} 秒后重试" +
+                        (linkStatus.reason?.let { " · $it" } ?: "")
+                )
+            }
+
+            if (liveStats != null) {
+                StatusLine(
+                    "链路",
+                    when {
+                        staleMs == null -> "尚未收到任何音频帧"
+                        staleMs < LiveRecordingUiStats.STALE_THRESHOLD_MS ->
+                            "正常 · 最近 ${staleMs / 1000} 秒前收到数据"
+                        else -> "已 ${staleMs / 1000} 秒没有数据"
+                    },
+                    emphasis = staleMs == null || staleMs >= LiveRecordingUiStats.STALE_THRESHOLD_MS
+                )
+                StatusLine(
+                    "帧",
+                    "%,d 收到 · 丢 %,d（%.2f%%）".format(
+                        liveStats.receivedFrames,
+                        liveStats.lostFrames,
+                        liveStats.lossRatio * 100
                     )
-                }
+                )
+                StatusLine(
+                    "会话",
+                    "${liveStats.closedSegmentCount} 段 · ${liveStats.formatTotalBytes()}" +
+                        if (liveStats.disconnectCount > 0) " · 断连 ${liveStats.disconnectCount} 次" else ""
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun StatusLine(label: String, value: String, emphasis: Boolean = false) {
+    Row {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+            modifier = Modifier.width(44.dp)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (emphasis) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (emphasis) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
     }
 }
