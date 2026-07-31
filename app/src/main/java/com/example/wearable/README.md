@@ -35,7 +35,7 @@ val service = WearableServiceFactory.create(context)
 2. 服务发现后对 **A002 (TRANSFER)** 开启 Notify，发送握手请求，收到 HANDSHAKE_RESPONSE 后发送 HANDSHAKE_COMPLETED 与 SET_TIME
 3. 收到 CONTROL_RESPONSE（设时成功）后对 **A001** 发 read 触发设备，再对 **A003 (RECORDING)** 开启 Notify
 4. 此时认为「已开始采集」→ 调用 **onReady()**
-5. A003 持续推送 Opus → **BleStreamOpusReassembler** 同 `BleAudioReassembler` 解析并顺序追加；**实时**按 80 字节一包解码为 **mono PCM**；PCM 满 **chunkDurationMs**（默认 10s）封 WAV 回调，下一窗步长 **chunkDurationMs − overlapDurationMs**（默认 8s），重叠 **overlapDurationMs**（默认 2s）。若 `WearableConnectionConfig.dumpOverlapWavToDebugDir == true` 或 `setDumpOverlapWavToDebugDir(true)`，则同时写入 `files/wearable_wav_debug/overlap_*.wav`；否则仅 **onAudioChunkReady**。
+5. A003 持续推送 Opus → **BleStreamOpusReassembler** 解析并顺序追加；**实时**按 80 字节一包解码为 **mono PCM**；PCM 满 **chunkDurationMs**（默认 10s）封 WAV 回调，下一窗步长 **chunkDurationMs − overlapDurationMs**（默认 8s），重叠 **overlapDurationMs**（默认 2s）。若 `WearableConnectionConfig.dumpOverlapWavToDebugDir == true` 或 `setDumpOverlapWavToDebugDir(true)`，则同时写入 `files/wearable_wav_debug/overlap_*.wav`；否则仅 **onAudioChunkReady**。
 
 ## 数据类型
 

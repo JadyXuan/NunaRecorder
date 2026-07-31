@@ -34,7 +34,7 @@ interface AudioChunkProvider {
      *
      * 常见默认：chunkDurationMs = 60_000，overlapDurationMs = 10_000。
      *
-     * 实现说明（NunaWearableServiceImpl）：A003 按 BleAudioReassembler 逻辑重组后
+     * 实现说明（NunaWearableServiceImpl）：A003 重组后
      * 实时 80 字节 Opus 包解码为 mono PCM 时间轴；当累计 PCM 达到 [chunkDurationMs]
      * 即封 WAV 回调；下一窗从时间轴上前移 [chunkDurationMs − overlapDurationMs]，
      * 保证固定毫秒重叠。默认 10_000 / 2_000，可按对接改为 60_000 / 10_000。

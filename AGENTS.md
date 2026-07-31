@@ -4,7 +4,7 @@
 `../AGENTS.md`，本文件不复制也不覆盖它们**，只补充这个仓库自己的事实、边界和验证方式。
 
 Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取根 `AGENTS.md`。
-进入本仓库工作前，先读根 `AGENTS.md`、`../doc/status/PIPELINE_STATUS_2026-07-27.md`
+进入本仓库工作前，先读根 `AGENTS.md`、`../doc/status/2026-07-27-pipeline-status.md`
 和本仓库的 `docs/SESSION_SYNC_PROTOCOL.md`。
 
 ## 1. 仓库身份与分支纪律
@@ -20,6 +20,11 @@ Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取�
 
 ### 2.1 会话与音频格式
 
+> 2026-08-01 起 `BleAudioReassembler` 已拆成 `ble/OpusStreamAssembler.kt`（纯 Kotlin，
+> 负责重组和丢帧记账）+ `ble/SegmentOpusWriter.kt`（只写文件）。
+> 旧类把两件事揉在一起，必须随分段重建，跨段的半条消息每分钟丢一次。
+
+
 - 会话目录：`Downloads/nuna_{device}_{started_at_ms}/`，结构见 `docs/SESSION_SYNC_PROTOCOL.md` §1。
 - 音频是**裸 Opus 帧流**，`SessionManifest.toJson()` 里显式声明：
   `codec=opus_raw`、`sample_rate_hz=16000`、`channels=2`、`frame_duration_ms=20`、`frame_size_bytes=80`。
@@ -27,8 +32,14 @@ Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取�
 - 本地解码器：`audio/OpusToWavConverter.kt`（→ WAV，本地播放）、
   `audio/OpusToPcmMono.kt`（→ 16 kHz mono float，喂 Silero VAD）。
   服务端解码必须与这两个文件的参数逐项一致，并做 PCM 逐样本比对。
-- `SessionPaths.SEGMENT_DURATION_MS = 60_000`；设置项允许 10–600 秒，
-  但**当前生产 profile 固定 60 秒**，非 60 秒数据不得进入现有 Web 标注模型。
+- `SessionPaths.SEGMENT_DURATION_MS = 60_000`。2026-08-01 起分段时长**锁死 60 秒**，
+  设置项已移除（`RecordingOptions.from` 不再读用户设置）。要支持其他时长必须先引入
+  显式 schema/version 兼容，而不是放开一个输入框。
+- manifest 新增三处，都是为了让时间轴上的空洞可解释：
+  `audio.segments[].frames`（期望/实到/序号丢失/空洞位置）、
+  `audio.missing_segments`（完全没有音频的分段序号）、
+  `audio.deleted_segments`（参与者主动删除，与前者是两回事）、
+  `link`（断连区间 + 重组器诊断）。
 
 ### 2.2 同步客户端
 
@@ -49,7 +60,7 @@ Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取�
 - `manifest.json` / `context/context.jsonl` / `labels/vad_prelabel.json` 也走同一个上传，
   被服务端当成 60 秒音频入库。
 
-完整证据和服务端落库结果见 `../doc/status/PIPELINE_STATUS_2026-07-27.md` §3。
+完整证据和服务端落库结果见 `../doc/status/2026-07-27-pipeline-status.md` §3。
 
 **在 Data Platform 的 Receiver 实现 session v1 之前，不得用本 App 上传真实采集数据。**
 对齐新契约时应删除或禁用这条会话级 legacy 回退（`RecordingEntry.LegacyOpus` 的单文件路径
@@ -62,15 +73,21 @@ Claude Code 会通过根 `CLAUDE.md` 导入根 `AGENTS.md`；Codex 自动读取�
 Android 9+ 默认禁止明文，**不在白名单里的服务器地址会被系统直接拒绝**。
 换服务器（例如 RTX5060 的 Tailscale/内网地址）必须同步改这个文件并重新构建 APK。
 
-### 2.5 采集生命周期与长时可用性
+### 2.5 采集生命周期与长时可用性（2026-08-01 重写）
 
-- `MainActivity:113` 的 `private val sessionRecorder = SessionRecorder { ... }` 是 **Activity 字段**，
-  BLE 采集管线挂在 Activity 实例上，没有独立的录制前台服务。
-- 进程存活依赖录制期间启动的 `service/ContextDataService`（前台服务，`location|dataSync`）。
-  熄屏通常可撑住，**用户划掉任务卡片会中断采集**。
-- `service/ScreenOffKeepAlive.kt` 只在「有后台任务」时重新持 WakeLock 并拉起 VAD 前台服务，
-  不覆盖录制本身。
-- **12 小时连续采集目前是未验证状态**，不是已知可用。发设备前必须做真机 soak。
+- 采集由 `service/RecordingService.kt` 前台服务拥有（`connectedDevice|dataSync`），
+  持 `PARTIAL_WAKE_LOCK`。Activity 只读 `recording/RecordingController.kt` 的
+  两个 StateFlow，不再持有 GATT 或录制管线。
+- BLE 链路在 `ble/NunaBleLink.kt`：断开后按 `ble/ReconnectPolicy.kt` 指数退避重连
+  （上限 30 秒、**无次数上限**），只有用户主动停止才结束。覆盖走出范围、设备关机、
+  手机蓝牙被关（监听 `ACTION_STATE_CHANGED`），以及「链路连着但设备不推流」
+  ——最后这种只能靠看门狗超时抓。
+- 重连**继续写同一个会话**；中断区间写进 manifest 的 `link.events[]`（绝对 epoch 毫秒）。
+- 分段轮转由 `SessionRecorder.tick()` 按秒驱动，不再依赖 `feed()`。
+  BLE 断开时轮转照常推进，空段记进 `audio.missing_segments`。
+- **16 小时连续采集仍是未验证状态。** 上述改动都还没跑过真机 soak，
+  通过标准是「连续 N 小时无断连，或断连后自动恢复且 manifest 有记录」，
+  不是「跑完没崩」。发设备前必须做。
 
 ### 2.6 其他容易踩的点
 
@@ -80,25 +97,34 @@ Android 9+ 默认禁止明文，**不在白名单里的服务器地址会被系�
 - VAD 结果写在 `labels/vad_prelabel.json`，含 `has_speech` / `speech_ratio` / `speech_ms`，
   是**采集期机器证据**，不是权威人工标签，不得用来删音频或跳过 ASC/SED。
 
-## 3. 测试现状
-
-`app/src/test` 与 `app/src/androidTest` **只有 IDE 生成的模板测试**
-（`ExampleUnitTest`、`ExampleInstrumentedTest`）。所以：
+## 3. 测试现状（2026-08-01）
 
 ```bash
-./gradlew test          # 通过不代表采集/同步/解码逻辑被验证过
+export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+./gradlew test
 ./gradlew assembleDebug
 ```
 
+58 项 JVM 单测，覆盖：
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `ble/OpusStreamAssemblerTest` | 跨 notification 拼包、序号回绕/回退/重复、假帧头重同步、未凑齐帧淘汰 |
+| `recording/SessionRecorderTest` | 墙钟分段轮转、空段索引推进、帧账目、断连区间记录 |
+| `recording/RecordingStateMachineTest` | 停止后迟到回调不得复活会话；重连计数 |
+| `recording/SegmentDeleterTest` | 按片段删除与悬空引用清理 |
+| `session/SessionManifestTest` | manifest 往返，含 `frames` / `link` / `missing_segments` |
+| `sync/SessionSyncPlannerTest` | `client_upload_id` 复用与重开条件、服务端状态校正 |
+
+JVM 单测需要真的 `org.json`（`testImplementation("org.json:json:...")`），
+Android SDK 里的是桩，round-trip 测试会假失败。
+
+**仍然没有覆盖的**：`NunaBleLink`、`RecordingService` 的 Android 侧（需要真机/instrumented），
+`OpusToWavConverter` / `OpusToPcmMono` 的解码输出，`SessionSyncUploader` 的 HTTP 行为。
+
 改动同步、manifest、VAD、解码或会话生命周期时，**必须自带 JVM 单元测试**。
-优先给这些纯逻辑加测试（不需要设备）：
-
-- `AudioMetaUtil.parseStartTimeFromFileName`（当前对 `seg_000.opus` 返回 0 就是缺测试的直接后果）
-- `SessionManifest` 的 `toJson` / `load` 往返
-- `SessionSyncInventory.buildRelative` 的路径与 media type
-- `OpusToWavConverter` / `OpusToPcmMono` 对固定 fixture 的解码输出
-
-真机验证不可省的部分：BLE 断连重连、熄屏、切网、长时 soak、权限拒绝路径。
+真机验证不可省的部分：BLE 断连重连、熄屏、切网、长时 soak、权限拒绝路径、
+系统深色模式下的配色。
 
 ## 4. 修改本仓库时的完成标准
 

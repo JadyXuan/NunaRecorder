@@ -36,6 +36,51 @@
 - `context.file` → 固定 `context/context.jsonl`
 - `vad` → `labels/vad_prelabel.json`
 
+> **`start_ms` 是相对 `started_at_ms` 的偏移，不是 epoch。**
+> 绝对时间 = `started_at_ms + start_ms`。服务端曾把它当 epoch 用，
+> 整批数据落到 1970-01-01。
+
+#### 2026-08-01 新增字段（向后兼容，旧会话没有这些键）
+
+| 字段 | 含义 |
+| --- | --- |
+| `audio.segments[].frames` | 该段的帧账目，见下 |
+| `audio.missing_segments[]` | 完全没有音频的分段序号（链路中断） |
+| `audio.deleted_segments[]` | `{index, deleted_at_ms}`，参与者主动删除 |
+| `link` | 断连区间与重组器诊断 |
+
+`frames` 把缺失分成两类，因为归属完全不同：
+
+```json
+{
+  "expected": 3000,          // 按墙钟应有的 20ms 帧数
+  "received": 2952,          // 实际写入的帧数
+  "sequence_lost": 48,       // 设备 frameId 序号上的空洞 → 帧发了但没到（链路丢包）
+  "unaccounted": 0,          // expected − received − sequence_lost → 设备根本没发（可为负）
+  "gaps": [{"at_frame_offset": 1200, "missing_frames": 48, "next_frame_id": 6418}]
+}
+```
+
+**不做补偿**：不补零、不拉伸时间轴。段短了就是短了，空洞位置如实上报。
+
+`link` 里的时间是**绝对 epoch 毫秒**（字段名带 `_at_ms` 以示区分）：
+
+```json
+{
+  "disconnect_count": 1,
+  "total_down_ms": 55000,
+  "events": [
+    {"start_at_ms": 1800000060000, "end_at_ms": 1800000115000,
+     "reason": "connection_timeout(8)", "reconnect_attempts": 3, "down_ms": 55000}
+  ],
+  "assembler": {"resync_skipped_bytes": 137, "incomplete_frames": 2,
+                "duplicate_frames": 1, "reordered_frames": 4,
+                "dropped_carry_over_bytes": 60}
+}
+```
+
+`end_at_ms` 为 `null` 表示会话结束时链路仍未恢复。
+
 ### 1.2 `context/context.jsonl`（每行一个 JSON）
 
 | type | 含义 | 示例字段 |
@@ -200,19 +245,29 @@ sequenceDiagram
 
 **只有 `status == synced` 时，App 将会话标为已同步。**
 
-### 2.4 （可选）`GET /thingx/api/v1/session/sync/status?upload_id=`
+### 2.4 `GET /v1/session/sync/status?upload_id=`（续传必需，非可选）
 
-用于 App 重启后向服务端查询进度；响应结构与 `sync_status.json` 类似。
+App 在 `init` 返回 `resumed: true` 时调用，按服务端的实际文件状态决定还要传哪些。
+响应含 `files[]`，每项有 `path` / `status`（`received` | `pending`）/ `sha256`。
+
+**`client_upload_id` 必须持久化并复用**（存在 `labels/sync_status.json`），
+否则服务端认不出是同一次上传，重试会把所有文件重传一遍。
+
+复用有一个硬条件：**清单必须完全一致**。服务端 `init` 命中已有 `client_upload_id`
+时会直接返回旧 upload，不会用新清单登记文件。上次上传失败后会话又录了新分段还复用旧 id，
+新分段永远不会被登记，commit 却按旧清单返回 `synced`，会话被标成已同步——数据就没了。
+清单一变就必须重新开一次上传。见 `sync/SessionSyncPlan.kt`。
 
 ---
 
-## 3. 兼容旧接口（回退）
+## 3. 兼容旧接口（回退）—— 已删除，不要重新引入
 
-若 v1 接口返回 `404`，App 可回退为 **按文件调用** 既有接口：
+会话级 legacy 回退**已经从客户端删除**。它不是可用降级方案，而是数据损坏路径：
+所有音频段落到 `1970-01-01`、跨会话 basename 互相覆盖、
+`manifest.json` / `context.jsonl` / `vad_prelabel.json` 被当成 60 秒音频入库，
+而服务端全程返回 `success`。
 
-`POST /thingx/api/file/upload/audio`（multipart: `file` + `metadata`）
-
-此时 **无法保证会话级 commit**，`sync_status` 记为 `partial`，并在 UI 提示「服务端未升级 v1 同步」。
+v1 `init` 返回 404 时正确的做法是**停下来报错，把数据留在手机上**。
 
 ---
 

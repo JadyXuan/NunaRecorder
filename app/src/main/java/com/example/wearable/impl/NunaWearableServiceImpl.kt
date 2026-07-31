@@ -108,7 +108,7 @@ class NunaWearableServiceImpl(
     private val bufferLock = Any()
 
     /**
-     * 与 [com.example.nunarecorder.ble.BleAudioReassembler] 同解析；重组结果按 writeFrameToFile 顺序追加。
+     * 与 [com.example.nunarecorder.ble.OpusStreamAssembler] 同解析；重组结果按到达顺序追加。
      * 实时按 80 字节 Opus 包解码 → mono PCM 时间轴；满 [chunkDurationMs] 即封 WAV 回调，
      * 下一窗起点前移 [chunkDurationMs − overlapDurationMs]，保证固定 ms 重叠。
      */
@@ -150,7 +150,7 @@ class NunaWearableServiceImpl(
      */
     private val step3AwaitingA001Read = AtomicBoolean(false)
 
-    /** 已弃用主路径：A003 现由 bleStreamReassembler 按 BleAudioReassembler 逻辑解析 */
+    /** 已弃用主路径：A003 现由 bleStreamReassembler 解析 */
     private val reassembler = OpusFrameReassembler { _, _ -> }
 
     /**
@@ -708,7 +708,7 @@ class NunaWearableServiceImpl(
     }
 
     /**
-     * BleAudioReassembler.writeFrameToFile 等价 append → 实时 80 字节一包解码 → mono PCM；
+     * 重组完成后 append → 实时 80 字节一包解码 → mono PCM；
      * PCM 满 chunkDurationMs 封 WAV，再按 stride 前移，保留 overlapDurationMs 重叠。
      */
     private fun onBleStreamFrameAppended(concatenated: ByteArray) {
@@ -1047,8 +1047,11 @@ class NunaWearableServiceImpl(
     }
 
     /**
-     * 与 [com.example.nunarecorder.ble.BleAudioReassembler] 同结构：feed → parseAudioPayload → 拼齐后
-     * 调用 [onAppendFrame]（等价 writeFrameToFile 写入内容），不经过按 frameId 的 map buffer。
+     * 与 [com.example.nunarecorder.ble.OpusStreamAssembler] 同结构：feed → parseAudioPayload → 拼齐后
+     * 调用 [onAppendFrame]，不经过按 frameId 的 map buffer。
+     *
+     * 注意：这是调试页专用路径，**没有**跨 notification 的 carryOver，
+     * 也不统计丢帧。采集主路径请用 OpusStreamAssembler。
      */
     private class BleStreamOpusReassembler(
         private val onAppendFrame: (ByteArray) -> Unit
@@ -1186,7 +1189,7 @@ class NunaWearableServiceImpl(
                             onFrame(frameId, concatenated)
                             frames.remove(frameId)
                         } else if (!complete) {
-                            // 与 BleAudioReassembler.writeFrameToFile 一致：缺 chunk 不写、不 remove，保留等后续包
+                            // 缺 chunk 不写、不 remove，保留等后续包
                             Log.w(TAG, "[reassembler] frameId=$frameId incomplete chunks 0..${frame.totalChunks - 1}, keep")
                         }
                         // pos != size：拼接长度不一致，不 remove，避免丢帧（原逻辑会 remove 导致 buffer 空）
