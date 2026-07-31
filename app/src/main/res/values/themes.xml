@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.NunaRecorder" parent="android:Theme.Material.Light.NoActionBar" />
+    <!--
+      窗口底色必须跟随系统深浅色，否则深色模式下 Compose 用近白色文字、
+      窗口却是白底，就成了佩戴者报告的「白底白字」。真正的修复在
+      ui/theme/Theme.kt 的根 Surface；这里只是消掉启动瞬间的白闪。
+    -->
+    <style name="Theme.NunaRecorder" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/nuna_window_background</item>
+    </style>
 </resources>

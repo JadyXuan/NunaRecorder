@@ -24,9 +24,7 @@ class UserSettingsStorage(context: Context) {
                 logLevel = LogLevel.entries.find {
                     it.name.equals(obj.optString("logLevel", "INFO"), ignoreCase = true)
                 } ?: LogLevel.INFO,
-                autoVadOnRecord = obj.optBoolean("autoVadOnRecord", true),
-                segmentEnabled = obj.optBoolean("segmentEnabled", true),
-                segmentDurationSec = obj.optInt("segmentDurationSec", 60).coerceIn(10, 600)
+                autoVadOnRecord = obj.optBoolean("autoVadOnRecord", true)
             )
         } catch (_: Exception) {
             UserSettings()
@@ -41,8 +39,6 @@ class UserSettingsStorage(context: Context) {
             put("uploadToken", settings.uploadToken)
             put("logLevel", settings.logLevel.name)
             put("autoVadOnRecord", settings.autoVadOnRecord)
-            put("segmentEnabled", settings.segmentEnabled)
-            put("segmentDurationSec", settings.segmentDurationSec)
         }
         sp.edit().putString(KEY_SETTINGS, obj.toString()).apply()
     }

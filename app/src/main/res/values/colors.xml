@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- 窗口底色，与 Compose 的 NunaBg 一致；深色模式见 values-night/colors.xml -->
+    <color name="nuna_window_background">#FFF4F7FA</color>
 </resources>

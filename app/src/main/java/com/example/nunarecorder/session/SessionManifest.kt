@@ -51,7 +51,9 @@ data class SessionManifest(
      * 完全没有音频的分段序号。分段序号由墙钟推导，所以 `segments[]` 里会出现空洞，
      * 这里把空洞显式列出来，而不是让它看起来像会话本来就短。
      */
-    var missingSegments: List<Int> = emptyList()
+    var missingSegments: List<Int> = emptyList(),
+    /** 参与者主动删除的分段；与 [missingSegments] 是两回事，不能混 */
+    var deletedSegments: List<SegmentDeletion> = emptyList()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("format_version", formatVersion)
@@ -83,6 +85,7 @@ data class SessionManifest(
                 }
             })
             put("missing_segments", JSONArray().apply { missingSegments.forEach { put(it) } })
+            put("deleted_segments", JSONArray().apply { deletedSegments.forEach { put(it.toJson()) } })
         })
         put("link", link.toJson())
         put("context", JSONObject().apply {
@@ -125,6 +128,9 @@ data class SessionManifest(
             }
             val missingArr = audio.optJSONArray("missing_segments") ?: JSONArray()
             val missing = (0 until missingArr.length()).map { missingArr.getInt(it) }
+            val deletedArr = audio.optJSONArray("deleted_segments") ?: JSONArray()
+            val deleted = (0 until deletedArr.length())
+                .map { SegmentDeletion.fromJson(deletedArr.getJSONObject(it)) }
             val vadJ = j.optJSONObject("vad")
             val recJ = j.optJSONObject("recording")
             SessionManifest(
@@ -148,7 +154,8 @@ data class SessionManifest(
                 openSegmentIndex = recJ?.optInt("open_segment_index", -1)?.takeIf { it >= 0 },
                 openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L,
                 link = LinkHealth.fromJson(j.optJSONObject("link")),
-                missingSegments = missing
+                missingSegments = missing,
+                deletedSegments = deleted
             )
         } catch (_: Exception) {
             null

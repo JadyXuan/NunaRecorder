@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -79,12 +80,15 @@ fun RecordingDetailScreen(
     playback: SegmentPlaybackState?,
     onPlaySegment: (segmentIndex: Int, audioRelPath: String) -> Unit,
     onStopPlayback: () -> Unit,
+    /** 删除单个 1 分钟片段，返回是否成功 */
+    onDeleteSegment: (segmentIndex: Int) -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
     var manifest by remember { mutableStateOf(session.manifest) }
     var vadData by remember { mutableStateOf<VadPrelabelData?>(null) }
     var rows by remember { mutableStateOf(listOf<SegmentDetailRow>()) }
     var resumeMessage by remember { mutableStateOf<String?>(null) }
+    var segmentToDelete by remember { mutableStateOf<SegmentDetailRow?>(null) }
 
     fun reload() {
         manifest = SessionManifest.load(SessionPaths.manifestFile(session.dir)) ?: session.manifest
@@ -153,6 +157,33 @@ fun RecordingDetailScreen(
     }
 
     val showingLive = isLiveRecording || manifest.recordingActive
+
+    // 本地删除粒度与数据粒度一致：一次一分钟。整会话删除在列表页被挡住，
+    // 必须先在这里把片段删干净。
+    segmentToDelete?.let { row ->
+        AlertDialog(
+            onDismissRequest = { segmentToDelete = null },
+            title = { Text("删除这一分钟", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "将删除第 ${row.index} 段（会话开始后第 ${row.index + 1} 分钟）的音频、" +
+                        "manifest 条目和 VAD 预标注。删除会被记入 manifest，无法撤销。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (onDeleteSegment(row.index)) reload()
+                    segmentToDelete = null
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { segmentToDelete = null }) { Text("取消") }
+            }
+        )
+    }
 
     Column(
         modifier = modifier
@@ -235,13 +266,28 @@ fun RecordingDetailScreen(
                     val pb = playback
                     val isPlaying = pb?.segmentIndex == row.index
                     val isConverting = isPlaying && pb?.converting == true
-                    SegmentVadCard(
-                        row = row,
-                        isPlaying = isPlaying,
-                        isConverting = isConverting,
-                        isLiveOpen = row.endMs == 0L && showingLive,
-                        onClick = { onPlaySegment(row.index, row.audioFile) }
-                    )
+                    val isOpen = row.endMs == 0L && showingLive
+                    Column {
+                        SegmentVadCard(
+                            row = row,
+                            isPlaying = isPlaying,
+                            isConverting = isConverting,
+                            isLiveOpen = isOpen,
+                            onClick = { onPlaySegment(row.index, row.audioFile) }
+                        )
+                        if (!isOpen && !showingLive) {
+                            TextButton(
+                                onClick = { segmentToDelete = row },
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text(
+                                    "删除这一分钟",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
             }

@@ -51,6 +51,8 @@ class SessionSyncUploader(
         files: MutableList<SyncFileEntry>,
         clientUploadId: String,
         onInit: (uploadId: String) -> Unit = {},
+        /** 返回 true 时中止本次上传；已传完的文件保留在服务端，下次续传 */
+        shouldCancel: () -> Boolean = { false },
         onFileProgress: (SyncFileEntry, index: Int, total: Int) -> Unit
     ): CommitResult {
         val initResp = postInit(sessionDir, manifest, files, clientUploadId)
@@ -67,7 +69,22 @@ class SessionSyncUploader(
         val uploadId = initResp.getString("upload_id")
         onInit(uploadId)
 
+        // 服务端认出这是同一次上传时会返回 resumed=true。此时以**服务端**的
+        // 文件状态为准，而不是本机 sync_status.json——本机记录可能停在崩溃前那一刻。
+        if (initResp.optBoolean("resumed", false)) {
+            val serverFiles = getStatus(uploadId)
+            if (serverFiles != null) {
+                val skipped = SessionSyncPlanner.applyServerState(files, serverFiles)
+                SessionSyncCoordinator.log("服务端已有 $skipped/${files.size} 个文件，只补缺失的")
+            }
+        }
+
         files.forEachIndexed { index, entry ->
+            if (shouldCancel()) return CommitResult(false, "cancelled", emptyList(), "上传已取消")
+            if (entry.status == "synced") {
+                onFileProgress(entry, index, files.size)
+                return@forEachIndexed
+            }
             entry.status = "uploading"
             onFileProgress(entry, index, files.size)
             val f = File(sessionDir, entry.path)
@@ -83,6 +100,8 @@ class SessionSyncUploader(
             onFileProgress(entry, index, files.size)
         }
 
+        if (shouldCancel()) return CommitResult(false, "cancelled", emptyList(), "上传已取消")
+
         val failed = files.filter { it.status != "synced" }
         if (failed.isNotEmpty()) {
             return CommitResult(
@@ -94,6 +113,32 @@ class SessionSyncUploader(
         }
 
         return postCommit(uploadId, clientUploadId, files)
+    }
+
+    /** `GET /v1/session/sync/status?upload_id=`：服务端已经收到了哪些文件。 */
+    fun getStatus(uploadId: String): List<ServerFileState>? {
+        val request = Request.Builder()
+            .url("${v1("status")}?upload_id=$uploadId")
+            .withToken()
+            .get()
+            .build()
+        return try {
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val arr = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?: return emptyList()
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    ServerFileState(
+                        path = o.optString("path"),
+                        status = o.optString("status"),
+                        sha256 = o.optString("sha256").lowercase()
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** 旧接口逐文件上传（无会话级确认） */

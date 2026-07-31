@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
-import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 会话同步状态（供 UI 订阅）；IO 在后台协程执行。
@@ -23,7 +23,7 @@ import java.util.UUID
  */
 object SessionSyncCoordinator {
 
-    enum class Phase { SYNCING, DONE, ERROR }
+    enum class Phase { SYNCING, DONE, ERROR, CANCELLED }
 
     data class State(
         val targetKey: String,
@@ -38,11 +38,24 @@ object SessionSyncCoordinator {
     private val _state = MutableStateFlow<State?>(null)
     val state: StateFlow<State?> = _state.asStateFlow()
 
+    /** 上传卡住时用户可以取消；下一次上传会从服务端已收到的地方接着传 */
+    private val cancelRequested = AtomicBoolean(false)
+
     var onLog: ((String) -> Unit)? = null
 
     fun isActiveFor(targetKey: String): Boolean {
         val s = _state.value ?: return false
         return s.targetKey == targetKey && s.phase == Phase.SYNCING
+    }
+
+    /**
+     * 请求取消当前上传。已经传完的文件留在服务端，`sync_status.json` 停在
+     * `partial` 而不是半截状态，下次点上传会复用同一个 `client_upload_id` 续传。
+     */
+    fun cancel() {
+        if (_state.value?.phase != Phase.SYNCING) return
+        cancelRequested.set(true)
+        log("正在取消上传…")
     }
 
     fun start(
@@ -60,6 +73,7 @@ object SessionSyncCoordinator {
             log("同步已在进行中")
             return
         }
+        cancelRequested.set(false)
         _state.value = State(key, entry.displayName, Phase.SYNCING, 0f, "准备同步…")
         scope.launch {
             try {
@@ -73,10 +87,11 @@ object SessionSyncCoordinator {
                         )
                     }
                 }
-                if (result.success) {
-                    complete(key, entry.displayName, result.message, result.finalStatus)
-                } else {
-                    fail(key, entry.displayName, result.message, result.finalStatus)
+                when {
+                    result.success -> complete(key, entry.displayName, result.message, result.finalStatus)
+                    result.finalStatus == "cancelled" ->
+                        cancelled(key, entry.displayName, result.message)
+                    else -> fail(key, entry.displayName, result.message, result.finalStatus)
                 }
             } catch (e: Exception) {
                 fail(key, entry.displayName, e.message ?: "同步异常", "failed")
@@ -104,12 +119,23 @@ object SessionSyncCoordinator {
             return SyncOutcome(false, "没有可同步的文件", "failed")
         }
 
-        val clientUploadId = UUID.randomUUID().toString()
-        var syncStatus = SessionSyncStatus(
+        // 复用上一次的 client_upload_id，服务端才认得出这是续传。
+        // 之前每次都新生成一个，于是重试等于把所有文件重传一遍。
+        val plan = SessionSyncPlanner.plan(
+            previous = SessionSyncStatus.load(dir),
+            sessionId = manifest.sessionId,
+            inventory = inventory
+        )
+        plan.restartReason?.let { log(it) }
+        val clientUploadId = plan.clientUploadId
+        if (plan.resumingPreviousUpload) {
+            log("续传上一次上传（client_upload_id 复用）")
+        }
+        val syncStatus = SessionSyncStatus(
             sessionId = manifest.sessionId,
             status = "syncing",
             clientUploadId = clientUploadId,
-            files = inventory.toMutableList()
+            files = plan.files
         )
         SessionSyncStatusIO.write(dir, syncStatus)
 
@@ -130,7 +156,8 @@ object SessionSyncCoordinator {
             onInit = { id ->
                 syncStatus.uploadId = id
                 SessionSyncStatusIO.write(dir, syncStatus)
-            }
+            },
+            shouldCancel = { cancelRequested.get() }
         ) { file, index, total ->
             val p = 0.1f + 0.8f * ((index + 1).toFloat() / total.coerceAtLeast(1))
             update(dir.absolutePath, entry.displayName, p, "上传 ${file.path} (${index + 1}/$total)", "syncing")
@@ -153,7 +180,9 @@ object SessionSyncCoordinator {
         syncStatus.status = "partial"
         syncStatus.lastError = commit.message
         SessionSyncStatusIO.write(dir, syncStatus)
-        return SyncOutcome(false, commit.message, "partial")
+        // client_upload_id 留在 sync_status.json 里：下一次点上传会带着它去 init，
+        // 服务端返回 resumed=true 和已收文件清单，只补缺失的。
+        return SyncOutcome(false, commit.message, commit.serverStatus.takeIf { it == "cancelled" } ?: "partial")
     }
 
     private fun syncLegacy(
@@ -193,6 +222,11 @@ object SessionSyncCoordinator {
         _state.value = State(key, name, Phase.SYNCING, progress.coerceIn(0f, 1f), message, syncStatus)
     }
 
+    private fun cancelled(key: String, name: String, message: String) {
+        log(message)
+        _state.value = State(key, name, Phase.CANCELLED, 0f, message, "partial")
+    }
+
     private fun complete(key: String, name: String, message: String, syncStatus: String?) {
         log(message)
         _state.value = State(key, name, Phase.DONE, 1f, message, syncStatus)
@@ -218,7 +252,7 @@ object SessionSyncCoordinator {
 
     fun clearDoneState() {
         val s = _state.value ?: return
-        if (s.phase == Phase.DONE || s.phase == Phase.ERROR) {
+        if (s.phase == Phase.DONE || s.phase == Phase.ERROR || s.phase == Phase.CANCELLED) {
             _state.value = null
         }
     }

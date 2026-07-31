@@ -7,6 +7,7 @@ import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.data.UserSettings
+import com.example.nunarecorder.sync.ServerHandshakeCheck
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -31,6 +32,10 @@ class MainViewModel : ViewModel() {
     val activeRecordingPath = mutableStateOf<String?>(null)
     /** 内存中的实时统计（比 manifest 刷新更及时） */
     val liveRecordingStats = mutableStateOf<LiveRecordingUiStats?>(null)
+
+    /** 保存设置后的服务器自检结果 */
+    val settingsCheckResult = mutableStateOf<ServerHandshakeCheck.Result?>(null)
+    val settingsCheckRunning = mutableStateOf(false)
 
     val wearableDebugLogLines = mutableStateListOf<String>()
 

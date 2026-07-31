@@ -48,6 +48,7 @@ import com.example.nunarecorder.audio.SegmentPlaybackState
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.migration.MigrationCoordinator
+import com.example.nunarecorder.recording.SegmentDeleter
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
@@ -131,7 +132,9 @@ fun RecordingsScreen(
     }
     LaunchedEffect(syncState) {
         when (syncState?.phase) {
-            SessionSyncCoordinator.Phase.DONE, SessionSyncCoordinator.Phase.ERROR -> {
+            SessionSyncCoordinator.Phase.DONE,
+            SessionSyncCoordinator.Phase.ERROR,
+            SessionSyncCoordinator.Phase.CANCELLED -> {
                 refreshList()
                 SessionSyncCoordinator.clearDoneState()
             }
@@ -160,12 +163,24 @@ fun RecordingsScreen(
             playback = segmentPlayback?.takeIf { it.sessionDirPath == session.dir.absolutePath },
             onPlaySegment = { index, rel -> onPlaySegment(session, index, rel) },
             onStopPlayback = onStopPlayback,
+            onDeleteSegment = { index ->
+                val result = SegmentDeleter.deleteSegment(session.dir, index)
+                scope.launch { snackbarHostState.showSnackbar(result.message) }
+                refreshList()
+                result.ok
+            },
             modifier = Modifier.fillMaxSize()
         )
         return
     }
 
     entryToDelete?.let { entry ->
+        // 本地删除以 1 分钟片段为粒度（P1-12）。整会话删除只在片段清空后才允许，
+        // 避免一次误触丢掉一整天。
+        val remainingSegments = when (entry) {
+            is RecordingEntry.Session -> SegmentDeleter.remainingSegmentCount(entry.dir)
+            is RecordingEntry.LegacyOpus -> 0
+        }
         AlertDialog(
             onDismissRequest = { entryToDelete = null },
             shape = RoundedCornerShape(16.dp),
@@ -174,7 +189,13 @@ fun RecordingsScreen(
                 Text(
                     when (entry) {
                         is RecordingEntry.Session ->
-                            "将删除整个会话文件夹「${entry.displayName}」及其中所有分段、上下文与 VAD 预标注。"
+                            if (remainingSegments > 0) {
+                                "这个会话里还有 $remainingSegments 个 1 分钟片段。" +
+                                    "整会话删除会一次丢掉一整天的采集，所以请先进入会话按片段删除，" +
+                                    "清空后再删除会话本身。"
+                            } else {
+                                "将删除空会话文件夹「${entry.displayName}」及其中的上下文与 VAD 预标注。"
+                            }
                         is RecordingEntry.LegacyOpus ->
                             "将删除「${entry.displayName}」及同名关联文件。"
                     },
@@ -182,12 +203,15 @@ fun RecordingsScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    onDeleteEntry(entry) {
-                        refreshList()
-                        entryToDelete = null
+                TextButton(
+                    enabled = remainingSegments == 0,
+                    onClick = {
+                        onDeleteEntry(entry) {
+                            refreshList()
+                            entryToDelete = null
+                        }
                     }
-                }) {
+                ) {
                     Text("删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                 }
             },
@@ -386,6 +410,7 @@ fun RecordingsScreen(
                             isSyncing = syncing,
                             syncProgress = syncProgress,
                             syncMessage = syncMessage,
+                            onCancelSync = { SessionSyncCoordinator.cancel() },
                             onShare = {
                                 includeContextData = when (entry) {
                                     is RecordingEntry.Session -> entry.hasContext

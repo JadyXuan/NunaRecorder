@@ -27,6 +27,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +58,8 @@ fun RecordingItem(
     isSyncing: Boolean = false,
     syncProgress: Float? = null,
     syncMessage: String? = null,
+    /** 取消正在进行的上传；已传完的文件留在服务端，下次续传 */
+    onCancelSync: (() -> Unit)? = null,
     isLiveRecording: Boolean = false,
     liveTotalBytes: Long? = null,
     liveSegmentCount: Int? = null,
@@ -235,13 +238,28 @@ fun RecordingItem(
                     progress = { syncProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
-                syncMessage?.let { msg ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        msg,
+                        syncMessage.orEmpty(),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(top = 2.dp)
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(top = 2.dp)
                     )
+                    // 上传卡住时得能停下来，而不是只能等（P1-13）
+                    if (isSyncing && onCancelSync != null) {
+                        TextButton(onClick = onCancelSync) {
+                            Text(
+                                "取消",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                 }
             }
 

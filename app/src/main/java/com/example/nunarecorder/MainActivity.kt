@@ -42,6 +42,7 @@ import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.recording.RecordingController
+import com.example.nunarecorder.sync.ServerHandshakeCheck
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.DiagnosticsLog
@@ -60,6 +61,9 @@ import com.example.wearable.WearableConnectionConfig
 import com.example.wearable.impl.NunaWearableServiceImpl
 import com.example.wearable.internal.WearableBleConfig
 import com.example.nunarecorder.ui.theme.NunaRecorderTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 
 class MainActivity : ComponentActivity() {
@@ -144,6 +148,8 @@ class MainActivity : ComponentActivity() {
             val logText by viewModel.logText
             val selectedDeviceAddress by viewModel.selectedDeviceAddress
             val userSettings by viewModel.userSettings
+            val settingsCheck by viewModel.settingsCheckResult
+            val settingsChecking by viewModel.settingsCheckRunning
             // 采集状态的唯一来源是服务，不是 Activity 的字段
             val linkStatus by RecordingController.link.collectAsState()
             val recorderStats by RecordingController.stats.collectAsState()
@@ -236,18 +242,9 @@ class MainActivity : ComponentActivity() {
                                 onAutoVadChange = { enabled ->
                                     viewModel.setUserSettings(userSettings.copy(autoVadOnRecord = enabled))
                                 },
-                                onSegmentEnabledChange = { enabled ->
-                                    viewModel.setUserSettings(userSettings.copy(segmentEnabled = enabled))
-                                },
-                                onSegmentDurationChange = { secStr ->
-                                    val sec = secStr.toIntOrNull()?.coerceIn(10, 600)
-                                        ?: userSettings.segmentDurationSec
-                                    viewModel.setUserSettings(userSettings.copy(segmentDurationSec = sec))
-                                },
-                                onSave = {
-                                    userSettingsStorage.save(userSettings)
-                                    appendLog("设置已保存")
-                                },
+                                onSave = { saveSettingsAndCheckServer(userSettings) },
+                                checkResult = settingsCheck,
+                                checkRunning = settingsChecking,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -330,6 +327,27 @@ class MainActivity : ComponentActivity() {
     private fun stopRecording() {
         appendLog("停止采集")
         RecordingController.stop(this)
+    }
+
+    /**
+     * 保存设置后立刻做一次服务器握手自检，把结果显示出来。
+     *
+     * 参与者在入组现场就该知道配置对不对——原来点保存没有任何反馈，
+     * 采完一整天才发现传不上去已经太晚了。
+     */
+    private fun saveSettingsAndCheckServer(settings: com.example.nunarecorder.data.UserSettings) {
+        userSettingsStorage.save(settings)
+        appendLog("设置已保存，正在检查服务器…")
+        viewModel.settingsCheckRunning.value = true
+        viewModel.settingsCheckResult.value = null
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                ServerHandshakeCheck.run(httpClient, settings)
+            }
+            viewModel.settingsCheckRunning.value = false
+            viewModel.settingsCheckResult.value = result
+            result.lines.forEach { appendLog("自检: ${it.text}") }
+        }
     }
 
     /**

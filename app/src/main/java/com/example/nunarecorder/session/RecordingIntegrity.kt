@@ -114,6 +114,30 @@ class SegmentFrameAccumulator {
 }
 
 /**
+ * 参与者主动删掉的一分钟。
+ *
+ * 必须和 `missing_segments`（链路中断没采到）分开记：前者是知情同意事实，
+ * 后者是数据质量问题。都表现为分段序号空洞，混在一起就再也分不清了。
+ */
+data class SegmentDeletion(
+    val index: Int,
+    /** 绝对 epoch 毫秒 */
+    val deletedAtMs: Long
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("index", index)
+        put("deleted_at_ms", deletedAtMs)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = SegmentDeletion(
+            index = o.optInt("index"),
+            deletedAtMs = o.optLong("deleted_at_ms")
+        )
+    }
+}
+
+/**
  * 一次链路中断。**时间是绝对 epoch 毫秒**，不是相对会话开始的偏移——
  * segment 的 `start_ms` 是相对偏移，服务端曾把它当 epoch 用，整批数据落到 1970-01-01
  * （见 doc/status/2026-07-31-field-test.md §1.1）。字段名带 `_at_ms` 以示区分。
