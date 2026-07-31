@@ -105,7 +105,7 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd
 ./gradlew assembleDebug
 ```
 
-58 项 JVM 单测，覆盖：
+59 项 JVM 单测，覆盖：
 
 | 测试 | 覆盖 |
 | --- | --- |
@@ -113,6 +113,7 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd
 | `recording/SessionRecorderTest` | 墙钟分段轮转、空段索引推进、帧账目、断连区间记录 |
 | `recording/RecordingStateMachineTest` | 停止后迟到回调不得复活会话；重连计数 |
 | `recording/SegmentDeleterTest` | 按片段删除与悬空引用清理 |
+| `recording/SessionRecorderConcurrencyTest` | feed/tick 并发下字节守恒；**是冒烟测试不是竞态检测器** |
 | `session/SessionManifestTest` | manifest 往返，含 `frames` / `link` / `missing_segments` |
 | `sync/SessionSyncPlannerTest` | `client_upload_id` 复用与重开条件、服务端状态校正 |
 

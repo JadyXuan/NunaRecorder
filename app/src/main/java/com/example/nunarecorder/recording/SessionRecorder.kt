@@ -50,6 +50,10 @@ data class LiveRecordingStats(
  *
  * 这个类不碰 Android API（除了通过 [SegmentOpusWriter] 记录写失败），
  * 会话目录、时钟和 VAD 入队都从外部注入，因此可以直接跑 JVM 单测。
+ *
+ * **线程安全**：[feed] 在 BLE 回调线程上被调用（50 次/秒，刻意不绕主线程），
+ * 而 [tick] 和 [liveStats] 在服务的主线程 Handler 上。两边都会动分段轮转状态，
+ * 所以所有对外方法都加锁。锁内只有一次文件写，无竞争时的开销可以忽略。
  */
 class SessionRecorder(
     private val onLog: (String) -> Unit,
@@ -99,6 +103,7 @@ class SessionRecorder(
 
     val isLinkDown: Boolean get() = openGapStartMs != null
 
+    @Synchronized
     fun liveStats(): LiveRecordingStats? {
         val dir = sessionDir ?: return null
         val closedBytes = manifest?.segments?.sumOf { it.bytes } ?: 0L
@@ -117,6 +122,7 @@ class SessionRecorder(
         )
     }
 
+    @Synchronized
     fun start(
         sessionDir: File,
         deviceName: String,
@@ -153,6 +159,7 @@ class SessionRecorder(
     }
 
     /** 喂入一个 A003 notification 的原始字节。 */
+    @Synchronized
     fun feed(data: ByteArray) {
         if (sessionDir == null) return
         val frames = assembler.feed(data)
@@ -173,6 +180,7 @@ class SessionRecorder(
     /**
      * 由宿主按秒调用。没有音频时也要推进分段轮转——否则断连期间时间轴会静默塌陷。
      */
+    @Synchronized
     fun tick() {
         if (sessionDir == null) return
         maybeRotateSegment(clock())
@@ -180,6 +188,7 @@ class SessionRecorder(
     }
 
     /** BLE 断开。会话保持打开，等待重连续写。 */
+    @Synchronized
     fun onLinkLost(reason: String) {
         if (sessionDir == null || openGapStartMs != null) return
         assembler.onLinkInterrupted()
@@ -190,11 +199,13 @@ class SessionRecorder(
         flushManifestNow()
     }
 
+    @Synchronized
     fun onReconnectAttempt() {
         if (openGapStartMs != null) openGapAttempts++
     }
 
     /** 重连成功，继续写**同一个**会话。 */
+    @Synchronized
     fun onLinkRestored() {
         val start = openGapStartMs ?: return
         val now = clock()
@@ -205,6 +216,7 @@ class SessionRecorder(
         flushManifestNow()
     }
 
+    @Synchronized
     fun stop() {
         val dir = sessionDir ?: return
         val now = clock()
