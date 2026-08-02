@@ -176,7 +176,8 @@ fun MainScreen(
                     contentColor = MaterialTheme.colorScheme.error
                 ),
                 border = androidx.compose.foundation.BorderStroke(
-                    1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                    1.dp,
+                    MaterialTheme.colorScheme.error.copy(alpha = if (sessionActive) 0.5f else 0.15f)
                 ),
                 enabled = sessionActive
             ) {
@@ -357,9 +358,16 @@ private fun LinkHealthPanel(
         staleMs < LiveRecordingUiStats.STALE_THRESHOLD_MS
     val healthy = linkStatus.isStreaming && streaming
 
+    // Android 的一次 GATT 连接尝试要 30 秒才超时，而退避只有 1–4 秒，
+    // 所以重连过程中绝大部分时间 phase 是 CONNECTING。如果这时只显示"正在连接设备"，
+    // 走出范围的佩戴者看到的和正常启动时一模一样，完全不知道链路已经断了——
+    // 这正是 P1-11 要消除的那种"看起来没事"。
+    val retrying = linkStatus.reconnectAttempt > 0
     val headline = when (linkStatus.phase) {
         LinkPhase.IDLE -> "未开始采集"
-        LinkPhase.CONNECTING -> "正在连接设备"
+        LinkPhase.CONNECTING ->
+            if (retrying) "链路中断，正在重连（第 ${linkStatus.reconnectAttempt} 次）"
+            else "正在连接设备"
         LinkPhase.CONNECTED -> "已连接，正在握手"
         LinkPhase.RECONNECTING -> "链路中断，正在自动重连"
         LinkPhase.RECORDING -> if (streaming) "正在采集" else "已订阅，但没有收到数据"
@@ -417,12 +425,19 @@ private fun LinkHealthPanel(
                 StatusLine("设备", "$it${linkStatus.deviceAddress?.let { a -> " · $a" } ?: ""}")
             }
 
-            if (linkStatus.phase == LinkPhase.RECONNECTING) {
+            if (retrying) {
                 StatusLine(
                     "重连",
-                    "第 ${linkStatus.reconnectAttempt} 次 · " +
-                        "${linkStatus.nextRetryInMs / 1000} 秒后重试" +
-                        (linkStatus.reason?.let { " · $it" } ?: "")
+                    buildString {
+                        append("第 ${linkStatus.reconnectAttempt} 次")
+                        if (linkStatus.phase == LinkPhase.RECONNECTING) {
+                            append(" · ${linkStatus.nextRetryInMs / 1000} 秒后重试")
+                        } else {
+                            append(" · 正在尝试")
+                        }
+                        linkStatus.reason?.let { append(" · $it") }
+                    },
+                    emphasis = true
                 )
             }
 

@@ -146,7 +146,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val logText by viewModel.logText
-            val selectedDeviceAddress by viewModel.selectedDeviceAddress
+            val pickedDeviceAddress by viewModel.selectedDeviceAddress
             val userSettings by viewModel.userSettings
             val settingsCheck by viewModel.settingsCheckResult
             val settingsChecking by viewModel.settingsCheckRunning
@@ -155,6 +155,9 @@ class MainActivity : ComponentActivity() {
             val recorderStats by RecordingController.stats.collectAsState()
             val liveRecordingStats = recorderStats?.let { LiveRecordingUiStats.from(it) }
             val activeRecordingPath = liveRecordingStats?.sessionPath
+            // Activity 可以被回收而服务还在采集。重建后 ViewModel 里的选择是空的，
+            // 界面会显示"请先选择设备"——而此刻它其实正在采那台设备。以服务的状态兜底。
+            val selectedDeviceAddress = pickedDeviceAddress ?: linkStatus.deviceAddress
 
             NunaRecorderTheme {
                 // 0 设备 1 录音 2 设置（Wearable 调试页已从导航移除，代码见 DEBUG_WEARABLE 注释块）
