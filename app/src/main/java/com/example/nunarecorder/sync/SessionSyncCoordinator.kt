@@ -41,6 +41,10 @@ object SessionSyncCoordinator {
     /** 上传卡住时用户可以取消；下一次上传会从服务端已收到的地方接着传 */
     private val cancelRequested = AtomicBoolean(false)
 
+    /** 当前上传器，取消时用它中止在途请求 */
+    @Volatile
+    private var activeUploader: SessionSyncUploader? = null
+
     var onLog: ((String) -> Unit)? = null
 
     fun isActiveFor(targetKey: String): Boolean {
@@ -55,6 +59,8 @@ object SessionSyncCoordinator {
     fun cancel() {
         if (_state.value?.phase != Phase.SYNCING) return
         cancelRequested.set(true)
+        // 只置标记不够：卡在某个文件里的请求等不到下一次检查
+        activeUploader?.cancelInFlight()
         log("正在取消上传…")
     }
 
@@ -148,7 +154,9 @@ object SessionSyncCoordinator {
             settings.uploadToken
         )
 
-        val commit = uploader.tryV1Sync(
+        activeUploader = uploader
+        val commit = try {
+            uploader.tryV1Sync(
             dir,
             manifest,
             syncStatus.files,
@@ -158,10 +166,13 @@ object SessionSyncCoordinator {
                 SessionSyncStatusIO.write(dir, syncStatus)
             },
             shouldCancel = { cancelRequested.get() }
-        ) { file, index, total ->
-            val p = 0.1f + 0.8f * ((index + 1).toFloat() / total.coerceAtLeast(1))
-            update(dir.absolutePath, entry.displayName, p, "上传 ${file.path} (${index + 1}/$total)", "syncing")
-            SessionSyncStatusIO.write(dir, syncStatus)
+            ) { file, index, total ->
+                val p = 0.1f + 0.8f * ((index + 1).toFloat() / total.coerceAtLeast(1))
+                update(dir.absolutePath, entry.displayName, p, "上传 ${file.path} (${index + 1}/$total)", "syncing")
+                SessionSyncStatusIO.write(dir, syncStatus)
+            }
+        } finally {
+            activeUploader = null
         }
 
         if (commit.ok) {

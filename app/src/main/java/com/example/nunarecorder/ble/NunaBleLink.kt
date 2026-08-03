@@ -102,6 +102,7 @@ class NunaBleLink(
     private var connectedAtMs = 0L
     private var awaitingStatusRead = false
     private var adapterReceiverRegistered = false
+    private var profileDumped = false
 
     /** 蓝牙被用户关掉：不要空转重连，等它回来 */
     private val adapterReceiver = object : BroadcastReceiver() {
@@ -211,6 +212,7 @@ class NunaBleLink(
         awaitingStatusRead = false
         connectedAtMs = 0L
         lastDataAtMs = 0L
+        profileDumped = false
         log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试）")
         val device = try {
             a.getRemoteDevice(address)
@@ -303,6 +305,7 @@ class NunaBleLink(
                     scheduleReconnect()
                     return@post
                 }
+                dumpGattProfile(g)
                 val transferChar = g.getService(SERVICE_UUID)?.getCharacteristic(TRANSFER_CHAR_UUID)
                 if (transferChar == null) {
                     log(TAG, "未找到 A002 握手特征")
@@ -360,7 +363,10 @@ class NunaBleLink(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
             status: Int
-        ) = handleStatusRead(g, characteristic)
+        ) {
+            logStatusPayload(characteristic, value)
+            handleStatusRead(g, characteristic)
+        }
 
         @Deprecated("Deprecated in Java")
         @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
@@ -370,6 +376,8 @@ class NunaBleLink(
             status: Int
         ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+            @Suppress("DEPRECATION")
+            logStatusPayload(characteristic, characteristic.value ?: ByteArray(0))
             handleStatusRead(g, characteristic)
         }
 
@@ -401,6 +409,16 @@ class NunaBleLink(
             val value = characteristic.value ?: return
             onCharacteristicChanged(g, characteristic, value)
         }
+    }
+
+    /**
+     * A001（"设备信息 / 状态上报"）的返回值原来被直接丢掉。电量、固件版本这类信息
+     * 最可能就在这里，而我们没有设备侧文档，只能把原始字节打出来自己解。
+     * 十几个字节，不含任何可识别内容，可以安全写进导出日志。
+     */
+    private fun logStatusPayload(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        if (characteristic.uuid != STATUS_CHAR_UUID) return
+        log(TAG, "[STATUS] A001 读到 ${value.size} 字节: " + value.joinToString(" ") { "%02X".format(it) })
     }
 
     /**
@@ -448,6 +466,39 @@ class NunaBleLink(
                     scheduleReconnect()
                 }
             }, 150)
+        }
+    }
+
+    /**
+     * 把设备暴露的所有 service / characteristic 打进诊断日志。
+     *
+     * 我们没有设备侧的协议文档，电量、固件版本、设备状态到底在哪个特征上只能自己查。
+     * 一次连接打一次，几十行，对 5000 行的环形缓冲可以忽略。
+     * 标准电池服务是 0x180F / 0x2A19，如果设备实现了，这里一眼能看到。
+     */
+    @SuppressLint("MissingPermission")
+    private fun dumpGattProfile(g: BluetoothGatt) {
+        if (profileDumped) return
+        profileDumped = true
+        val services = try {
+            g.services
+        } catch (_: SecurityException) {
+            return
+        }
+        log(TAG, "[PROFILE] 共 ${services.size} 个 service")
+        for (svc in services) {
+            log(TAG, "[PROFILE] service ${svc.uuid}")
+            for (ch in svc.characteristics) {
+                val p = ch.properties
+                val flags = buildString {
+                    if (p and BluetoothGattCharacteristic.PROPERTY_READ != 0) append("R")
+                    if (p and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) append("W")
+                    if (p and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) append("w")
+                    if (p and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) append("N")
+                    if (p and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) append("I")
+                }
+                log(TAG, "[PROFILE]   char ${ch.uuid} [$flags]")
+            }
         }
     }
 

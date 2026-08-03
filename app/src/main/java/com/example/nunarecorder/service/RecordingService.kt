@@ -284,8 +284,8 @@ class RecordingService : Service() {
                 status.reason?.let { append(" · $it") }
             } else if (stats != null) {
                 append("${stats.closedSegmentCount} 段")
-                if (stats.receivedFrames > 0) {
-                    append(" · 丢帧 %.2f%%".format(stats.lossRatio * 100))
+                if (stats.expectedPackets > 0L) {
+                    append(" · 完整度 %.0f%%".format(stats.completeness * 100))
                 }
                 if (stats.disconnectCount > 0) append(" · 断连 ${stats.disconnectCount} 次")
             }

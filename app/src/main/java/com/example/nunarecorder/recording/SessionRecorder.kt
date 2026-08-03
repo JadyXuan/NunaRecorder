@@ -21,18 +21,18 @@ data class LiveRecordingStats(
     val totalBytes: Long,
     /** 最近一次收到音频帧的墙钟；null = 本次会话还没收到过一帧 */
     val lastFrameAtMs: Long?,
-    val receivedFrames: Long,
-    val lostFrames: Long,
+    /** 实到的 20 ms Opus 包数 */
+    val receivedPackets: Long,
+    /** 按墙钟应有的 20 ms 包数 */
+    val expectedPackets: Long,
     val disconnectCount: Int,
     /** 当前链路是否处于中断状态 */
     val linkDown: Boolean
 ) {
-    /** 序号空洞占「应收帧数」的比例；没收到过帧时为 0 */
-    val lossRatio: Float
-        get() {
-            val total = receivedFrames + lostFrames
-            return if (total <= 0) 0f else lostFrames.toFloat() / total
-        }
+    /** 完整度 0..1：实到包数 / 按墙钟应有的包数 */
+    val completeness: Float
+        get() = if (expectedPackets <= 0L) 1f
+        else (receivedPackets.toFloat() / expectedPackets).coerceIn(0f, 1f)
 }
 
 /**
@@ -94,8 +94,8 @@ class SessionRecorder(
     private var openGapAttempts: Int = 0
 
     private var lastFrameAtMs: Long? = null
-    private var receivedFrames = 0L
-    private var lostFrames = 0L
+    private var receivedPackets = 0L
+    private var expectedPackets = 0L
 
     val activeSessionDir: File? get() = sessionDir
 
@@ -115,8 +115,8 @@ class SessionRecorder(
             openSegmentBytes = openBytes,
             totalBytes = closedBytes + openBytes,
             lastFrameAtMs = lastFrameAtMs,
-            receivedFrames = receivedFrames,
-            lostFrames = lostFrames,
+            receivedPackets = receivedPackets,
+            expectedPackets = expectedPackets,
             disconnectCount = linkEvents.size + (if (openGapStartMs != null) 1 else 0),
             linkDown = openGapStartMs != null
         )
@@ -139,8 +139,8 @@ class SessionRecorder(
         openGapStartMs = null
         openGapAttempts = 0
         lastFrameAtMs = null
-        receivedFrames = 0L
-        lostFrames = 0L
+        receivedPackets = 0L
+        expectedPackets = 0L
         manifest = SessionManifest(
             sessionId = sessionDir.name,
             deviceName = deviceName,
@@ -169,9 +169,12 @@ class SessionRecorder(
             for (frame in frames) {
                 writer?.write(frame.opus)
                 accumulator.onFrame(frame)
-                receivedFrames++
-                lostFrames += frame.missingBefore
+                receivedPackets += frame.opus.size / OpusStreamAssembler.OPUS_FRAME_SIZE
             }
+            // 会话级"应有包数"按墙钟算，和每段一致
+            expectedPackets = SegmentFrameStats.expectedPacketsFor(
+                (now - sessionStartMs).coerceAtLeast(0L)
+            ).toLong()
             lastFrameAtMs = now
         }
         maybeFlushManifest()
@@ -302,16 +305,19 @@ class SessionRecorder(
         } else {
             (now - sessionStartMs).coerceAtLeast(0L)
         }
-        val stats = accumulator.snapshot(SegmentFrameStats.expectedFramesFor(windowMs))
+        val stats = accumulator.snapshot(SegmentFrameStats.expectedPacketsFor(windowMs))
         accumulator = SegmentFrameAccumulator()
 
         if (bytes == 0L) {
             file.delete()
             // 只有覆盖了真实墙钟时间的段才算"缺失"。停止录制的瞬间刚轮转出来的那一段
             // 窗口长度为 0，没有任何东西被期望过，把它记成空洞是在虚报。
-            if (options.segmentEnabled && stats.expectedFrames > 0) {
+            if (options.segmentEnabled && stats.expectedPackets > 0) {
                 missingSegments.add(currentSegmentIndex)
-                onLog("分段 $currentSegmentIndex 没有任何音频（期望 ${stats.expectedFrames} 帧），已记入 missing_segments")
+                onLog(
+                    "分段 $currentSegmentIndex 没有任何音频" +
+                        "（期望 ${stats.expectedPackets} 个 20ms 包），已记入 missing_segments"
+                )
             }
             flushManifestNow()
             return
@@ -339,8 +345,10 @@ class SessionRecorder(
         manifest?.let { SessionManifestIO.write(dir, it) }
         onLog(
             "分段 ${entry.index} 已保存 · ${formatSize(bytes)} · " +
-                "${stats.receivedFrames}/${stats.expectedFrames} 帧" +
-                if (stats.sequenceLostFrames > 0) " · 空洞 ${stats.sequenceLostFrames} 帧" else ""
+                "完整度 %.0f%%（%d/%d 个 20ms 包）".format(
+                    stats.completeness * 100, stats.receivedPackets, stats.expectedPackets
+                ) +
+                if (stats.deviceSequenceLost > 0) " · 设备帧空洞 ${stats.deviceSequenceLost}" else ""
         )
         onSegmentClosed(ClosedSegment(dir, entry, file, sessionStartMs))
     }

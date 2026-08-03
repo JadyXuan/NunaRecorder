@@ -1,7 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 允许共享 Download 目录文件 -->
+    <!-- 会话数据：分享录音用 -->
     <external-path
         name="download"
         android:path="Download/" />
+    <!--
+      诊断日志写在 App 私有 cache 里（DiagnosticsLog.exportTo）。
+      漏了这一条，导出会失败并报
+      "Failed to find configured root that contains /data/data/.../cache/diagnostics/..."
+      —— 2026-08-03 实测踩到。
+    -->
+    <cache-path
+        name="diagnostics"
+        android:path="diagnostics/" />
 </paths>

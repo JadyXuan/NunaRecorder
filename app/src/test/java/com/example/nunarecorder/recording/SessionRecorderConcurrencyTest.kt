@@ -109,7 +109,7 @@ class SessionRecorderConcurrencyTest {
             writtenBytes
         )
 
-        val received = manifest.segments.sumOf { it.frames?.receivedFrames ?: 0 }
+        val received = manifest.segments.sumOf { it.frames?.receivedPackets ?: 0 }
         assertEquals(frameCount, received)
 
         val indices = manifest.segments.map { it.index }

@@ -97,7 +97,23 @@ class MainActivity : ComponentActivity() {
 
     private val segmentPlayer = SegmentAudioPlayer { appendDebug(it) }
 
-    private val httpClient by lazy { OkHttpClient() }
+    /**
+     * 上传用的 HTTP 客户端。
+     *
+     * 裸 `OkHttpClient()` 没有 `callTimeout`，单个请求可以无限挂着——2026-08-03 实测
+     * 上传卡在 2/96、点取消没反应、过了很久才自己结束，就是这个。
+     * `callTimeout` 是唯一能兜住"整个请求"的超时；read/write timeout 只约束单次 IO，
+     * 一个慢而不断的连接可以永远续命。
+     */
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
 
     // 持久化的已配对设备存储

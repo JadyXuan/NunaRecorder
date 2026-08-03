@@ -9,8 +9,9 @@ import org.json.JSONObject
  * 段内一处空洞。粒度是「第几帧之后丢了几帧」，配合 [nextFrameId] 可以和设备侧日志对齐。
  */
 data class FrameGap(
-    /** 段内已收到多少帧之后出现空洞 */
+    /** 段内已收到多少**设备帧**之后出现空洞 */
     val atFrameOffset: Int,
+    /** 缺失的**设备帧**数（不是 20 ms 包数） */
     val missingFrames: Int,
     /** 空洞之后第一帧的设备 frameId（u16） */
     val nextFrameId: Int
@@ -33,46 +34,63 @@ data class FrameGap(
 /**
  * 一个分段的帧账目。
  *
- * 区分两类缺失，因为它们的归属完全不同：
+ * **两个单位必须分开，不能混。** 2026-08-03 的真实会话暴露了这个错误：
+ * 设备的一个 `frameId` 携带约 36 个 20 ms Opus 包（≈720 ms 音频），
+ * 而旧实现拿「设备帧数」去比「按墙钟算的 20 ms 包数」，于是每段记成
+ * `received=82 / expected=3000`，汇总出「97% 设备没发」——实际 97.3% 都收到了。
+ * 这种统计比没有更糟：研究者会照着它得出完全相反的结论。
  *
- * - [sequenceLostFrames]：设备 `frameId` 序号上有洞，说明帧发出来了但没到（BLE 链路丢包）。
- * - [unaccountedFrames]：序号连续，但按墙钟本该有的帧数没凑够，说明设备根本没发那么多帧
- *   （设备侧节流、时钟漂移，或链路整段断开）。
- *
- * 2026-07-31 实测每段稳定只有 59.04 秒音频。这两个数字能直接回答「该找 Ruihan 还是该改 App」。
- * 可能为负（设备发得比墙钟快），如实保留符号，不做钳制。
+ * 所以：
+ * - [expectedPackets] / [receivedPackets] 是 **20 ms Opus 包**，和墙钟可比，是完整度的唯一依据。
+ *   [receivedPackets] 由实际写入字节数反推，不依赖对设备打包方式的任何假设。
+ * - [deviceFrames] / [deviceSequenceLost] 是 **设备打包单位**，只作诊断。
  */
 data class SegmentFrameStats(
-    val expectedFrames: Int,
-    val receivedFrames: Int,
-    val sequenceLostFrames: Int,
+    /** 按墙钟应有的 20 ms 包数 */
+    val expectedPackets: Int,
+    /** 实际写入的 20 ms 包数（= 字节数 / 80） */
+    val receivedPackets: Int,
+    /** 收到的设备帧数（每个含多个 20 ms 包），仅诊断 */
+    val deviceFrames: Int = 0,
+    /** 设备 frameId 序号空洞，单位是**设备帧**，仅诊断 */
+    val deviceSequenceLost: Int = 0,
     val gaps: List<FrameGap> = emptyList()
 ) {
-    val unaccountedFrames: Int get() = expectedFrames - receivedFrames - sequenceLostFrames
+    val missingPackets: Int get() = expectedPackets - receivedPackets
+
+    /** 0..1；expectedPackets 为 0 时返回 1（没期望就没缺失） */
+    val completeness: Float
+        get() = if (expectedPackets <= 0) 1f
+        else (receivedPackets.toFloat() / expectedPackets).coerceIn(0f, 1f)
 
     fun toJson(): JSONObject = JSONObject().apply {
-        put("expected", expectedFrames)
-        put("received", receivedFrames)
-        put("sequence_lost", sequenceLostFrames)
-        put("unaccounted", unaccountedFrames)
-        put("gaps", JSONArray().apply { gaps.forEach { put(it.toJson()) } })
+        put("unit", "opus_packet_20ms")
+        put("expected", expectedPackets)
+        put("received", receivedPackets)
+        put("missing", missingPackets)
+        put("device_frames", JSONObject().apply {
+            put("received", deviceFrames)
+            put("sequence_lost", deviceSequenceLost)
+            put("gaps", JSONArray().apply { gaps.forEach { put(it.toJson()) } })
+        })
     }
 
     companion object {
         fun fromJson(o: JSONObject?): SegmentFrameStats? {
             if (o == null) return null
-            val gapsArr = o.optJSONArray("gaps") ?: JSONArray()
-            val gaps = (0 until gapsArr.length()).map { FrameGap.fromJson(gapsArr.getJSONObject(it)) }
+            val dev = o.optJSONObject("device_frames")
+            val gapsArr = dev?.optJSONArray("gaps") ?: JSONArray()
             return SegmentFrameStats(
-                expectedFrames = o.optInt("expected"),
-                receivedFrames = o.optInt("received"),
-                sequenceLostFrames = o.optInt("sequence_lost"),
-                gaps = gaps
+                expectedPackets = o.optInt("expected"),
+                receivedPackets = o.optInt("received"),
+                deviceFrames = dev?.optInt("received") ?: 0,
+                deviceSequenceLost = dev?.optInt("sequence_lost") ?: 0,
+                gaps = (0 until gapsArr.length()).map { FrameGap.fromJson(gapsArr.getJSONObject(it)) }
             )
         }
 
-        /** 按墙钟时长换算应有帧数（20 ms 一帧） */
-        fun expectedFramesFor(durationMs: Long): Int =
+        /** 按墙钟时长换算应有的 20 ms 包数 */
+        fun expectedPacketsFor(durationMs: Long): Int =
             (durationMs / OpusStreamAssembler.FRAME_DURATION_MS).toInt()
     }
 }
@@ -80,35 +98,38 @@ data class SegmentFrameStats(
 /**
  * 边收帧边记账。每开一个新分段建一个。
  *
- * 期望帧数在**封口时**才传入（[snapshot]）：最后一段通常不满 60 秒，
+ * 期望包数在**封口时**才传入（[snapshot]）：最后一段通常不满 60 秒，
  * 按整段算会凭空多出一堆"丢失"。
  */
 class SegmentFrameAccumulator {
-    private var received = 0
+    private var packets = 0
+    private var deviceFrames = 0
     private var sequenceLost = 0
     private val gaps = mutableListOf<FrameGap>()
 
-    val receivedFrames: Int get() = received
-    val sequenceLostFrames: Int get() = sequenceLost
+    val receivedPackets: Int get() = packets
 
     fun onFrame(frame: AssembledFrame) {
         if (frame.missingBefore > 0) {
             gaps.add(
                 FrameGap(
-                    atFrameOffset = received,
+                    atFrameOffset = deviceFrames,
                     missingFrames = frame.missingBefore,
                     nextFrameId = frame.frameId
                 )
             )
             sequenceLost += frame.missingBefore
         }
-        received++
+        deviceFrames++
+        // 用字节反推包数：不依赖对设备打包方式的任何假设
+        packets += frame.opus.size / OpusStreamAssembler.OPUS_FRAME_SIZE
     }
 
-    fun snapshot(expectedFrames: Int): SegmentFrameStats = SegmentFrameStats(
-        expectedFrames = expectedFrames,
-        receivedFrames = received,
-        sequenceLostFrames = sequenceLost,
+    fun snapshot(expectedPackets: Int): SegmentFrameStats = SegmentFrameStats(
+        expectedPackets = expectedPackets,
+        receivedPackets = packets,
+        deviceFrames = deviceFrames,
+        deviceSequenceLost = sequenceLost,
         gaps = gaps.toList()
     )
 }

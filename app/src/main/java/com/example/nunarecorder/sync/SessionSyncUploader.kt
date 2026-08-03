@@ -2,6 +2,7 @@ package com.example.nunarecorder.sync
 
 import com.example.nunarecorder.audio.AudioMetaUtil
 import com.example.nunarecorder.session.SessionManifest
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -38,6 +39,29 @@ class SessionSyncUploader(
         val missing: List<String>,
         val message: String
     )
+
+    /**
+     * 正在执行的请求。取消上传时必须把它 `cancel()` 掉——只在文件之间检查取消标记，
+     * 卡在某个文件里的上传永远等不到下一次检查（2026-08-03 实测：点取消没反应）。
+     */
+    @Volatile
+    private var activeCall: Call? = null
+
+    /** 中止在途请求。幂等，可从任意线程调用。 */
+    fun cancelInFlight() {
+        activeCall?.cancel()
+    }
+
+    // inline：调用处的 lambda 里有 `return null` 这类非局部返回
+    private inline fun <T> withCall(request: Request, block: (okhttp3.Response) -> T): T {
+        val call = client.newCall(request)
+        activeCall = call
+        return try {
+            call.execute().use(block)
+        } finally {
+            activeCall = null
+        }
+    }
 
     /** 最近一次 init 的 HTTP 状态与响应体，用于把失败原因显示给用户而不是静默回退。 */
     var lastInitCode: Int = 0
@@ -123,7 +147,7 @@ class SessionSyncUploader(
             .get()
             .build()
         return try {
-            client.newCall(request).execute().use { resp ->
+            withCall(request) { resp ->
                 if (!resp.isSuccessful) return null
                 val arr = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
                     ?: return emptyList()
@@ -170,7 +194,7 @@ class SessionSyncUploader(
             .post(body)
             .build()
         return try {
-            client.newCall(request).execute().use { it.isSuccessful }
+            withCall(request) { it.isSuccessful }
         } catch (_: Exception) {
             false
         }
@@ -211,7 +235,7 @@ class SessionSyncUploader(
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {
-            client.newCall(request).execute().use { resp ->
+            withCall(request) { resp ->
                 lastInitCode = resp.code
                 lastInitBody = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) return null
@@ -268,7 +292,7 @@ class SessionSyncUploader(
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {
-            client.newCall(request).execute().use { resp ->
+            withCall(request) { resp ->
                 if (resp.code == 404) {
                     return CommitResult(
                         false,

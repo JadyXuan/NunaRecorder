@@ -453,12 +453,13 @@ private fun LinkHealthPanel(
                     emphasis = staleMs == null || staleMs >= LiveRecordingUiStats.STALE_THRESHOLD_MS
                 )
                 StatusLine(
-                    "帧",
-                    "%,d 收到 · 丢 %,d（%.2f%%）".format(
-                        liveStats.receivedFrames,
-                        liveStats.lostFrames,
-                        liveStats.lossRatio * 100
-                    )
+                    "完整度",
+                    "%.0f%%（%,d / %,d 个 20ms 包）".format(
+                        liveStats.completeness * 100,
+                        liveStats.receivedPackets,
+                        liveStats.expectedPackets
+                    ),
+                    emphasis = liveStats.expectedPackets > 0 && liveStats.completeness < 0.9f
                 )
                 StatusLine(
                     "会话",

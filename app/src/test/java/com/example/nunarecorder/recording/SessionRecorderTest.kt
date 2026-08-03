@@ -43,12 +43,17 @@ class SessionRecorderTest {
         ((seed + it) and 0xFF).toByte()
     }
 
-    private fun audioMessage(frameId: Int, opusChunk: ByteArray): ByteArray {
+    private fun audioMessage(
+        frameId: Int,
+        opusChunk: ByteArray,
+        chunkId: Int = 0,
+        totalChunks: Int = 1
+    ): ByteArray {
         val payload = ByteArray(14 + opusChunk.size)
         payload[0] = (frameId and 0xFF).toByte()
         payload[1] = ((frameId shr 8) and 0xFF).toByte()
-        payload[4] = 0
-        payload[5] = 1
+        payload[4] = chunkId.toByte()
+        payload[5] = totalChunks.toByte()
         opusChunk.copyInto(payload, 14)
         val msg = ByteArray(7 + payload.size)
         msg[0] = 0xAA.toByte()
@@ -177,10 +182,10 @@ class SessionRecorderTest {
 
         val frames = manifestOf(dir).segments.first().frames
         assertNotNull(frames)
-        assertEquals(3000, frames!!.expectedFrames)
-        assertEquals(15, frames.receivedFrames)
-        assertEquals(5, frames.sequenceLostFrames)
-        assertEquals(3000 - 15 - 5, frames.unaccountedFrames)
+        assertEquals(3000, frames!!.expectedPackets)
+        assertEquals(15, frames.receivedPackets)
+        assertEquals("设备帧空洞用设备帧计数，不是 20ms 包", 5, frames.deviceSequenceLost)
+        assertEquals(3000 - 15, frames.missingPackets)
 
         assertEquals(1, frames.gaps.size)
         assertEquals("空洞出现在段内第 10 帧之后", 10, frames.gaps[0].atFrameOffset)
@@ -216,9 +221,9 @@ class SessionRecorderTest {
         r.stop()
 
         val frames = manifestOf(dir).segments.first().frames!!
-        assertEquals("10 秒 = 500 帧，而不是整段的 3000", 500, frames.expectedFrames)
-        assertEquals(500, frames.receivedFrames)
-        assertEquals(0, frames.unaccountedFrames)
+        assertEquals("10 秒 = 500 个 20ms 包，而不是整段的 3000", 500, frames.expectedPackets)
+        assertEquals(500, frames.receivedPackets)
+        assertEquals(0, frames.missingPackets)
     }
 
     /** 跨段的半条消息不该被丢：assembler 是会话级的，不随分段重建。 */
@@ -244,6 +249,40 @@ class SessionRecorderTest {
             OpusStreamAssembler.OPUS_FRAME_SIZE.toLong(),
             seg1.bytes
         )
+    }
+
+    /**
+     * 回归：2026-08-03 的真实会话里，一个设备帧携带约 36 个 20 ms 包。
+     * 旧实现拿"设备帧数"当"20ms 包数"记账，于是每段记成 received=82/expected=3000，
+     * 汇总出"97% 设备没发"——实际 97.3% 都收到了。这种统计比没有更糟。
+     */
+    @Test
+    fun `一个设备帧带多个 20ms 包时按包记完整度`() {
+        val dir = newSession()
+        val r = recorder()
+        r.start(dir, "dev", "AA:BB", options())
+
+        // 每个设备帧带 36 个 80 字节包（≈720ms，与 2026-08-03 实测一致），
+        // 拆成 12 个 chunk 传输——单条消息负载必须留在协议上限内
+        val packetsPerFrame = 36
+        val totalChunks = 12
+        val payload = ByteArray(packetsPerFrame * OpusStreamAssembler.OPUS_FRAME_SIZE) { it.toByte() }
+        val chunkSize = payload.size / totalChunks
+        repeat(50) { fid ->
+            for (c in 0 until totalChunks) {
+                val part = payload.copyOfRange(c * chunkSize, (c + 1) * chunkSize)
+                r.feed(audioMessage(fid, part, chunkId = c, totalChunks = totalChunks))
+            }
+        }
+        now += 60_000
+        r.tick()
+        r.stop()
+
+        val f = manifestOf(dir).segments.first().frames!!
+        assertEquals("50 个设备帧", 50, f.deviceFrames)
+        assertEquals("50 × 36 = 1800 个 20ms 包", 1800, f.receivedPackets)
+        assertEquals(3000, f.expectedPackets)
+        assertEquals(0.6f, f.completeness, 0.001f)
     }
 
     // ── 断连记录 ──────────────────────────────────────────────────────────
@@ -314,7 +353,7 @@ class SessionRecorderTest {
         r.stop()
 
         val m = manifestOf(dir)
-        val lost = m.segments.sumOf { it.frames?.sequenceLostFrames ?: 0 }
+        val lost = m.segments.sumOf { it.frames?.deviceSequenceLost ?: 0 }
         assertEquals(0, lost)
         assertEquals(1, m.link.disconnectCount)
     }
@@ -329,9 +368,7 @@ class SessionRecorderTest {
         feedFrames(r, 100, 10) // 中间丢了 10 帧
 
         val stats = r.liveStats()!!
-        assertEquals(100L, stats.receivedFrames)
-        assertEquals(10L, stats.lostFrames)
-        assertEquals(0.09f, stats.lossRatio, 0.001f)
+        assertEquals("100 个设备帧各带 1 个 20ms 包", 100L, stats.receivedPackets)
         assertEquals(now, stats.lastFrameAtMs)
         assertFalse(stats.linkDown)
 

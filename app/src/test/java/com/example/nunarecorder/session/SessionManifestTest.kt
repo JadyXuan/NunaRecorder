@@ -34,10 +34,11 @@ class SessionManifestTest {
                 bytes = 236_160L,
                 durationMs = 59_040L,
                 frames = SegmentFrameStats(
-                    expectedFrames = 3000,
-                    receivedFrames = 2952,
-                    sequenceLostFrames = 48,
-                    gaps = listOf(FrameGap(atFrameOffset = 1200, missingFrames = 48, nextFrameId = 6418))
+                    expectedPackets = 3000,
+                    receivedPackets = 2952,
+                    deviceFrames = 82,
+                    deviceSequenceLost = 2,
+                    gaps = listOf(FrameGap(atFrameOffset = 40, missingFrames = 2, nextFrameId = 6418))
                 )
             ),
             AudioSegmentEntry(
@@ -74,14 +75,16 @@ class SessionManifestTest {
         val loaded = roundTrip(sample())
         val frames = loaded.segments.first().frames
         assertNotNull(frames)
-        assertEquals(3000, frames!!.expectedFrames)
-        assertEquals(2952, frames.receivedFrames)
-        assertEquals(48, frames.sequenceLostFrames)
-        assertEquals(0, frames.unaccountedFrames)
+        assertEquals(3000, frames!!.expectedPackets)
+        assertEquals(2952, frames.receivedPackets)
+        assertEquals(48, frames.missingPackets)
+        assertEquals("设备帧和 20ms 包是两个单位，往返后不能串", 82, frames.deviceFrames)
+        assertEquals(2, frames.deviceSequenceLost)
+        assertEquals(0.984f, frames.completeness, 0.001f)
 
         val gap = frames.gaps.single()
-        assertEquals(1200, gap.atFrameOffset)
-        assertEquals(48, gap.missingFrames)
+        assertEquals(40, gap.atFrameOffset)
+        assertEquals(2, gap.missingFrames)
         assertEquals(6418, gap.nextFrameId)
     }
 
