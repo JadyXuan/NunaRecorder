@@ -17,10 +17,6 @@ class UserSettingsStorage(context: Context) {
         return try {
             val obj = JSONObject(json)
             UserSettings(
-                userId = obj.optString("userId", ""),
-                serverHost = obj.optString("serverHost", "10.0.2.2"),
-                serverPort = obj.optInt("serverPort", 9000),
-                uploadToken = obj.optString("uploadToken", ""),
                 logLevel = LogLevel.entries.find {
                     it.name.equals(obj.optString("logLevel", "INFO"), ignoreCase = true)
                 } ?: LogLevel.INFO,
@@ -33,10 +29,6 @@ class UserSettingsStorage(context: Context) {
 
     fun save(settings: UserSettings) {
         val obj = JSONObject().apply {
-            put("userId", settings.userId)
-            put("serverHost", settings.serverHost)
-            put("serverPort", settings.serverPort)
-            put("uploadToken", settings.uploadToken)
             put("logLevel", settings.logLevel.name)
             put("autoVadOnRecord", settings.autoVadOnRecord)
         }

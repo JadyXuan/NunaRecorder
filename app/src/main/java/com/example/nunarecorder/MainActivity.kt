@@ -38,6 +38,9 @@ import java.util.UUID
 
 import com.example.nunarecorder.audio.SegmentAudioPlayer
 import com.example.nunarecorder.data.UserSettingsStorage
+import com.example.nunarecorder.enroll.EnrollmentCodec
+import com.example.nunarecorder.enroll.EnrollmentParseResult
+import com.example.nunarecorder.enroll.EnrollmentStore
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
@@ -55,6 +58,8 @@ import com.example.nunarecorder.ui.screen.MainScreen
 import com.example.nunarecorder.ui.MainViewModel
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.screen.RecordingsScreen
+import com.example.nunarecorder.ui.screen.EnrollScreen
+import com.example.nunarecorder.ui.screen.LoginGuideScreen
 import com.example.nunarecorder.ui.screen.SettingsScreen
 import com.example.wearable.TranscriptionProvider
 import com.example.wearable.WearableConnectionConfig
@@ -122,6 +127,9 @@ class MainActivity : ComponentActivity() {
     // 用户设置存储
     private lateinit var userSettingsStorage: UserSettingsStorage
 
+    // 服务器地址 / 参与者编号 / 令牌的唯一来源
+    private lateinit var enrollmentStore: EnrollmentStore
+
     // 当前选中的“已配对设备”
     private var selectedPairedDevice: PairedDevice? = null
 
@@ -145,6 +153,7 @@ class MainActivity : ComponentActivity() {
 
         deviceStorage = DeviceStorage(this)
         userSettingsStorage = UserSettingsStorage(this)
+        enrollmentStore = EnrollmentStore(this)
 
         // 初始化已配对设备列表
         refreshPairedDeviceList()
@@ -152,6 +161,7 @@ class MainActivity : ComponentActivity() {
         // 加载用户设置
         val initialSettings = userSettingsStorage.load()
         viewModel.setUserSettings(initialSettings)
+        viewModel.setEnrollment(enrollmentStore.current(), enrollmentStore.isRevoked())
 
         requestBlePermissions()
         VadJobQueue.start(this)
@@ -159,6 +169,12 @@ class MainActivity : ComponentActivity() {
         if (resumed > 0) appendLog("自动续传 VAD: $resumed 个音频段待分析")
         MigrationCoordinator.onLog = { appendLog(it) }
         SessionSyncCoordinator.onLog = { appendLog(it) }
+        SessionSyncCoordinator.onTokenRejected = {
+            enrollmentStore.markRevoked()
+            runOnUiThread {
+                viewModel.setEnrollment(enrollmentStore.current(), true)
+            }
+        }
 
         setContent {
             val logText by viewModel.logText
@@ -166,6 +182,8 @@ class MainActivity : ComponentActivity() {
             val userSettings by viewModel.userSettings
             val settingsCheck by viewModel.settingsCheckResult
             val settingsChecking by viewModel.settingsCheckRunning
+            val enrollment by viewModel.enrollment
+            val enrollRevoked by viewModel.enrollmentRevoked
             // 采集状态的唯一来源是服务，不是 Activity 的字段
             val linkStatus by RecordingController.link.collectAsState()
             val recorderStats by RecordingController.stats.collectAsState()
@@ -240,30 +258,45 @@ class MainActivity : ComponentActivity() {
                             liveRecordingStats = liveRecordingStats,
                             modifier = Modifier.fillMaxSize()
                         )
-                            2 -> SettingsScreen(
+                            2 -> EnrollScreen(
+                                current = enrollment,
+                                enrolledAtMs = enrollmentStore.enrolledAtMs(),
+                                tokenRevoked = enrollRevoked,
+                                checkResult = settingsCheck,
+                                checkRunning = settingsChecking,
+                                onScanClick = { appendLog("扫码功能在下一版加入，请先粘贴文本码") },
+                                onCodeEntered = { raw -> applyEnrollmentCode(raw) },
+                                onRecheck = { enrollment?.let { runServerCheck(it) } },
+                                onClearEnrollment = {
+                                    enrollmentStore.clear()
+                                    viewModel.setEnrollment(null, false)
+                                    viewModel.settingsCheckResult.value = null
+                                    appendLog("已清除入组配置（本地录音不受影响）")
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            3 -> LoginGuideScreen(
+                                enrollment = enrollment,
+                                onCopy = { label, value ->
+                                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText(label, value))
+                                    appendLog("已复制$label")
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            4 -> SettingsScreen(
                                 userSettings = userSettings,
-                                onUserIdChange = { newId ->
-                                    viewModel.setUserSettings(userSettings.copy(userId = newId))
-                                },
-                                onServerHostChange = { newHost ->
-                                    viewModel.setUserSettings(userSettings.copy(serverHost = newHost))
-                                },
-                                onServerPortChange = { newPortStr ->
-                                    val port = newPortStr.toIntOrNull() ?: userSettings.serverPort
-                                    viewModel.setUserSettings(userSettings.copy(serverPort = port))
-                                },
-                                onUploadTokenChange = { token ->
-                                    viewModel.setUserSettings(userSettings.copy(uploadToken = token.trim()))
-                                },
                                 onLogLevelChange = { level ->
                                     viewModel.setUserSettings(userSettings.copy(logLevel = level))
                                 },
                                 onAutoVadChange = { enabled ->
                                     viewModel.setUserSettings(userSettings.copy(autoVadOnRecord = enabled))
                                 },
-                                onSave = { saveSettingsAndCheckServer(userSettings) },
-                                checkResult = settingsCheck,
-                                checkRunning = settingsChecking,
+                                onSave = {
+                                    userSettingsStorage.save(userSettings)
+                                    appendLog("设置已保存")
+                                },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -354,15 +387,25 @@ class MainActivity : ComponentActivity() {
      * 参与者在入组现场就该知道配置对不对——原来点保存没有任何反馈，
      * 采完一整天才发现传不上去已经太晚了。
      */
-    private fun saveSettingsAndCheckServer(settings: com.example.nunarecorder.data.UserSettings) {
-        userSettingsStorage.save(settings)
-        appendLog("设置已保存，正在检查服务器…")
+    /** 应用一个入组码：解析 → 存下 → 立刻自检一次。 */
+    private fun applyEnrollmentCode(raw: String) {
+        when (val r = EnrollmentCodec.parse(raw)) {
+            is EnrollmentParseResult.Error -> appendLog("入组失败：${r.reason}")
+            is EnrollmentParseResult.Ok -> {
+                enrollmentStore.save(r.code)
+                viewModel.setEnrollment(r.code, false)
+                // 令牌本身绝不进日志，只留前 4 位指纹
+                appendLog("已入组：${r.code.participantId} · 令牌 ${r.code.tokenFingerprint}…")
+                runServerCheck(r.code)
+            }
+        }
+    }
+
+    private fun runServerCheck(code: com.example.nunarecorder.enroll.EnrollmentCode) {
         viewModel.settingsCheckRunning.value = true
         viewModel.settingsCheckResult.value = null
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                ServerHandshakeCheck.run(httpClient, settings)
-            }
+            val result = withContext(Dispatchers.IO) { ServerHandshakeCheck.run(httpClient, code) }
             viewModel.settingsCheckRunning.value = false
             viewModel.settingsCheckResult.value = result
             result.lines.forEach { appendLog("自检: ${it.text}") }
@@ -523,12 +566,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun uploadRecordingEntry(entry: RecordingEntry, withContext: Boolean, withVad: Boolean) {
+        val code = enrollmentStore.current()
+        if (code == null) {
+            appendLog("还没有入组配置，无法上传。请到「入组」页扫描二维码。")
+            return
+        }
         appendLog("开始同步: ${entry.displayName}")
         SessionSyncCoordinator.start(
             entry = entry,
             includeContext = withContext,
             includeVad = withVad,
-            settings = viewModel.userSettings.value,
+            enrollment = code,
             httpClient = httpClient
         )
     }

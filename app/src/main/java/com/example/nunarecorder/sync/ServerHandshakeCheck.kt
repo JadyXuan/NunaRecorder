@@ -1,6 +1,6 @@
 package com.example.nunarecorder.sync
 
-import com.example.nunarecorder.data.UserSettings
+import com.example.nunarecorder.enroll.EnrollmentCode
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,16 +23,16 @@ object ServerHandshakeCheck {
         val hasWarning: Boolean get() = lines.any { it.level == Level.WARN }
     }
 
-    fun run(client: OkHttpClient, settings: UserSettings): Result {
+    fun run(client: OkHttpClient, enrollment: EnrollmentCode): Result {
         val lines = mutableListOf<Line>()
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
+        val baseUrl = enrollment.serverUrl
 
-        // 1) 用户 ID：留空会让所有数据落到 mock-user-001 名下，且 Web 注册也对不上
-        if (settings.userId.isBlank()) {
-            lines.add(Line(Level.FAIL, "用户 ID 为空：上传会被记到 mock-user-001 名下"))
-        } else {
-            lines.add(Line(Level.OK, "用户 ID：${settings.userId}"))
-        }
+        lines.add(
+            Line(
+                Level.OK,
+                "参与者 ${enrollment.participantId} · 令牌 ${enrollment.tokenFingerprint}…"
+            )
+        )
 
         // 2) 服务器可达性
         val healthCode = statusOf(client, Request.Builder().url("$baseUrl/health").get().build())
@@ -52,9 +52,7 @@ object ServerHandshakeCheck {
             Request.Builder()
                 .url("$baseUrl/v1/session/sync/init")
                 .apply {
-                    if (settings.uploadToken.isNotBlank()) {
-                        header("X-Upload-Token", settings.uploadToken)
-                    }
+                    header("X-Upload-Token", enrollment.token)
                 }
                 .post("{}".toRequestBody("application/json".toMediaType()))
                 .build()
@@ -62,7 +60,8 @@ object ServerHandshakeCheck {
         lines.add(
             when (authCode) {
                 400 -> Line(Level.OK, "上传令牌有效，会话同步接口就绪")
-                401 -> Line(Level.FAIL, "上传令牌无效（401），请核对设置里的令牌")
+                403 -> Line(Level.FAIL, "令牌与参与者编号不匹配（403），这张入组卡可能发错了")
+                401 -> Line(Level.FAIL, "上传令牌无效或已被撤销（401），请联系研究员重新入组")
                 503 -> Line(Level.FAIL, "服务端未配置 UPLOAD_TOKEN（503），需要先在服务器上设置")
                 404 -> Line(Level.FAIL, "服务端没有 v1 会话同步接口（404），请升级 Receiver")
                 null -> Line(Level.FAIL, "同步接口无法连接")

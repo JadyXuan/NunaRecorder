@@ -1,7 +1,7 @@
 package com.example.nunarecorder.sync
 
 import com.example.nunarecorder.data.RecordingEntry
-import com.example.nunarecorder.data.UserSettings
+import com.example.nunarecorder.enroll.EnrollmentCode
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
 import kotlinx.coroutines.CoroutineScope
@@ -23,7 +23,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object SessionSyncCoordinator {
 
-    enum class Phase { SYNCING, DONE, ERROR, CANCELLED }
+    enum class Phase { SYNCING, DONE, ERROR, CANCELLED, TOKEN_REJECTED }
+
+    /** 令牌被撤销时回调宿主，用于置位并提示参与者联系研究员 */
+    var onTokenRejected: (() -> Unit)? = null
 
     data class State(
         val targetKey: String,
@@ -68,7 +71,7 @@ object SessionSyncCoordinator {
         entry: RecordingEntry,
         includeContext: Boolean,
         includeVad: Boolean,
-        settings: UserSettings,
+        enrollment: EnrollmentCode,
         httpClient: OkHttpClient
     ) {
         val key = when (entry) {
@@ -86,10 +89,10 @@ object SessionSyncCoordinator {
                 val result = withContext(Dispatchers.IO) {
                     when (entry) {
                         is RecordingEntry.Session -> syncSession(
-                            entry, includeContext, includeVad, settings, httpClient
+                            entry, includeContext, includeVad, enrollment, httpClient
                         )
                         is RecordingEntry.LegacyOpus -> syncLegacy(
-                            entry, includeContext, settings, httpClient
+                            entry, includeContext, enrollment, httpClient
                         )
                     }
                 }
@@ -97,6 +100,13 @@ object SessionSyncCoordinator {
                     result.success -> complete(key, entry.displayName, result.message, result.finalStatus)
                     result.finalStatus == "cancelled" ->
                         cancelled(key, entry.displayName, result.message)
+                    result.finalStatus == "token_rejected" -> {
+                        onTokenRejected?.invoke()
+                        log(result.message)
+                        _state.value = State(
+                            key, entry.displayName, Phase.TOKEN_REJECTED, 0f, result.message, "partial"
+                        )
+                    }
                     else -> fail(key, entry.displayName, result.message, result.finalStatus)
                 }
             } catch (e: Exception) {
@@ -115,7 +125,7 @@ object SessionSyncCoordinator {
         entry: RecordingEntry.Session,
         includeContext: Boolean,
         includeVad: Boolean,
-        settings: UserSettings,
+        enrollment: EnrollmentCode,
         httpClient: OkHttpClient
     ): SyncOutcome {
         val dir = entry.dir
@@ -145,13 +155,12 @@ object SessionSyncCoordinator {
         )
         SessionSyncStatusIO.write(dir, syncStatus)
 
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
         val uploader = SessionSyncUploader(
             httpClient,
-            baseUrl,
-            settings.userId.ifBlank { "mock-user-001" },
+            enrollment.serverUrl,
+            enrollment.participantId,
             resolveDeviceMac(manifest),
-            settings.uploadToken
+            enrollment.token
         )
 
         activeUploader = uploader
@@ -188,6 +197,7 @@ object SessionSyncCoordinator {
         // ../doc/status/PIPELINE_STATUS_2026-07-27.md §3。
         // 服务端没有 v1 时正确的做法是停下来报错，把数据留在手机上。
 
+        // token_rejected 也记成 partial：本地文件保留，等重新入组后可以续传
         syncStatus.status = "partial"
         syncStatus.lastError = commit.message
         SessionSyncStatusIO.write(dir, syncStatus)
@@ -199,7 +209,7 @@ object SessionSyncCoordinator {
     private fun syncLegacy(
         entry: RecordingEntry.LegacyOpus,
         includeContext: Boolean,
-        settings: UserSettings,
+        enrollment: EnrollmentCode,
         httpClient: OkHttpClient
     ): SyncOutcome {
         val files = mutableListOf(entry.opusFile)
@@ -210,12 +220,12 @@ object SessionSyncCoordinator {
             )
             if (bin.exists()) files.add(bin)
         }
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
         val uploader = SessionSyncUploader(
             httpClient,
-            baseUrl,
-            settings.userId.ifBlank { "mock-user-001" },
-            resolveDeviceMac(null, entry.opusFile)
+            enrollment.serverUrl,
+            enrollment.participantId,
+            resolveDeviceMac(null, entry.opusFile),
+            enrollment.token
         )
         var okCount = 0
         files.forEachIndexed { i, f ->
@@ -263,7 +273,9 @@ object SessionSyncCoordinator {
 
     fun clearDoneState() {
         val s = _state.value ?: return
-        if (s.phase == Phase.DONE || s.phase == Phase.ERROR || s.phase == Phase.CANCELLED) {
+        if (s.phase == Phase.DONE || s.phase == Phase.ERROR ||
+            s.phase == Phase.CANCELLED || s.phase == Phase.TOKEN_REJECTED
+        ) {
             _state.value = null
         }
     }

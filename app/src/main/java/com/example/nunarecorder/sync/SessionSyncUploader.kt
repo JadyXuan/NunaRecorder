@@ -81,6 +81,20 @@ class SessionSyncUploader(
     ): CommitResult {
         val initResp = postInit(sessionDir, manifest, files, clientUploadId)
         if (initResp == null) {
+            // 令牌被撤销：这是"需要人介入"，不是"传失败了重试就行"。
+            // 本地文件一个都不动——参与者手机上可能还有整天的数据没传上去。
+            if (lastInitCode == 401 || lastInitCode == 403) {
+                return CommitResult(
+                    false,
+                    "token_rejected",
+                    emptyList(),
+                    if (lastInitCode == 401) {
+                        "上传令牌已失效或被撤销。本地录音仍然保留，请联系研究员重新入组后再上传。"
+                    } else {
+                        "令牌与参与者编号不匹配（403）。本地录音仍然保留，请联系研究员核对入组卡。"
+                    }
+                )
+            }
             val reason = when (lastInitCode) {
                 404 -> "服务端未实现 v1 同步（404）。请升级 Receiver，不要用旧接口上传会话。"
                 401 -> "上传令牌无效（401）。请在设置里填写正确的上传令牌。"

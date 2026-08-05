@@ -37,6 +37,15 @@ class MainViewModel : ViewModel() {
     val settingsCheckResult = mutableStateOf<ServerHandshakeCheck.Result?>(null)
     val settingsCheckRunning = mutableStateOf(false)
 
+    /** 入组配置；null = 还没扫过码，采集与上传都不可用 */
+    val enrollment = mutableStateOf<com.example.nunarecorder.enroll.EnrollmentCode?>(null)
+    val enrollmentRevoked = mutableStateOf(false)
+
+    fun setEnrollment(code: com.example.nunarecorder.enroll.EnrollmentCode?, revoked: Boolean) {
+        enrollment.value = code
+        enrollmentRevoked.value = revoked
+    }
+
     val wearableDebugLogLines = mutableStateListOf<String>()
 
     fun appendWearableDebugLog(msg: String) {

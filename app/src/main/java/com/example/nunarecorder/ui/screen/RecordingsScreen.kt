@@ -134,7 +134,8 @@ fun RecordingsScreen(
         when (syncState?.phase) {
             SessionSyncCoordinator.Phase.DONE,
             SessionSyncCoordinator.Phase.ERROR,
-            SessionSyncCoordinator.Phase.CANCELLED -> {
+            SessionSyncCoordinator.Phase.CANCELLED,
+            SessionSyncCoordinator.Phase.TOKEN_REJECTED -> {
                 refreshList()
                 SessionSyncCoordinator.clearDoneState()
             }
