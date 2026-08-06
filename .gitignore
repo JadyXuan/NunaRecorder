@@ -22,3 +22,9 @@ analysis/opus_samples/notes.txt
 
 # Kotlin compiler daemon scratch output
 .kotlin/
+
+# Android release signing material (keep outside the repository)
+*.jks
+*.keystore
+*.p12
+*.pem
