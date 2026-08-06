@@ -41,6 +41,10 @@ class MainViewModel : ViewModel() {
     val enrollment = mutableStateOf<com.example.nunarecorder.enroll.EnrollmentCode?>(null)
     val enrollmentRevoked = mutableStateOf(false)
 
+    /** 最近一次开采自检结果 */
+    val readinessReport =
+        mutableStateOf<com.example.nunarecorder.util.CollectionReadiness.Report?>(null)
+
     fun setEnrollment(code: com.example.nunarecorder.enroll.EnrollmentCode?, revoked: Boolean) {
         enrollment.value = code
         enrollmentRevoked.value = revoked

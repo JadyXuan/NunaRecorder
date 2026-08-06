@@ -48,6 +48,7 @@ import com.example.nunarecorder.recording.RecordingController
 import com.example.nunarecorder.sync.ServerHandshakeCheck
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.util.CollectionReadiness
 import com.example.nunarecorder.util.DiagnosticsLog
 import com.example.nunarecorder.vad.VadJobQueue
 import com.example.nunarecorder.data.DeviceStorage
@@ -363,6 +364,20 @@ class MainActivity : ComponentActivity() {
             ?: viewModel.pairedDevices.find { it.address == address }?.name
             ?: selectedPairedDevice?.name
             ?: address
+        // 权限少开不会让 App 崩，只会让某个模态静默缺失，等数据回来才发现——
+        // 那时参与者已经走了。所以在开始之前就摆出来。
+        val readiness = CollectionReadiness.check(this)
+        readiness.items.filter { it.level != CollectionReadiness.Level.OK }.forEach {
+            appendLog("自检: ${it.title} —— ${it.consequence}")
+        }
+        DiagnosticsLog.log("Readiness", readiness.summary())
+        if (!readiness.canRecord) {
+            appendLog("无法开始采集，请先解决上面标注的问题")
+            viewModel.readinessReport.value = readiness
+            return
+        }
+        viewModel.readinessReport.value = readiness
+
         stopScan()
         deviceStorage.saveOrUpdateDevice(
             PairedDevice(

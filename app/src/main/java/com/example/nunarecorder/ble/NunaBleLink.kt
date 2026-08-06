@@ -72,6 +72,8 @@ class NunaBleLink(
         private const val SERVICE_DISCOVERY_DELAY_MS = 600L
         /** close() 到下一次 connectGatt 之间的最小间隔 */
         private const val RECONNECT_SETTLE_MS = 1_200L
+        /** discoverServices 发起后多久没回调就重来 */
+        private const val SERVICE_DISCOVERY_TIMEOUT_MS = 10_000L
 
         private val SERVICE_UUID: UUID = UUID.fromString(ProtoConfig.Service.SERVICE_UUID)
         private val TRANSFER_CHAR_UUID: UUID = UUID.fromString(ProtoConfig.Service.TRANSFER_CHAR_UUID)
@@ -120,6 +122,7 @@ class NunaBleLink(
     private var awaitingStatusRead = false
     private var adapterReceiverRegistered = false
     private var profileDumped = false
+    private var servicesDiscovered = false
     /** 上一次 teardownGatt 的时刻；紧接着重连协议栈来不及清理 */
     private var lastTeardownAtMs = 0L
 
@@ -239,16 +242,19 @@ class NunaBleLink(
         connectedAtMs = 0L
         lastDataAtMs = 0L
         profileDumped = false
-        // 2026-08-06 实测（vivo V2303A / Android 16）：重装后前几次采集连不上，
-        // 日志里是连续 8 次 gatt_status(147)，**每次都正好 30 秒**——那是
-        // autoConnect=false 的建链超时。设备这时还没准备好广播，于是我们每 30 秒
-        // 撞一次墙，第 9 次（约 7 分钟后）才连上。
+        servicesDiscovered = false
+        // **一律 autoConnect=false。**
         //
-        // 首次尝试仍用 autoConnect=false（设备就绪时这条最快）；从第二次起改用
-        // autoConnect=true：协议栈会挂一个后台待连请求，设备一开始广播就立刻连上，
-        // 不再有 30 秒的空等。
-        val autoConnect = reconnectAttempt > 0
-        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试，autoConnect=$autoConnect）")
+        // 2026-08-06 我曾把重试改成 autoConnect=true，想解决"每次建链硬等 30 秒"。
+        // 结果是服务发现彻底坏掉：连接照样瞬间成功，但 onServicesDiscovered 再也不来，
+        // 只能等看门狗超时（三份日志对比得出——加它之前 14:08 那次能正常列出 8 个 service，
+        // 加了之后 15:20 和 19:42 两次都没有一次成功）。
+        //
+        // 成因是 autoConnect=true 会在协议栈里留下后台待连请求，close() 之后可能残留；
+        // 设备只接受一路 GATT 连接时，新连接在 ACL 层连上了但 GATT 操作全哑。
+        // 建链慢是可以忍的，服务发现哑掉不行。
+        val autoConnect = false
+        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试）")
         val device = try {
             a.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
@@ -338,11 +344,22 @@ class NunaBleLink(
                     // 实测有一次连上 12 ms 就"发现完"且一个 service 都没有。
                     handler.postDelayed({
                         if (isStale(g) || !running.get()) return@postDelayed
-                        if (!g.discoverServices()) {
-                            log(TAG, "discoverServices 启动失败")
+                        val started = g.discoverServices()
+                        log(TAG, "discoverServices 已发起 = $started")
+                        if (!started) {
                             teardownGatt()
                             scheduleReconnect()
+                            return@postDelayed
                         }
+                        // 单独的发现超时：靠 30 秒的建链看门狗兜底太慢，
+                        // 而且分不清"发现没发起"和"发起了没回来"。
+                        handler.postDelayed({
+                            if (isStale(g) || !running.get() || servicesDiscovered) return@postDelayed
+                            log(TAG, "服务发现 ${SERVICE_DISCOVERY_TIMEOUT_MS / 1000} 秒无回调，重连重试")
+                            listener.onDisconnected("service_discovery_timeout")
+                            teardownGatt()
+                            scheduleReconnect()
+                        }, SERVICE_DISCOVERY_TIMEOUT_MS)
                     }, SERVICE_DISCOVERY_DELAY_MS)
                     return@post
                 }
@@ -360,6 +377,7 @@ class NunaBleLink(
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             handler.post {
                 if (isStale(g) || !running.get()) return@post
+                servicesDiscovered = true
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     log(TAG, "服务发现失败 status=$status")
                     teardownGatt()
