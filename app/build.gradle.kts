@@ -33,10 +33,31 @@ android {
         minSdk = 26
         targetSdk = 36
         // 每次对外发包必须 +1，否则 Android 不认为是升级
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    /**
+     * 参与者包只带 arm ABI；模拟器包保留全部。
+     *
+     * 106 MB 里 x86 + x86_64 占 51.7 MB，而没有任何参与者手机需要它们——真机都是 arm。
+     * 它们在包里只是因为我要跑模拟器。30 个参与者各自的手机流量是实打实的成本。
+     *
+     * 不用一刀切 abiFilters：那会把我自己的模拟器测试环境弄没了，
+     * 而模拟器验证过深色模式、状态机、退避序列这些真机不方便反复测的东西。
+     */
+    flavorDimensions += "target"
+    productFlavors {
+        create("device") {
+            dimension = "target"
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        }
+        create("emulator") {
+            dimension = "target"
+            // 不设 abiFilters = 保留全部，x86_64 模拟器才装得上
+        }
     }
 
     signingConfigs {

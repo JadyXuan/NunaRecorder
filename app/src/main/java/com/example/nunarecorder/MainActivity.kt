@@ -39,6 +39,7 @@ import java.util.UUID
 import com.example.nunarecorder.audio.SegmentAudioPlayer
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.enroll.EnrollmentCodec
+import com.example.nunarecorder.enroll.EnrollmentConfigClient
 import com.example.nunarecorder.enroll.EnrollmentParseResult
 import com.example.nunarecorder.enroll.EnrollmentStore
 import com.example.nunarecorder.data.RecordingEntry
@@ -417,7 +418,19 @@ class MainActivity : ComponentActivity() {
                 viewModel.setEnrollment(r.code, false)
                 // 令牌本身绝不进日志，只留前 4 位指纹
                 appendLog("已入组：${r.code.participantId} · 令牌 ${r.code.tokenFingerprint}…")
-                runServerCheck(r.code)
+                lifecycleScope.launch {
+                    // 二维码装不下标注网址和网关凭据，入组后用令牌向服务端补齐
+                    val client = EnrollmentConfigClient(httpClient)
+                    val merged = withContext(Dispatchers.IO) {
+                        client.merge(r.code, client.fetch(r.code))
+                    }
+                    if (merged != r.code) {
+                        enrollmentStore.save(merged)
+                        viewModel.setEnrollment(merged, false)
+                        appendLog("已从服务器补齐标注网址与登录指引")
+                    }
+                    runServerCheck(merged)
+                }
             }
         }
     }

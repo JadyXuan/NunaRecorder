@@ -113,9 +113,17 @@ fun LoginGuideScreen(
             )
             Spacer(Modifier.height(6.dp))
             val login = enrollment.login
-            if (login != null) {
+            if (login != null && login.password.isNotBlank()) {
                 CopyRow("你的账号", login.username, onCopy)
                 CopyRow("你的密码", login.password, onCopy, secret = true)
+            } else if (login != null) {
+                CopyRow("你的账号", login.username, onCopy)
+                Text(
+                    "密码印在你的入组卡上——服务器只保存密码的哈希，取不回来，" +
+                        "所以 App 里没有。卡片丢了请联系研究员重置。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
             } else {
                 CopyRow("你的账号", enrollment.participantId, onCopy)
                 Text(
