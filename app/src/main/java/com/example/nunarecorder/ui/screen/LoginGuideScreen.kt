@@ -20,9 +20,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -90,7 +94,7 @@ fun LoginGuideScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 CopyRow("网关账号", sso, onCopy)
-                enrollment.login.ssoPassword?.let { CopyRow("网关密码", it, onCopy) }
+                enrollment.login.ssoPassword?.let { CopyRow("网关密码", it, onCopy, secret = true) }
             } else {
                 Text(
                     "网关账号密码请向研究员索取（入组码里没有带）。",
@@ -111,7 +115,7 @@ fun LoginGuideScreen(
             val login = enrollment.login
             if (login != null) {
                 CopyRow("你的账号", login.username, onCopy)
-                CopyRow("你的密码", login.password, onCopy)
+                CopyRow("你的密码", login.password, onCopy, secret = true)
             } else {
                 CopyRow("你的账号", enrollment.participantId, onCopy)
                 Text(
@@ -162,26 +166,52 @@ private fun StepCard(step: Int, title: String, content: @Composable () -> Unit) 
     }
 }
 
+/**
+ * 标签在上、值在下。
+ *
+ * 原来是「固定 72dp 标签 + weight(1f) 值 + 复制按钮」并排一行，
+ * 窄屏或大字体下网址和密码会被挤成一条竖线甚至被按钮盖住。
+ * 竖排之后值可以自然换行，不依赖任何屏幕宽度假设。
+ *
+ * @param secret true 时默认打码，点一下才显示——密码不该在别人瞥一眼就被看走
+ */
 @Composable
-private fun CopyRow(label: String, value: String, onCopy: (String, String) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+private fun CopyRow(
+    label: String,
+    value: String,
+    onCopy: (String, String) -> Unit,
+    secret: Boolean = false
+) {
+    var revealed by remember(value) { mutableStateOf(!secret) }
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-            modifier = Modifier.width(72.dp)
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
         )
-        SelectionContainer(modifier = Modifier.weight(1f)) {
-            Text(
-                value,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace
-            )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SelectionContainer(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (revealed) value else "•".repeat(value.length.coerceAtMost(12)),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    softWrap = true
+                )
+            }
+            if (secret) {
+                TextButton(onClick = { revealed = !revealed }) {
+                    Text(
+                        if (revealed) "隐藏" else "显示",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+            TextButton(onClick = { onCopy(label, value) }) {
+                Text("复制", style = MaterialTheme.typography.labelSmall)
+            }
         }
-        OutlinedButton(
-            onClick = { onCopy(label, value) },
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-            modifier = Modifier.height(30.dp)
-        ) { Text("复制", style = MaterialTheme.typography.labelSmall) }
     }
 }

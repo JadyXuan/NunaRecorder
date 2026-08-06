@@ -180,16 +180,16 @@ private fun EnrolledCard(code: EnrollmentCode, enrolledAtMs: Long?, revoked: Boo
     }
 }
 
+/** 标签在上、值在下：服务器 URL 很长，并排会被挤断或换行到看不清 */
 @Composable
 private fun InfoRow(label: String, value: String) {
-    Row {
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-            modifier = Modifier.width(72.dp)
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
         )
-        Text(value, style = MaterialTheme.typography.bodySmall)
+        Text(value, style = MaterialTheme.typography.bodySmall, softWrap = true)
     }
 }
 
