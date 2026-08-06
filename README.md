@@ -6,7 +6,7 @@ NunaRecorder is an Android research app for receiving Opus audio from Nuna-compa
 
 ## Download
 
-Download the latest signed APK from [GitHub Releases](https://github.com/JadyXuan/NunaRecorder/releases/latest).
+Download the signed APK from [GitHub Releases](https://github.com/JadyXuan/NunaRecorder/releases).
 
 Android 8.0 or newer is required. Because the APK is distributed outside Google Play, Android may ask you to allow the browser or file manager to install unknown apps.
 
