@@ -599,6 +599,8 @@ class MainActivity : ComponentActivity() {
                     val vad = SessionPaths.vadPrelabelFile(entry.dir)
                     if (vad.exists()) list.add(vad)
                 }
+                File(entry.dir, SessionPaths.DIAGNOSTICS_LOG_FILE)
+                    .takeIf { it.exists() }?.let { list.add(it) }
                 list.filter { it.exists() }
             }
             is RecordingEntry.LegacyOpus -> {

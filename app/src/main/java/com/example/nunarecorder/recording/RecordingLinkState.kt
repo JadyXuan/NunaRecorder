@@ -35,7 +35,9 @@ data class LinkStatus(
     /** 下次重连还有多久（毫秒），仅 [LinkPhase.RECONNECTING] 有意义 */
     val nextRetryInMs: Long = 0L,
     /** 用户已按下停止；任何迟到的 GATT 回调都不得把状态拉回录制 */
-    val stopRequested: Boolean = false
+    val stopRequested: Boolean = false,
+    /** 设备电量 0–100；null = 还没读到 */
+    val batteryPercent: Int? = null
 ) {
     /** 会话是否还开着（含重连中） */
     val isSessionActive: Boolean
@@ -94,6 +96,8 @@ class RecordingStateMachine {
             nextRetryInMs = delayMs
         )
     }
+
+    fun onBatteryLevel(percent: Int): LinkStatus = update { it.copy(batteryPercent = percent) }
 
     fun onReconnecting(): LinkStatus = updateUnlessStopped {
         it.copy(phase = LinkPhase.CONNECTING, nextRetryInMs = 0L)

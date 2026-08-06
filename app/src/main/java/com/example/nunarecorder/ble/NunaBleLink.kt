@@ -58,6 +58,9 @@ class NunaBleLink(
         fun onReconnecting()
         fun onAudioData(data: ByteArray)
 
+        /** 设备电量 0–100；来自标准 BLE 电池服务 */
+        fun onBatteryLevel(percent: Int)
+
         /** 无法自行恢复（缺权限、找不到服务），需要人工介入 */
         fun onFatal(reason: String)
     }
@@ -71,6 +74,16 @@ class NunaBleLink(
         private val STATUS_CHAR_UUID: UUID = UUID.fromString(ProtoConfig.Service.STATUS_CHAR_UUID)
         private val RECORDING_CHAR_UUID: UUID = UUID.fromString(ProtoConfig.Service.RECORDING_CHAR_UUID)
         private val CCCD_UUID: UUID = UUID.fromString(ProtoConfig.Service.CCCD_UUID)
+
+        /**
+         * 标准 BLE 电池服务。2026-08-06 实测设备确实暴露了它：
+         * `0000180f` / `00002a19 [RN]`（可读 + 可订阅）。
+         * A001 只返回 1 字节 `00`，不是电量。
+         */
+        private val BATTERY_SERVICE_UUID: UUID =
+            UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
+        private val BATTERY_LEVEL_UUID: UUID =
+            UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
 
         /** GATT status → 人能看懂的原因，写进 manifest 的 link.events[].reason */
         fun describeStatus(status: Int): String = when (status) {
@@ -213,7 +226,16 @@ class NunaBleLink(
         connectedAtMs = 0L
         lastDataAtMs = 0L
         profileDumped = false
-        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试）")
+        // 2026-08-06 实测（vivo V2303A / Android 16）：重装后前几次采集连不上，
+        // 日志里是连续 8 次 gatt_status(147)，**每次都正好 30 秒**——那是
+        // autoConnect=false 的建链超时。设备这时还没准备好广播，于是我们每 30 秒
+        // 撞一次墙，第 9 次（约 7 分钟后）才连上。
+        //
+        // 首次尝试仍用 autoConnect=false（设备就绪时这条最快）；从第二次起改用
+        // autoConnect=true：协议栈会挂一个后台待连请求，设备一开始广播就立刻连上，
+        // 不再有 30 秒的空等。
+        val autoConnect = reconnectAttempt > 0
+        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试，autoConnect=$autoConnect）")
         val device = try {
             a.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
@@ -222,10 +244,13 @@ class NunaBleLink(
             return
         }
         gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            device.connectGatt(context, false, gattCallback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+            device.connectGatt(
+                context, autoConnect, gattCallback,
+                android.bluetooth.BluetoothDevice.TRANSPORT_LE
+            )
         } else {
             @Suppress("DEPRECATION")
-            device.connectGatt(context, false, gattCallback)
+            device.connectGatt(context, autoConnect, gattCallback)
         }
         if (gatt == null) {
             log(TAG, "connectGatt 返回 null")
@@ -236,6 +261,8 @@ class NunaBleLink(
     private fun scheduleReconnect() {
         if (!running.get()) return
         reconnectAttempt++
+        // autoConnect=true 之后协议栈自己在等设备广播，我们的退避只是兜底，
+        // 不需要再拉到 30 秒——那只会让"设备刚好回来"时白等一轮。
         val delay = policy.delayForAttempt(reconnectAttempt)
         log(TAG, "第 $reconnectAttempt 次重连将在 ${delay / 1000} 秒后进行")
         listener.onReconnectScheduled(reconnectAttempt, delay)
@@ -306,6 +333,7 @@ class NunaBleLink(
                     return@post
                 }
                 dumpGattProfile(g)
+                subscribeBattery(g)
                 val transferChar = g.getService(SERVICE_UUID)?.getCharacteristic(TRANSFER_CHAR_UUID)
                 if (transferChar == null) {
                     log(TAG, "未找到 A002 握手特征")
@@ -351,6 +379,9 @@ class NunaBleLink(
                     RECORDING_CHAR_UUID -> {
                         subscribed = true
                         lastDataAtMs = System.currentTimeMillis()
+                        g.getService(BATTERY_SERVICE_UUID)
+                            ?.getCharacteristic(BATTERY_LEVEL_UUID)
+                            ?.let { runCatching { g.readCharacteristic(it) } }
                         log(TAG, "A003 已订阅，等待音频")
                         listener.onAudioSubscribed()
                     }
@@ -365,6 +396,7 @@ class NunaBleLink(
             status: Int
         ) {
             logStatusPayload(characteristic, value)
+            reportBattery(characteristic, value)
             handleStatusRead(g, characteristic)
         }
 
@@ -390,6 +422,7 @@ class NunaBleLink(
                 TRANSFER_CHAR_UUID -> handler.post {
                     if (running.get()) handshakeClient.onNotification(g, characteristic)
                 }
+                BATTERY_LEVEL_UUID -> handler.post { reportBattery(characteristic, value) }
                 RECORDING_CHAR_UUID -> {
                     // 音频走热路径：不 post 到 handler，直接交给上层写文件。
                     // 50 帧/秒 × 一次 post 的排队开销在 16 小时里是笔真钱。
@@ -500,6 +533,35 @@ class NunaBleLink(
                 log(TAG, "[PROFILE]   char ${ch.uuid} [$flags]")
             }
         }
+    }
+
+    /**
+     * 订阅设备电量。读一次拿初值，再开 notify 跟踪变化。
+     * 失败不影响采集——电量只是辅助信息，不能让它挡住音频链路。
+     */
+    @SuppressLint("MissingPermission")
+    private fun subscribeBattery(g: BluetoothGatt) {
+        val ch = g.getService(BATTERY_SERVICE_UUID)?.getCharacteristic(BATTERY_LEVEL_UUID)
+        if (ch == null) {
+            log(TAG, "设备没有标准电池服务，电量不可用")
+            return
+        }
+        runCatching {
+            g.setCharacteristicNotification(ch, true)
+            ch.getDescriptor(CCCD_UUID)?.let { cccd ->
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                @Suppress("DEPRECATION")
+                g.writeDescriptor(cccd)
+            }
+        }
+    }
+
+    private fun reportBattery(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        if (characteristic.uuid != BATTERY_LEVEL_UUID || value.isEmpty()) return
+        val percent = value[0].toInt() and 0xFF
+        if (percent !in 0..100) return
+        log(TAG, "设备电量 $percent%")
+        listener.onBatteryLevel(percent)
     }
 
     private fun hasConnectPermission(): Boolean {

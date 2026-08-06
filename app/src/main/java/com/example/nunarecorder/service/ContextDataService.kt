@@ -23,7 +23,9 @@ import com.example.nunarecorder.R
 import com.example.nunarecorder.context.ActivityRecognitionCollector
 import com.example.nunarecorder.util.LocationUpdatesHelper
 import java.io.File
+import java.io.BufferedOutputStream
 import java.io.FileOutputStream
+import java.io.OutputStream
 
 /**
  * 前台服务：在录制期间持续采集 GPS + IMU + 身体活动，写入会话目录 `context/context.jsonl`。
@@ -42,6 +44,8 @@ class ContextDataService : Service() {
         private const val IMU_PERIOD_US = 40_000
         /** 5 Hz：磁力计对 wearer activity 贡献很小，没必要按 IMU 频率采 */
         private const val MAG_PERIOD_US = 200_000
+        /** 缓冲落盘间隔；崩溃最多丢这么久的 context 行 */
+        private const val FLUSH_PERIOD_MS = 5_000L
         private const val CHANNEL_ID = "nuna_context_channel"
         private const val NOTIFICATION_ID = 1002
 
@@ -68,7 +72,13 @@ class ContextDataService : Service() {
         }
     }
 
-    private var output: FileOutputStream? = null
+    /**
+     * 带缓冲。原来是裸 [FileOutputStream]，25 Hz 加速度 + 25 Hz 陀螺 + 5 Hz 磁力计
+     * ≈ 55 次 write() syscall/秒，连续 16 小时。缓冲后按 [FLUSH_PERIOD_MS] 落盘，
+     * 崩溃最多丢这么久的 context —— 音频不受影响。
+     */
+    private var output: OutputStream? = null
+    private var lastFlushMs = 0L
     private val lock = Any()
     private var collecting = false
 
@@ -115,7 +125,8 @@ class ContextDataService : Service() {
     private fun startCapture(sidecar: File) {
         stopCapture()
         try {
-            output = FileOutputStream(sidecar, true) // append，允许 Activity 已写入的 meta 行保留
+            output = BufferedOutputStream(FileOutputStream(sidecar, true), 64 * 1024)
+            lastFlushMs = System.currentTimeMillis()
             collecting = true
             Log.d(TAG, "Context capture started: ${sidecar.absolutePath}")
 
@@ -227,6 +238,11 @@ class ContextDataService : Service() {
             if (!collecting) return
             runCatching {
                 output?.write((line + "\n").toByteArray(Charsets.UTF_8))
+                val now = System.currentTimeMillis()
+                if (now - lastFlushMs >= FLUSH_PERIOD_MS) {
+                    output?.flush()
+                    lastFlushMs = now
+                }
             }
         }
     }

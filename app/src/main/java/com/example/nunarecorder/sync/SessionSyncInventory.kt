@@ -29,6 +29,9 @@ object SessionSyncInventory {
         add(SessionPaths.MANIFEST_FILE, "application/json")
         if (includeContext) add(SessionPaths.CONTEXT_FILE, "application/x-ndjson")
         if (includeVad) add(SessionPaths.VAD_PRELABEL_FILE, "application/json")
+        // 诊断日志随会话上传：排查断连、丢帧、上传失败最需要它，
+        // 而指望佩戴者手工导出再发出来是不现实的。几十 KB，相对音频可忽略。
+        add(SessionPaths.DIAGNOSTICS_LOG_FILE, "text/plain")
         manifest.segments.forEach { add(it.file, "audio/opus") }
         return list
     }

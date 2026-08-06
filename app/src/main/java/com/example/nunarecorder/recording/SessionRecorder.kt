@@ -62,6 +62,11 @@ class SessionRecorder(
     private val onSegmentClosed: (ClosedSegment) -> Unit = {}
 ) {
 
+    companion object {
+        /** 周期性兜底落盘间隔；真正的落盘由分段封口和链路事件驱动 */
+        private const val MANIFEST_FLUSH_PERIOD_MS = 30_000L
+    }
+
     data class ClosedSegment(
         val sessionDir: File,
         val entry: AudioSegmentEntry,
@@ -177,7 +182,8 @@ class SessionRecorder(
             ).toLong()
             lastFrameAtMs = now
         }
-        maybeFlushManifest()
+        // feed() 是 50 次/秒的热路径，不在这里碰 manifest。
+        // 落盘由 tick() 的节流兜底和分段封口驱动。
     }
 
     /**
@@ -219,6 +225,14 @@ class SessionRecorder(
         flushManifestNow()
     }
 
+    /**
+     * 会话结束时把诊断日志快照写进会话目录，它会随会话一起上传。
+     *
+     * 佩戴者要单独导出日志再手工发出来，实际上没人会做；而排查断连、丢帧、
+     * 上传失败恰恰最需要它。日志只有结构化事件，几十 KB，相对音频可以忽略。
+     */
+    var diagnosticsSnapshot: (() -> String)? = null
+
     @Synchronized
     fun stop() {
         val dir = sessionDir ?: return
@@ -228,6 +242,12 @@ class SessionRecorder(
             // 会话在链路仍然断开时结束：end 留 null，不要假装它恢复过
             linkEvents.add(LinkGapEntry(it, null, openGapReason, openGapAttempts))
             openGapStartMs = null
+        }
+        diagnosticsSnapshot?.let { snapshot ->
+            runCatching {
+                File(dir, SessionPaths.DIAGNOSTICS_LOG_FILE).also { it.parentFile?.mkdirs() }
+                    .writeText(snapshot())
+            }
         }
         manifest?.let { m ->
             m.endedAtMs = now
@@ -353,8 +373,20 @@ class SessionRecorder(
         onSegmentClosed(ClosedSegment(dir, entry, file, sessionStartMs))
     }
 
+    /**
+     * manifest 落盘节流。
+     *
+     * 原来是**每秒**重写一次整份 manifest，而 manifest 随会话线性增长
+     * （2026-08-06 实测：93 段 34 KB，16 小时 960 段约 345 KB）。
+     * 每秒序列化 + 原子写（写临时文件再 rename）一份几百 KB 的 JSON，
+     * 16 小时累计约 9 GB 写入 —— 这是佩戴者报告"手机很热、掉电很快"的主因。
+     *
+     * 现在只在**真正有事发生**时落盘：分段封口、链路中断、链路恢复、停止录制。
+     * 这里的周期性兜底放宽到 [MANIFEST_FLUSH_PERIOD_MS]，进程被杀最多丢这么久的
+     * "当前段已写入字节数"——那是纯展示用的数字，音频本身已经在文件里了。
+     */
     private fun maybeFlushManifest() {
-        if (clock() - lastManifestFlushMs < 1000L) return
+        if (clock() - lastManifestFlushMs < MANIFEST_FLUSH_PERIOD_MS) return
         flushManifestNow()
     }
 

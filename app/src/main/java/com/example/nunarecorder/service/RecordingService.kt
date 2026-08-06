@@ -44,6 +44,9 @@ class RecordingService : Service() {
         private const val CHANNEL_ID = "nuna_recording_channel"
         private const val NOTIFICATION_ID = 1001
         private const val TICK_PERIOD_MS = 1_000L
+        private const val LOW_BATTERY_NOTIFICATION_ID = 1003
+        /** 从高到低；每个阈值只提醒一次 */
+        private val LOW_BATTERY_THRESHOLDS = listOf(20, 10, 5)
 
         const val ACTION_START = "com.example.nunarecorder.action.START_RECORDING"
         const val ACTION_STOP = "com.example.nunarecorder.action.STOP_RECORDING"
@@ -57,6 +60,7 @@ class RecordingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var recorder: SessionRecorder? = null
     private var active = false
+    private var lastBatteryWarning = Int.MAX_VALUE
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -115,6 +119,7 @@ class RecordingService : Service() {
             return
         }
         active = true
+        lastBatteryWarning = Int.MAX_VALUE
         DiagnosticsLog.log(TAG, "开始录制 device=$deviceName addr=$deviceAddress")
 
         publish(stateMachine.onStartRequested(deviceName, deviceAddress))
@@ -142,6 +147,7 @@ class RecordingService : Service() {
                 }
             }
         )
+        rec.diagnosticsSnapshot = { DiagnosticsLog.snapshot() }
         recorder = rec
         rec.start(sessionDir, deviceName, deviceAddress, options)
         ContextDataService.start(this, sessionDir)
@@ -215,6 +221,14 @@ class RecordingService : Service() {
             recorder?.feed(data)
         }
 
+        override fun onBatteryLevel(percent: Int) {
+            handler.post {
+                publish(stateMachine.onBatteryLevel(percent))
+                maybeWarnLowBattery(percent)
+                updateNotification()
+            }
+        }
+
         override fun onFatal(reason: String) {
             handler.post {
                 DiagnosticsLog.log(TAG, "致命错误，停止录制：$reason")
@@ -258,6 +272,30 @@ class RecordingService : Service() {
         wakeLock = null
     }
 
+    /**
+     * 设备低电量提醒。佩戴者不会主动去看电量，而设备没电等于当天剩下的时间全丢。
+     * 每个阈值只提醒一次，避免在阈值附近反复弹。
+     */
+    private fun maybeWarnLowBattery(percent: Int) {
+        val threshold = LOW_BATTERY_THRESHOLDS.firstOrNull { percent <= it } ?: return
+        if (threshold >= lastBatteryWarning) return
+        lastBatteryWarning = threshold
+        DiagnosticsLog.log(TAG, "设备电量 $percent%，低于 $threshold% 阈值，提醒佩戴者充电")
+        runCatching {
+            val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            mgr.notify(
+                LOW_BATTERY_NOTIFICATION_ID,
+                androidx.core.app.NotificationCompat.Builder(this, CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_stat_nuna)
+                    .setContentTitle("录音设备电量 $percent%")
+                    .setContentText("请尽快给 Nuna 设备充电，否则采集会中断")
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -288,6 +326,7 @@ class RecordingService : Service() {
                     append(" · 完整度 %.0f%%".format(stats.completeness * 100))
                 }
                 if (stats.disconnectCount > 0) append(" · 断连 ${stats.disconnectCount} 次")
+                status.batteryPercent?.let { append(" · 设备 $it%") }
             }
         }
         val pi = PendingIntent.getActivity(

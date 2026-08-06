@@ -14,6 +14,8 @@ object SessionPaths {
     const val MANIFEST_FILE = "manifest.json"
     const val CONTEXT_FILE = "context/context.jsonl"
     const val VAD_PRELABEL_FILE = "labels/vad_prelabel.json"
+    /** 诊断日志随会话一起上传；`labels/` 是服务端允许的顶层目录之一 */
+    const val DIAGNOSTICS_LOG_FILE = "labels/diagnostics.log"
     const val AUDIO_DIR = "audio"
     const val SEGMENT_PREFIX = "seg_"
     const val LEGACY_OPUS_SUFFIX = ".opus"
@@ -48,11 +50,28 @@ object SessionPaths {
         return idParts.joinToString(":") { it.uppercase() }
     }
 
-    fun downloadsRoot(): File {
+    /** App 自己的目录名，避免把几百个会话文件夹直接铺在 Download 根下 */
+    const val APP_DIR_NAME = "NunaRecorder"
+
+    /** 会话根目录：`Download/NunaRecorder/` */
+    fun sessionsRoot(): File {
+        val dir = File(legacyDownloadsRoot(), APP_DIR_NAME)
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    /**
+     * 旧版把会话直接建在 `Download/` 下。已有数据不搬动（搬运本身有丢数据的风险），
+     * 列表时两个位置都扫，新会话一律建在 [sessionsRoot] 里。
+     */
+    fun legacyDownloadsRoot(): File {
         val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
+
+    @Deprecated("新会话用 sessionsRoot()", ReplaceWith("sessionsRoot()"))
+    fun downloadsRoot(): File = sessionsRoot()
 
     fun segmentFileName(index: Int): String =
         "${SEGMENT_PREFIX}${index.toString().padStart(3, '0')}$LEGACY_OPUS_SUFFIX"
@@ -62,7 +81,7 @@ object SessionPaths {
     fun newSessionDir(deviceName: String, deviceAddress: String?, startedAtMs: Long = System.currentTimeMillis()): File {
         val idPart = formatMacForDirName(deviceAddress)
             ?: formatDeviceNameForDirName(deviceName)
-        return File(downloadsRoot(), "nuna_${idPart}_$startedAtMs")
+        return File(sessionsRoot(), "nuna_${idPart}_$startedAtMs")
     }
 
     fun manifestFile(sessionDir: File): File = File(sessionDir, MANIFEST_FILE)
@@ -76,14 +95,15 @@ object SessionPaths {
     fun isSessionDir(dir: File): Boolean =
         dir.isDirectory && manifestFile(dir).exists()
 
+    /** 新旧两个位置都扫：升级前录的会话不能从列表里消失 */
     fun listSessionDirs(): List<File> =
-        downloadsRoot()
-            .listFiles { f -> f.isDirectory && isSessionDir(f) }
-            ?.sortedByDescending { manifestFile(it).lastModified() }
-            ?: emptyList()
+        (listOf(sessionsRoot(), legacyDownloadsRoot())
+            .flatMap { root -> root.listFiles { f -> f.isDirectory && isSessionDir(f) }?.toList() ?: emptyList() })
+            .distinctBy { it.absolutePath }
+            .sortedByDescending { manifestFile(it).lastModified() }
 
     fun listLegacyOpusFiles(): List<File> =
-        downloadsRoot()
+        legacyDownloadsRoot()
             .listFiles { f ->
                 f.isFile &&
                     f.name.endsWith(LEGACY_OPUS_SUFFIX, ignoreCase = true) &&

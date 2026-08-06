@@ -424,6 +424,9 @@ private fun LinkHealthPanel(
             linkStatus.deviceName?.let {
                 StatusLine("设备", "$it${linkStatus.deviceAddress?.let { a -> " · $a" } ?: ""}")
             }
+            linkStatus.batteryPercent?.let { pct ->
+                StatusLine("设备电量", "$pct%", emphasis = pct <= 20)
+            }
 
             if (retrying) {
                 StatusLine(
