@@ -40,9 +40,14 @@ object DiagnosticsLog {
     fun lineCount(): Int = synchronized(lock) { lines.size }
 
     /** 导出内容：设备/构建信息 + 全部缓冲行。 */
+    /** 由宿主在启动时设置，形如 `1.1 (3)` */
+    @Volatile
+    var appVersion: String = "unknown"
+
     fun snapshot(): String {
         val header = buildString {
             appendLine("# EgoAudio Mobile Collector 诊断日志")
+            appendLine("App 版本: $appVersion")
             appendLine("导出时间: ${stamp.format(Date())}")
             appendLine("机型: ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")

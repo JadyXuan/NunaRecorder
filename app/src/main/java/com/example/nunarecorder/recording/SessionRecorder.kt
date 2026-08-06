@@ -59,7 +59,9 @@ class SessionRecorder(
     private val onLog: (String) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
     /** 分段封口回调，宿主用它入队 VAD；录制逻辑本身不依赖 Android */
-    private val onSegmentClosed: (ClosedSegment) -> Unit = {}
+    private val onSegmentClosed: (ClosedSegment) -> Unit = {},
+    /** 采集端版本，写进 manifest 供审计和排查用 */
+    private val appVersion: String? = null
 ) {
 
     companion object {
@@ -156,7 +158,8 @@ class SessionRecorder(
             vad = VadSummary(
                 status = if (options.autoVadOnRecord) "pending" else "disabled"
             ),
-            recordingActive = true
+            recordingActive = true,
+            appVersion = appVersion
         )
         SessionManifestIO.write(sessionDir, manifest!!)
         openSegment(0)

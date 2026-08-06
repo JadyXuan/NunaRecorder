@@ -145,7 +145,8 @@ class RecordingService : Service() {
                         )
                     )
                 }
-            }
+            },
+            appVersion = appVersionLabel()
         )
         rec.diagnosticsSnapshot = { DiagnosticsLog.snapshot() }
         recorder = rec
@@ -295,6 +296,17 @@ class RecordingService : Service() {
             )
         }
     }
+
+    /** `versionName (versionCode)`，例如 `1.1 (3)` */
+    private fun appVersionLabel(): String = runCatching {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION") info.versionCode.toLong()
+        }
+        "${info.versionName} ($code)"
+    }.getOrDefault("unknown")
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

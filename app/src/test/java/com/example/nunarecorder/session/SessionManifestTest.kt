@@ -61,7 +61,8 @@ class SessionManifestTest {
             reorderedFrames = 4,
             droppedCarryOverBytes = 60
         ),
-        missingSegments = listOf(1)
+        missingSegments = listOf(1),
+        appVersion = "1.2 (3)"
     )
 
     private fun roundTrip(m: SessionManifest): SessionManifest {
@@ -86,6 +87,24 @@ class SessionManifestTest {
         assertEquals(40, gap.atFrameOffset)
         assertEquals(2, gap.missingFrames)
         assertEquals(6418, gap.nextFrameId)
+    }
+
+    /** 没有版本号就无法回答"这批数据是哪个 APK 采的"。 */
+    @Test
+    fun `采集端版本往返`() {
+        assertEquals("1.2 (3)", roundTrip(sample()).appVersion)
+    }
+
+    @Test
+    fun `旧 manifest 没有版本号时读成 null`() {
+        val dir = temp.newFolder("nover")
+        File(dir, "manifest.json").writeText(
+            """
+            {"format_version":1,"session_id":"s","device_name":"d","started_at_ms":1700000000000,
+             "audio":{"segments":[]}}
+            """.trimIndent()
+        )
+        assertNull(SessionManifest.load(File(dir, "manifest.json"))!!.appVersion)
     }
 
     @Test

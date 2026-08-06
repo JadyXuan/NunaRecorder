@@ -168,6 +168,12 @@ class MainActivity : ComponentActivity() {
         VadJobQueue.start(this)
         val resumed = VadJobQueue.resumeAllIncompleteSessions()
         if (resumed > 0) appendLog("自动续传 VAD: $resumed 个音频段待分析")
+        DiagnosticsLog.appVersion = runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode
+            else @Suppress("DEPRECATION") info.versionCode.toLong()
+            "${info.versionName} ($code)"
+        }.getOrDefault("unknown")
         MigrationCoordinator.onLog = { appendLog(it) }
         SessionSyncCoordinator.onLog = { appendLog(it) }
         SessionSyncCoordinator.onTokenRejected = {

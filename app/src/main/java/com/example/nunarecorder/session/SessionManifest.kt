@@ -52,6 +52,14 @@ data class SessionManifest(
      * 这里把空洞显式列出来，而不是让它看起来像会话本来就短。
      */
     var missingSegments: List<Int> = emptyList(),
+    /**
+     * 采集端版本，例如 `1.1 (3)`。
+     *
+     * 没有它就无法回答"这批数据是哪个 APK 采的"——而我们几乎每天都在改
+     * 分段、丢帧记账和 BLE 重连的行为。08-03 那批 manifest 里的 `frames` 用的还是
+     * 错的量纲，如果当时带了版本号，事后一眼就能筛出来。
+     */
+    var appVersion: String? = null,
     /** 参与者主动删除的分段；与 [missingSegments] 是两回事，不能混 */
     var deletedSegments: List<SegmentDeletion> = emptyList()
 ) {
@@ -64,6 +72,7 @@ data class SessionManifest(
         put("ended_at_ms", endedAtMs ?: JSONObject.NULL)
         put("segment_duration_ms", segmentDurationMs)
         put("legacy", legacy)
+        appVersion?.let { put("app_version", it) }
         if (sourceOpus != null) put("source_opus", sourceOpus)
         put("audio", JSONObject().apply {
             put("codec", "opus_raw")
@@ -155,6 +164,7 @@ data class SessionManifest(
                 openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L,
                 link = LinkHealth.fromJson(j.optJSONObject("link")),
                 missingSegments = missing,
+                appVersion = j.optString("app_version").takeIf { it.isNotEmpty() },
                 deletedSegments = deleted
             )
         } catch (_: Exception) {
