@@ -74,6 +74,10 @@ class NunaBleLink(
         private const val RECONNECT_SETTLE_MS = 1_200L
         /** discoverServices 发起后多久没回调就重来 */
         private const val SERVICE_DISCOVERY_TIMEOUT_MS = 10_000L
+        /** A003 订阅后多久读第一次电量 */
+        private const val BATTERY_FIRST_READ_DELAY_MS = 5_000L
+        /** 电量变化很慢，几分钟一次足够 */
+        private const val BATTERY_POLL_PERIOD_MS = 5 * 60_000L
 
         private val SERVICE_UUID: UUID = UUID.fromString(ProtoConfig.Service.SERVICE_UUID)
         private val TRANSFER_CHAR_UUID: UUID = UUID.fromString(ProtoConfig.Service.TRANSFER_CHAR_UUID)
@@ -203,6 +207,8 @@ class NunaBleLink(
             log(TAG, "stop：用户主动停止，取消所有重连")
             handler.removeCallbacks(reconnectRunnable)
             handler.removeCallbacks(watchdog)
+            handler.removeCallbacks(batteryPoll)
+            batteryGatt = null
             unregisterAdapterReceiver()
             teardownGatt()
         }
@@ -404,7 +410,12 @@ class NunaBleLink(
                     return@post
                 }
                 dumpGattProfile(g)
-                subscribeBattery(g)
+                // **这里绝对不要碰电量特征。**
+                // Android GATT 同一时刻只允许一个未完成操作。我曾在这里调
+                // subscribeBattery()，它的 writeDescriptor 紧挨着下面 A002 的
+                // writeDescriptor，第二个直接被丢弃 —— A002 通知从未启用，
+                // 握手永远不会开始，界面就永远停在"正在握手"。
+                // 电量推迟到音频链路完全建立之后再读，见 scheduleBatteryRead()。
                 val transferChar = g.getService(SERVICE_UUID)?.getCharacteristic(TRANSFER_CHAR_UUID)
                 if (transferChar == null) {
                     // 服务列表不完整（协议栈缓存或发现被打断）。重来一次通常就好了，
@@ -453,9 +464,8 @@ class NunaBleLink(
                     RECORDING_CHAR_UUID -> {
                         subscribed = true
                         lastDataAtMs = System.currentTimeMillis()
-                        g.getService(BATTERY_SERVICE_UUID)
-                            ?.getCharacteristic(BATTERY_LEVEL_UUID)
-                            ?.let { runCatching { g.readCharacteristic(it) } }
+                        // 音频起来了再管电量，且延迟几秒，彻底避开订阅阶段的操作槽
+                        scheduleBatteryRead(g)
                         log(TAG, "A003 已订阅，等待音频")
                         listener.onAudioSubscribed()
                     }
@@ -610,23 +620,39 @@ class NunaBleLink(
     }
 
     /**
-     * 订阅设备电量。读一次拿初值，再开 notify 跟踪变化。
-     * 失败不影响采集——电量只是辅助信息，不能让它挡住音频链路。
+     * 音频链路建立之后再定期读一次电量。
+     *
+     * **只用 read，不订阅、不写描述符。** 订阅电量要写 CCCD，而 CCCD 写入会和
+     * 握手/音频订阅抢同一个 GATT 操作槽——2026-08-06 到 08-07 我就是这么把握手
+     * 卡死了三天：电量的 writeDescriptor 紧挨着 A002 的 writeDescriptor，
+     * 后者被静默丢弃，A002 通知从未启用。
+     *
+     * 电量变化很慢，几分钟读一次完全够，不值得为它冒险动 CCCD。
      */
     @SuppressLint("MissingPermission")
-    private fun subscribeBattery(g: BluetoothGatt) {
-        val ch = g.getService(BATTERY_SERVICE_UUID)?.getCharacteristic(BATTERY_LEVEL_UUID)
-        if (ch == null) {
-            log(TAG, "设备没有标准电池服务，电量不可用")
-            return
-        }
-        runCatching {
-            g.setCharacteristicNotification(ch, true)
-            ch.getDescriptor(CCCD_UUID)?.let { cccd ->
-                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                @Suppress("DEPRECATION")
-                g.writeDescriptor(cccd)
+    private fun scheduleBatteryRead(g: BluetoothGatt) {
+        handler.removeCallbacks(batteryPoll)
+        batteryGatt = g
+        handler.postDelayed(batteryPoll, BATTERY_FIRST_READ_DELAY_MS)
+    }
+
+    private var batteryGatt: BluetoothGatt? = null
+
+    private val batteryPoll = object : Runnable {
+        @SuppressLint("MissingPermission")
+        override fun run() {
+            if (!running.get()) return
+            val g = batteryGatt
+            // 只在音频确实在流的时候读，避免和重连期间的操作撞车
+            if (g != null && !isStale(g) && subscribed) {
+                val ch = g.getService(BATTERY_SERVICE_UUID)?.getCharacteristic(BATTERY_LEVEL_UUID)
+                if (ch == null) {
+                    log(TAG, "设备没有标准电池服务，电量不可用")
+                    return
+                }
+                runCatching { g.readCharacteristic(ch) }
             }
+            handler.postDelayed(this, BATTERY_POLL_PERIOD_MS)
         }
     }
 
