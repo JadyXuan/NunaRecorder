@@ -13,10 +13,17 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.ActivityCompat
 
+sealed interface HandshakeEvent {
+    data object Started : HandshakeEvent
+    data object VerificationAccepted : HandshakeEvent
+    data object Ready : HandshakeEvent
+    data class Failed(val reason: String) : HandshakeEvent
+}
 
 class HandshakeClient(
     private val context: Context,
-    private val log: (String) -> Unit
+    private val log: (String) -> Unit,
+    private val onEvent: (HandshakeEvent) -> Unit = {}
 ) {
 
     companion object {
@@ -25,6 +32,10 @@ class HandshakeClient(
 
     private var verificationCodeSent: String? = null
     private var nextCommandId: Int = 0x2d01
+    private var pendingSetTimeCommandId: Int? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var handshakeGeneration = 0
+    private var timeoutRunnable: Runnable? = null
 
     private fun nextCommandId(): Int {
         nextCommandId = (nextCommandId + 1) and 0xFFFF
@@ -32,6 +43,12 @@ class HandshakeClient(
     }
 
     fun startHandshake(gatt: BluetoothGatt) {
+        handshakeGeneration++
+        val generation = handshakeGeneration
+        cancelTimeout()
+        verificationCodeSent = null
+        pendingSetTimeCommandId = null
+        onEvent(HandshakeEvent.Started)
         log("HS: startHandshake() called")
 
         val verificationCode = "123456"
@@ -56,7 +73,15 @@ class HandshakeClient(
 
         log("HS: handshakeRequest packet=${packet.toHex()}")
 
-        writeToTransferChar(gatt, packet)
+        if (!writeToTransferChar(gatt, packet)) {
+            fail("无法发送握手请求")
+            return
+        }
+        timeoutRunnable = Runnable {
+            if (generation == handshakeGeneration && verificationCodeSent != null) {
+                fail("等待设备响应超时")
+            }
+        }.also { handler.postDelayed(it, 12_000L) }
     }
 
     fun onNotification(
@@ -106,6 +131,7 @@ class HandshakeClient(
                 }
                 HandshakeMessageType.HANDSHAKE_ERROR.value -> {
                     log("HS: HANDSHAKE_ERROR received, rawData=${data.toHex()}")
+                    fail("设备返回握手错误")
                 }
                 else -> {
                     log("HS: unknown handshake inner type=0x${msgTypeValue.toString(16)}, data=${data.toHex()}")
@@ -120,6 +146,7 @@ class HandshakeClient(
 
         if (data.size < 3) {
             log("HS: CONTROL_RESPONSE too short, len=${data.size}")
+            fail("设备控制响应格式错误")
             return
         }
 
@@ -128,12 +155,26 @@ class HandshakeClient(
 
         log("HS: CONTROL_RESPONSE: requestId=0x${requestId.toString(16)} ($requestId), statusCode=$statusCode")
 
-        // 简单判断：如果 statusCode == 0，就认为成功
+        val pendingRequestId = pendingSetTimeCommandId
+        if (pendingRequestId == null || requestId != pendingRequestId) {
+            log("HS: ignore unrelated CONTROL_RESPONSE, pending=$pendingRequestId")
+            return
+        }
+
         if (statusCode == 0) {
             log("HS: ✅ Command success (requestId=$requestId), trigger device start...")
-            triggerDeviceStart(gatt)
+            pendingSetTimeCommandId = null
+            if (triggerDeviceStart(gatt)) {
+                verificationCodeSent = null
+                cancelTimeout()
+                onEvent(HandshakeEvent.Ready)
+            } else {
+                fail("无法触发设备启动")
+            }
         } else {
             log("HS: ❌ Command failed with status: $statusCode")
+            pendingSetTimeCommandId = null
+            fail("设备时间同步失败 (status=$statusCode)")
         }
     }
 
@@ -145,6 +186,7 @@ class HandshakeClient(
 
         if (payload.size != 6) {
             log("HS: invalid response length, expect 6")
+            fail("握手响应长度错误")
             return
         }
 
@@ -154,25 +196,34 @@ class HandshakeClient(
         val sent = verificationCodeSent
         if (sent == null) {
             log("HS: no verificationCodeSent, handshake not started yet?")
+            fail("收到无效的握手响应")
             return
         }
 
         if (responseCode != sent) {
             log("HS: verificationCode mismatch, sent='$sent', recv='$responseCode'")
+            fail("验证码不匹配")
             return
         }
 
-        log("HS: verificationCode matched, handshake success, now send COMPLETED + SET_TIME")
+        log("HS: verificationCode matched, now send COMPLETED + SET_TIME")
+        onEvent(HandshakeEvent.VerificationAccepted)
 
-        sendHandshakeCompleted(gatt)
+        if (!sendHandshakeCompleted(gatt)) {
+            fail("无法发送握手完成消息")
+            return
+        }
 
         // 延迟 300ms 再发送 SET_TIME
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            sendSetTime(gatt, System.currentTimeMillis())
+        val generation = handshakeGeneration
+        handler.postDelayed({
+            if (generation == handshakeGeneration && verificationCodeSent != null) {
+                sendSetTime(gatt, System.currentTimeMillis())
+            }
         }, 300)
     }
 
-    private fun sendHandshakeCompleted(gatt: BluetoothGatt) {
+    private fun sendHandshakeCompleted(gatt: BluetoothGatt): Boolean {
         val data = ByteArray(1)
         data[0] = HandshakeMessageType.HANDSHAKE_COMPLETED.value.toByte()
 
@@ -185,11 +236,12 @@ class HandshakeClient(
 
         log("HS: handshakeCompleted packet=${packet.toHex()}")
 
-        writeToTransferChar(gatt, packet)
+        return writeToTransferChar(gatt, packet)
     }
 
     private fun sendSetTime(gatt: BluetoothGatt, timestamp: Long) {
         val requestId = nextCommandId()
+        pendingSetTimeCommandId = requestId
         val payload = ByteBuffer.allocate(8)
             .order(ByteOrder.LITTLE_ENDIAN)
             .putLong(timestamp)
@@ -213,28 +265,44 @@ class HandshakeClient(
 
         log("HS: setTime packet=${packet.toHex()}")
 
-        writeToTransferChar(gatt, packet)
+        if (!writeToTransferChar(gatt, packet)) {
+            pendingSetTimeCommandId = null
+            fail("无法发送时间同步请求")
+        }
     }
 
     // 在 HandshakeClient.kt 中添加这个方法
 
     @SuppressLint("MissingPermission")
-    private fun triggerDeviceStart(gatt: BluetoothGatt) {
+    private fun triggerDeviceStart(gatt: BluetoothGatt): Boolean {
         val service = gatt.getService(UUID.fromString(ProtoConfig.Service.SERVICE_UUID)) ?: run {
             log("triggerDeviceStart: service not found")
-            return
+            return false
         }
 
         // 0x0012 对应 A001 (HANDSHAKE characteristic)
         val handshakeChar = service.getCharacteristic(
             UUID.fromString(ProtoConfig.Service.STATUS_CHAR_UUID)) ?: run {
             log("triggerDeviceStart: HANDSHAKE char not found")
-            return
+            return false
         }
 
         log("Sending Read Request to HANDSHAKE (0x0012) to trigger device start...")
         val success = gatt.readCharacteristic(handshakeChar)
         log("Read Request sent: $success")
+        return success
+    }
+
+    private fun fail(reason: String) {
+        verificationCodeSent = null
+        pendingSetTimeCommandId = null
+        cancelTimeout()
+        onEvent(HandshakeEvent.Failed(reason))
+    }
+
+    private fun cancelTimeout() {
+        timeoutRunnable?.let(handler::removeCallbacks)
+        timeoutRunnable = null
     }
 
 

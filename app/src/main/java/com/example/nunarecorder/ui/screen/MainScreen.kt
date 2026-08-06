@@ -56,6 +56,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
+import com.example.nunarecorder.connection.RecorderConnectionPhase
+import com.example.nunarecorder.connection.RecorderConnectionState
+import com.example.nunarecorder.ble.DevicePowerAvailability
+import com.example.nunarecorder.ble.DevicePowerState
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.theme.NunaSuccess
 
@@ -65,7 +69,8 @@ fun MainScreen(
     deviceList: List<ScannedDevice>,
     pairedDevices: List<PairedDevice>,
     selectedDeviceAddress: String?,
-    connectionStatus: String,
+    connectionState: RecorderConnectionState,
+    devicePowerState: DevicePowerState? = null,
     liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
@@ -76,8 +81,6 @@ fun MainScreen(
     modifier: Modifier = Modifier
 ) {
     val logScrollState = rememberScrollState()
-    val isConnected = connectionStatus.contains("已连接")
-    val isRecording = connectionStatus.contains("录制中") || liveRecordingStats != null
 
     LaunchedEffect(logText) {
         logScrollState.animateScrollTo(logScrollState.maxValue)
@@ -94,9 +97,8 @@ fun MainScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         ConnectionStatusCard(
-            status = connectionStatus,
-            isConnected = isConnected,
-            isRecording = isRecording,
+            connectionState = connectionState,
+            devicePowerState = devicePowerState,
             liveStats = liveRecordingStats
         )
 
@@ -105,7 +107,8 @@ fun MainScreen(
             shape = RoundedCornerShape(10.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(44.dp)
+                .height(44.dp),
+            enabled = connectionState.canScanOrSelect
         ) {
             Text("扫描附近 Nuna 设备", fontWeight = FontWeight.Medium)
         }
@@ -115,6 +118,7 @@ fun MainScreen(
             emptyText = "（未发现 Nuna 设备，请先扫描）",
             items = nunaDevices.map { Pair(it.name ?: "(no name)", it.address) },
             selectedAddress = selectedDeviceAddress,
+            enabled = connectionState.canScanOrSelect,
             onItemClick = { addr ->
                 nunaDevices.find { it.address == addr }?.let { onDeviceClick(it) }
             }
@@ -127,6 +131,7 @@ fun MainScreen(
                 .sortedByDescending { it.lastConnectedTime }
                 .map { Pair(it.name ?: "(no name)", it.address) },
             selectedAddress = selectedDeviceAddress,
+            enabled = connectionState.canScanOrSelect,
             onItemClick = { addr ->
                 pairedDevices.find { it.address == addr }?.let { onPairedDeviceClick(it) }
             }
@@ -138,10 +143,14 @@ fun MainScreen(
                 .fillMaxWidth()
                 .height(48.dp),
             shape = RoundedCornerShape(10.dp),
-            enabled = selectedDeviceAddress != null
+            enabled = selectedDeviceAddress != null && connectionState.canConnect
         ) {
             Text(
-                if (selectedDeviceAddress != null) "连接 + 握手" else "请先在上方选择设备",
+                when {
+                    selectedDeviceAddress == null -> "请先在上方选择设备"
+                    connectionState.canConnect -> "连接 + 握手"
+                    else -> connectionState.title
+                },
                 fontWeight = FontWeight.SemiBold
             )
         }
@@ -160,11 +169,20 @@ fun MainScreen(
                     containerColor = NunaSuccess,
                     contentColor = Color.White
                 ),
-                enabled = isConnected && !isRecording
+                enabled = connectionState.canStartRecording
             ) {
                 Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("开始录制", fontWeight = FontWeight.Medium)
+                Text(
+                    when (connectionState.phase) {
+                        RecorderConnectionPhase.HANDSHAKING -> "等待握手"
+                        RecorderConnectionPhase.STARTING_RECORDING -> "正在启动"
+                        RecorderConnectionPhase.RECORDING,
+                        RecorderConnectionPhase.AUDIO_STALLED -> "录制进行中"
+                        else -> "开始录制"
+                    },
+                    fontWeight = FontWeight.Medium
+                )
             }
             OutlinedButton(
                 onClick = onStopRecordingClick,
@@ -178,7 +196,7 @@ fun MainScreen(
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
                 ),
-                enabled = isRecording
+                enabled = connectionState.canStopRecording
             ) {
                 Icon(Icons.Outlined.Close, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
@@ -217,6 +235,7 @@ private fun DeviceListCard(
     emptyText: String,
     items: List<Pair<String, String>>,
     selectedAddress: String?,
+    enabled: Boolean,
     onItemClick: (String) -> Unit
 ) {
     Card(
@@ -242,6 +261,7 @@ private fun DeviceListCard(
                         name = name,
                         address = address,
                         selected = address == selectedAddress,
+                        enabled = enabled,
                         onClick = { onItemClick(address) }
                     )
                     if (items.last().second != address) {
@@ -273,6 +293,7 @@ private fun DeviceRow(
     name: String,
     address: String,
     selected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit
 ) {
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
@@ -292,7 +313,8 @@ private fun DeviceRow(
                 color = borderColor,
                 shape = RoundedCornerShape(8.dp)
             )
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
+            .alpha(if (enabled) 1f else 0.55f)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -323,15 +345,21 @@ private fun DeviceRow(
 
 @Composable
 private fun ConnectionStatusCard(
-    status: String,
-    isConnected: Boolean,
-    isRecording: Boolean,
+    connectionState: RecorderConnectionState,
+    devicePowerState: DevicePowerState? = null,
     liveStats: LiveRecordingUiStats? = null
 ) {
+    val isRecording = connectionState.isRecording
+    val isError = connectionState.phase == RecorderConnectionPhase.ERROR ||
+        connectionState.phase == RecorderConnectionPhase.AUDIO_STALLED
+    val isActive = connectionState.phase != RecorderConnectionPhase.DISCONNECTED &&
+        connectionState.phase != RecorderConnectionPhase.ERROR
     val dotColor by animateColorAsState(
         targetValue = when {
+            isError -> MaterialTheme.colorScheme.error
             isRecording -> NunaSuccess
-            isConnected -> NunaSuccess
+            connectionState.phase == RecorderConnectionPhase.READY -> NunaSuccess
+            isActive -> MaterialTheme.colorScheme.primary
             else -> MaterialTheme.colorScheme.outline
         },
         animationSpec = tween(600),
@@ -362,10 +390,13 @@ private fun ConnectionStatusCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isConnected || isRecording)
-                NunaSuccess.copy(alpha = 0.08f)
-            else
-                MaterialTheme.colorScheme.surface
+            containerColor = when {
+                isError -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                isRecording || connectionState.phase == RecorderConnectionPhase.READY ->
+                    NunaSuccess.copy(alpha = 0.08f)
+                isActive -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                else -> MaterialTheme.colorScheme.surface
+            }
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
@@ -376,7 +407,7 @@ private fun ConnectionStatusCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(contentAlignment = Alignment.Center) {
-                if (isConnected || isRecording) {
+                if (isActive) {
                     Box(
                         modifier = Modifier
                             .size(14.dp)
@@ -396,21 +427,37 @@ private fun ConnectionStatusCard(
             Spacer(Modifier.width(12.dp))
             Column {
                 Text(
-                    text = when {
-                        isRecording -> "正在录制"
-                        isConnected -> "设备已连接"
-                        else -> "未连接"
-                    },
+                    text = connectionState.title,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isConnected || isRecording) NunaSuccess
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    color = when {
+                        isError -> MaterialTheme.colorScheme.error
+                        isRecording || connectionState.phase == RecorderConnectionPhase.READY -> NunaSuccess
+                        isActive -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    }
                 )
                 Text(
-                    text = status,
+                    text = connectionState.detail,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                 )
+                if (connectionState.isConnected && devicePowerState != null) {
+                    Text(
+                        text = devicePowerSummary(devicePowerState),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = if (
+                            devicePowerState.availability == DevicePowerAvailability.AVAILABLE
+                        ) FontWeight.Medium else FontWeight.Normal,
+                        color = when {
+                            devicePowerState.percent != null && devicePowerState.percent <= 15 ->
+                                MaterialTheme.colorScheme.error
+                            devicePowerState.availability == DevicePowerAvailability.AVAILABLE ->
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                        }
+                    )
+                }
                 if (liveStats != null) {
                     val segHint = if (liveStats.closedSegmentCount > 0) {
                         "${liveStats.closedSegmentCount} 段已封口 · "
@@ -425,6 +472,20 @@ private fun ConnectionStatusCard(
                     )
                 }
             }
+        }
+    }
+}
+
+private fun devicePowerSummary(state: DevicePowerState): String = when (state.availability) {
+    DevicePowerAvailability.READING -> "电量：正在读取…"
+    DevicePowerAvailability.UNSUPPORTED -> "电量：设备未提供"
+    DevicePowerAvailability.AVAILABLE -> buildString {
+        append("电量：")
+        append(state.percent?.let { "$it%" } ?: "未知")
+        state.voltageMv?.let { append(" · ${"%.2f".format(it / 1000.0)} V") }
+        when {
+            state.charging == true -> append(" · 充电中")
+            state.usbPresent == true -> append(" · USB 供电")
         }
     }
 }

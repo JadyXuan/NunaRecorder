@@ -3,6 +3,7 @@ package com.example.nunarecorder.sync
 import com.example.nunarecorder.session.AudioSegmentEntry
 import com.example.nunarecorder.session.SessionManifest
 import okhttp3.OkHttpClient
+import okhttp3.Credentials
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -81,7 +82,9 @@ class SessionAutoUploadTest {
                 OkHttpClient(),
                 server.url("/").toString().trimEnd('/'),
                 "user-1",
-                "AA:BB:CC:DD:EE:FF"
+                "AA:BB:CC:DD:EE:FF",
+                "pilot-user",
+                "pilot-pass"
             )
 
             val ok = uploader.uploadAudioSegment(
@@ -96,6 +99,10 @@ class SessionAutoUploadTest {
             val request = server.takeRequest()
             assertEquals("/thingx/api/file/upload/audio", request.path)
             assertEquals("session-123:0:sha", request.getHeader("Idempotency-Key"))
+            assertEquals(
+                Credentials.basic("pilot-user", "pilot-pass"),
+                request.getHeader("Authorization")
+            )
             val body = request.body.readUtf8()
             assertTrue(body.contains("session-123_seg_000.opus"))
             assertTrue(body.contains("\"startTime\":123000"))

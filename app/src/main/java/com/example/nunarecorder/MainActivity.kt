@@ -9,7 +9,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -36,11 +38,17 @@ import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import java.io.File
+import java.util.ArrayDeque
 import java.util.UUID
 
 import com.example.nunarecorder.audio.SegmentAudioPlayer
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.ble.HandshakeClient
+import com.example.nunarecorder.ble.HandshakeEvent
+import com.example.nunarecorder.ble.BatteryTelemetry
+import com.example.nunarecorder.ble.DevicePowerState
+import com.example.nunarecorder.connection.RecorderConnectionEvent
+import com.example.nunarecorder.connection.RecorderConnectionPhase
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
@@ -53,6 +61,9 @@ import com.example.nunarecorder.ble.ProtoConfig
 import com.example.nunarecorder.data.DeviceStorage
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
+import com.example.nunarecorder.diagnostics.AudioStallEvent
+import com.example.nunarecorder.diagnostics.AudioStallEventType
+import com.example.nunarecorder.diagnostics.AudioStallMonitor
 import com.example.nunarecorder.ui.components.BottomNavBar
 import com.example.nunarecorder.ui.screen.MainScreen
 import com.example.nunarecorder.ui.screen.LifelogScreen
@@ -102,6 +113,13 @@ class MainActivity : ComponentActivity() {
     // 点击"连接+握手"时设为 true，通知使能成功后会自动触发握手
     private var autoHandshakeOnConnect = false
 
+    // 可选电量能力：XIAO 的 A004 优先，标准 BAS 作为原 Nuna 回退。
+    private val batteryReadCandidates = ArrayDeque<BluetoothGattCharacteristic>()
+    private var activeBatteryReadUuid: UUID? = null
+    private var batteryNotificationUuid: UUID? = null
+    private var batterySetupCompleted = false
+    private var batteryReadTimeout: Runnable? = null
+
     // DEBUG_WEARABLE_START — 与主流程 GATT 独立；若主界面已连同一设备请先断开再测
     private var wearableDebugService: NunaWearableServiceImpl? = null
     // DEBUG_WEARABLE_END
@@ -110,13 +128,67 @@ class MainActivity : ComponentActivity() {
     private var totalPacketCount = 0L
     private var totalBytesCount = 0L
     private var lastStatsUiUpdateMs = 0L
+    @Volatile private var lastAudioPacketElapsedMs = 0L
+    @Volatile private var lastAudioFrameId: Int? = null
+    @Volatile private var hasReceivedAudioPacket = false
+    @Volatile private var activityVisible = false
+
+    private val diagnosticLogger get() = (application as NunaApplication).diagnosticLogger
+    private val audioStallMonitor = AudioStallMonitor()
+    private val diagnosticHandler = Handler(Looper.getMainLooper())
+    private var diagnosticTickerRunning = false
+    private var lastDiagnosticStatsMs = 0L
+    private var lastDiagnosticRssiRequestMs = 0L
+
+    private val diagnosticTicker = object : Runnable {
+        override fun run() {
+            if (!diagnosticTickerRunning || !recording) return
+            val now = SystemClock.elapsedRealtime()
+            audioStallMonitor.check(now)?.let(::handleAudioStallEvent)
+
+            if (now - lastDiagnosticStatsMs >= 5_000L) {
+                lastDiagnosticStatsMs = now
+                diagnosticLogger.log("audio_stats", recordingDiagnosticFields(now))
+            }
+            if (now - lastDiagnosticRssiRequestMs >= 30_000L) {
+                lastDiagnosticRssiRequestMs = now
+                requestDiagnosticRssi()
+            }
+            diagnosticHandler.postDelayed(this, 1_000L)
+        }
+    }
 
     private fun appendLog(msg: String, level: LogLevel = LogLevel.INFO) {
         Log.d(TAG, msg)
+        diagnosticLogger.log(
+            "ui_log",
+            mapOf("level" to level.name.lowercase(), "message" to msg)
+        )
         runOnUiThread { viewModel.appendLog(msg, level) }
     }
 
     private fun appendDebug(msg: String) = appendLog(msg, LogLevel.DEBUG)
+
+    private fun transitionConnectionNow(event: RecorderConnectionEvent): Boolean {
+        val accepted = viewModel.transitionConnection(event)
+        diagnosticLogger.log(
+            "recorder_state_transition",
+            mapOf(
+                "event" to event.javaClass.simpleName,
+                "accepted" to accepted,
+                "phase" to viewModel.connectionState.value.phase.name
+            )
+        )
+        return accepted
+    }
+
+    private fun transitionConnection(event: RecorderConnectionEvent) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            transitionConnectionNow(event)
+        } else {
+            runOnUiThread { transitionConnectionNow(event) }
+        }
+    }
 
     private val sessionRecorder = SessionRecorder { appendDebug(it) }
     private val segmentPlayer = SegmentAudioPlayer { appendDebug(it) }
@@ -144,20 +216,30 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        diagnosticLogger.log("activity_created", mapOf("saved_state" to (savedInstanceState != null)))
         // 允许内容延伸到状态栏/导航栏区域，由 Scaffold + WindowInsets 负责安全边距
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
 
         isTransferNotificationEnabled = false
 
-        handshakeClient = HandshakeClient(this) { msg ->
-            when {
-                msg.contains("handshake success") || msg.contains("Command success") ->
-                    appendLog("握手成功，设备已就绪")
-                msg.contains("failed") || msg.contains("mismatch") || msg.contains("ERROR") ->
-                    appendLog(msg.removePrefix("HS: ").trim())
-                else -> appendDebug(msg)
+        handshakeClient = HandshakeClient(
+            context = this,
+            log = ::appendDebug,
+            onEvent = { event ->
+                when (event) {
+                    HandshakeEvent.Started -> Unit
+                    HandshakeEvent.VerificationAccepted -> appendDebug("设备验证码已确认，正在同步时间…")
+                    HandshakeEvent.Ready -> {
+                        transitionConnection(RecorderConnectionEvent.HandshakeSucceeded)
+                        appendLog("握手成功，设备已就绪")
+                    }
+                    is HandshakeEvent.Failed -> {
+                        transitionConnection(RecorderConnectionEvent.HandshakeFailed(event.reason))
+                        appendLog("握手失败：${event.reason}")
+                    }
+                }
             }
-        }
+        )
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
@@ -188,7 +270,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             val logText by viewModel.logText
             val selectedDeviceAddress by viewModel.selectedDeviceAddress
-            val connectionStatus by viewModel.connectionStatus
+            val connectionState by viewModel.connectionState
+            val devicePowerState by viewModel.devicePowerState
             val activeRecordingPath by viewModel.activeRecordingPath
             val liveRecordingStats by viewModel.liveRecordingStats
             val userSettings by viewModel.userSettings
@@ -224,7 +307,8 @@ class MainActivity : ComponentActivity() {
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,
                                 selectedDeviceAddress = selectedDeviceAddress,
-                                connectionStatus = connectionStatus,
+                                connectionState = connectionState,
+                                devicePowerState = devicePowerState,
                                 liveRecordingStats = liveRecordingStats,
                                 onDeviceClick = { scanned ->
                                     viewModel.selectDevice(scanned.address)
@@ -277,12 +361,18 @@ class MainActivity : ComponentActivity() {
                                 onUserIdChange = { newId ->
                                     viewModel.setUserSettings(userSettings.copy(userId = newId))
                                 },
-                                onServerHostChange = { newHost ->
-                                    viewModel.setUserSettings(userSettings.copy(serverHost = newHost))
+                                onBaseUrlChange = { newBaseUrl ->
+                                    viewModel.setUserSettings(userSettings.copy(baseUrl = newBaseUrl))
                                 },
-                                onServerPortChange = { newPortStr ->
-                                    val port = newPortStr.toIntOrNull() ?: userSettings.serverPort
-                                    viewModel.setUserSettings(userSettings.copy(serverPort = port))
+                                onBasicAuthUsernameChange = { username ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(basicAuthUsername = username)
+                                    )
+                                },
+                                onBasicAuthPasswordChange = { password ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(basicAuthPassword = password)
+                                    )
                                 },
                                 onLogLevelChange = { level ->
                                     viewModel.setUserSettings(userSettings.copy(logLevel = level))
@@ -316,6 +406,7 @@ class MainActivity : ComponentActivity() {
                                         userSettings.copy(autoUploadWifiOnly = enabled)
                                     )
                                 },
+                                onShareDiagnostics = { shareDiagnosticLogs() },
                                 onSave = {
                                     userSettingsStorage.save(userSettings)
                                     LifelogCoordinator.configure(httpClient, userSettings)
@@ -339,6 +430,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        activityVisible = true
+        diagnosticLogger.log("activity_visible", mapOf("visible" to true))
+    }
+
+    override fun onStop() {
+        activityVisible = false
+        diagnosticLogger.log("activity_visible", mapOf("visible" to false, "recording" to recording))
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -384,7 +487,6 @@ class MainActivity : ComponentActivity() {
 
     private fun startConnectFlow() {
         stopScan()
-        autoHandshakeOnConnect = true
 
         if (bluetoothAdapter == null || !bluetoothAdapter!!.isEnabled) {
             appendLog("请先开启蓝牙")
@@ -397,8 +499,20 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        if (!transitionConnectionNow(RecorderConnectionEvent.ConnectRequested(addr))) {
+            appendLog("当前状态下不能重复连接")
+            return
+        }
+        resetBatteryTelemetry(DevicePowerState.reading())
+        autoHandshakeOnConnect = true
         appendLog("正在连接 $addr …")
-        val device = bluetoothAdapter!!.getRemoteDevice(addr)
+        val device = try {
+            bluetoothAdapter!!.getRemoteDevice(addr)
+        } catch (e: IllegalArgumentException) {
+            transitionConnectionNow(RecorderConnectionEvent.ConnectionFailed("设备地址无效"))
+            appendLog("设备地址无效")
+            return
+        }
         window.decorView.postDelayed({ connectToDevice(device) }, 300)
     }
 
@@ -409,10 +523,16 @@ class MainActivity : ComponentActivity() {
     private fun performHandshake() {
         val g = gatt ?: run {
             appendLog("未连接设备，请先连接")
+            transitionConnectionNow(RecorderConnectionEvent.ConnectionFailed("BLE 连接已丢失"))
             return
         }
         if (!isTransferNotificationEnabled) {
             appendDebug("握手: A002 通知尚未就绪")
+            transitionConnectionNow(RecorderConnectionEvent.HandshakeFailed("握手通知通道未就绪"))
+            return
+        }
+        if (!transitionConnectionNow(RecorderConnectionEvent.HandshakeStarted)) {
+            appendDebug("握手: 当前状态不允许启动握手")
             return
         }
         appendLog("握手中…")
@@ -422,6 +542,86 @@ class MainActivity : ComponentActivity() {
     private fun resetStreamingStats() {
         totalPacketCount = 0
         totalBytesCount = 0
+        lastAudioPacketElapsedMs = 0L
+        lastAudioFrameId = null
+        hasReceivedAudioPacket = false
+        lastDiagnosticStatsMs = 0L
+        lastDiagnosticRssiRequestMs = 0L
+    }
+
+    private fun startRecordingDiagnostics() {
+        val now = SystemClock.elapsedRealtime()
+        lastAudioPacketElapsedMs = now
+        audioStallMonitor.start(now)
+        diagnosticTickerRunning = true
+        diagnosticHandler.removeCallbacks(diagnosticTicker)
+        diagnosticHandler.post(diagnosticTicker)
+        diagnosticLogger.log("recording_monitor_started", recordingDiagnosticFields(now))
+    }
+
+    private fun stopRecordingDiagnostics(reason: String) {
+        if (!diagnosticTickerRunning) return
+        val now = SystemClock.elapsedRealtime()
+        diagnosticLogger.log(
+            "recording_monitor_stopped",
+            recordingDiagnosticFields(now) + ("reason" to reason)
+        )
+        diagnosticTickerRunning = false
+        diagnosticHandler.removeCallbacks(diagnosticTicker)
+        audioStallMonitor.stop()
+    }
+
+    private fun recordingDiagnosticFields(now: Long): Map<String, Any?> = mapOf(
+        "session_id" to sessionRecorder.activeSessionDir?.name,
+        "device_address" to (gatt?.device?.address ?: viewModel.selectedDeviceAddress.value),
+        "activity_visible" to activityVisible,
+        "packet_count" to totalPacketCount,
+        "byte_count" to totalBytesCount,
+        "last_frame_id" to lastAudioFrameId,
+        "received_any_audio" to hasReceivedAudioPacket,
+        "last_audio_age_ms" to if (lastAudioPacketElapsedMs > 0L) {
+            (now - lastAudioPacketElapsedMs).coerceAtLeast(0L)
+        } else null
+    )
+
+    private fun handleAudioStallEvent(event: AudioStallEvent) {
+        val eventName = when (event.type) {
+            AudioStallEventType.WARNING -> "audio_silence_warning"
+            AudioStallEventType.STALLED -> "audio_stalled"
+            AudioStallEventType.RECOVERED -> "audio_recovered"
+        }
+        diagnosticLogger.log(
+            eventName,
+            recordingDiagnosticFields(SystemClock.elapsedRealtime()) +
+                ("silence_ms" to event.silenceMs)
+        )
+        when (event.type) {
+            AudioStallEventType.WARNING -> Unit
+            AudioStallEventType.STALLED -> {
+                appendLog("音频流已停滞 ${event.silenceMs / 1000.0} 秒，BLE 尚未报告断开")
+                transitionConnection(RecorderConnectionEvent.AudioStalled)
+            }
+            AudioStallEventType.RECOVERED -> {
+                appendLog("音频流已恢复（中断 ${event.silenceMs / 1000.0} 秒）")
+                transitionConnection(RecorderConnectionEvent.AudioRecovered)
+                updateLiveRecordingStatsUi()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun requestDiagnosticRssi() {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Manifest.permission.BLUETOOTH_CONNECT
+        } else {
+            Manifest.permission.BLUETOOTH
+        }
+        if (ActivityCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+            diagnosticLogger.log("rssi_request_skipped", mapOf("reason" to "permission"))
+            return
+        }
+        val accepted = gatt?.readRemoteRssi() ?: false
+        if (!accepted) diagnosticLogger.log("rssi_request_rejected")
     }
 
     /**
@@ -429,12 +629,13 @@ class MainActivity : ComponentActivity() {
      * 在已经连接的情况下，对指定 service/char 开启 notify 并开始写文件。
      */
     private fun startRecordingOnly() {
-        if (gatt == null) {
-            appendLog("未连接，请先「连接 + 握手」")
+        if (!transitionConnectionNow(RecorderConnectionEvent.RecordingStartRequested)) {
+            appendLog("设备尚未完成握手，暂时不能开始录制")
             return
         }
-        if (recording) {
-            appendLog("已在录制中")
+        if (gatt == null) {
+            transitionConnectionNow(RecorderConnectionEvent.ConnectionFailed("BLE 连接已丢失"))
+            appendLog("BLE 连接已丢失，请重新连接")
             return
         }
         resetStreamingStats()
@@ -443,11 +644,13 @@ class MainActivity : ComponentActivity() {
         val g = gatt ?: return
         val service = g.getService(SERVICE_UUID)
         if (service == null) {
+            transitionConnectionNow(RecorderConnectionEvent.RecordingStartFailed("未找到音频服务"))
             appendLog("未找到音频服务，连接可能未完成")
             return
         }
         val characteristic = service.getCharacteristic(CHAR_UUID)
         if (characteristic == null) {
+            transitionConnectionNow(RecorderConnectionEvent.RecordingStartFailed("未找到音频特征"))
             appendLog("未找到音频特征")
             return
         }
@@ -470,14 +673,13 @@ class MainActivity : ComponentActivity() {
                 blePacketCount = totalPacketCount
             )
         )
-        viewModel.setConnectionStatus(
-            "录制中 · ${LiveRecordingUiStats.formatBytes(stats.totalBytes)} · $totalPacketCount 包"
-        )
     }
 
     private fun stopRecordingFlow() {
+        transitionConnectionNow(RecorderConnectionEvent.StopRequested)
         appendLog("停止录制（共 ${totalPacketCount} 包 · ${formatBytes(totalBytesCount)}）")
 
+        stopRecordingDiagnostics("user_or_activity_stop")
         recording = false
         sessionRecorder.stop()
         viewModel.setActiveRecordingPath(null)
@@ -607,14 +809,21 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) {
             appendLog("Connect: no BLUETOOTH_CONNECT permission.")
+            transitionConnection(RecorderConnectionEvent.ConnectionFailed("缺少蓝牙连接权限"))
             requestBlePermissions()
             return
         }
 
         appendDebug("正在连接 ${device.name ?: device.address}…")
+        diagnosticLogger.log(
+            "gatt_connect_requested",
+            mapOf("device_name" to device.name, "device_address" to device.address)
+        )
 
         // 关闭之前的 GATT
-        gatt?.let {
+        val previousGatt = gatt
+        gatt = null
+        previousGatt?.let {
             try {
                 it.disconnect()
                 it.close()
@@ -642,11 +851,34 @@ class MainActivity : ComponentActivity() {
         ) {
             super.onConnectionStateChange(gatt, status, newState)
 
+            val callbackNow = SystemClock.elapsedRealtime()
+            diagnosticLogger.log(
+                "gatt_state_change",
+                recordingDiagnosticFields(callbackNow) + mapOf(
+                    "status" to status,
+                    "new_state" to newState,
+                    "callback_device_address" to gatt.device.address
+                )
+            )
+
+            if (gatt !== this@MainActivity.gatt) {
+                diagnosticLogger.log(
+                    "stale_gatt_callback_ignored",
+                    mapOf("status" to status, "new_state" to newState)
+                )
+                try {
+                    gatt.close()
+                } catch (_: Exception) {}
+                return
+            }
+
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 appendLog("连接失败 (status=$status)")
                 if (recording || sessionRecorder.isRecording) {
                     appendLog("BLE 异常断开，当前录音会话已封口")
                 }
+                stopRecordingDiagnostics("gatt_error_$status")
+                resetBatteryTelemetry(null)
                 recording = false
                 isTransferNotificationEnabled = false
                 sessionRecorder.stop()
@@ -658,7 +890,7 @@ class MainActivity : ComponentActivity() {
                     gatt.disconnect()
                     gatt.close()
                 } catch (_: Exception) {}
-                viewModel.setConnectionStatus("连接失败")
+                transitionConnection(RecorderConnectionEvent.ConnectionFailed("BLE 连接失败 (status=$status)"))
                 return
             }
 
@@ -675,7 +907,9 @@ class MainActivity : ComponentActivity() {
                 deviceStorage.saveOrUpdateDevice(paired)
                 refreshPairedDeviceList()
 
-                viewModel.setConnectionStatus("已连接 · ${dev.name ?: dev.address}")
+                transitionConnection(
+                    RecorderConnectionEvent.GattConnected(dev.name ?: dev.address)
+                )
 
                 val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
                     Manifest.permission.BLUETOOTH_CONNECT
@@ -685,30 +919,43 @@ class MainActivity : ComponentActivity() {
                     != PackageManager.PERMISSION_GRANTED
                 ) {
                     appendDebug("discoverServices: 无权限")
+                    transitionConnection(RecorderConnectionEvent.ConnectionFailed("缺少蓝牙连接权限"))
                     return
                 }
                 val ok = gatt.discoverServices()
-                if (!ok) appendLog("服务发现启动失败")
+                if (!ok) {
+                    appendLog("服务发现启动失败")
+                    transitionConnection(RecorderConnectionEvent.ConnectionFailed("无法启动服务发现"))
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 appendLog("已断开连接")
+                stopRecordingDiagnostics("gatt_disconnected")
                 recording = false
                 isTransferNotificationEnabled = false
+                resetBatteryTelemetry(null)
 
                 sessionRecorder.stop()
                 viewModel.setActiveRecordingPath(null)
                 com.example.nunarecorder.service.ContextDataService.stop(this@MainActivity)
                 this@MainActivity.gatt = null
-                viewModel.setConnectionStatus("未连接")
+                transitionConnection(RecorderConnectionEvent.Disconnected)
             }
         }
 
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             super.onServicesDiscovered(gatt, status)
+            diagnosticLogger.log(
+                "gatt_services_discovered",
+                mapOf("status" to status, "service_count" to gatt.services.size)
+            )
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 appendLog("服务发现失败 (status=$status)")
+                transitionConnection(RecorderConnectionEvent.ConnectionFailed("服务发现失败 (status=$status)"))
                 return
             }
+            prepareBatteryCandidates(gatt)
+            transitionConnection(RecorderConnectionEvent.ServicesDiscovered)
             appendDebug("服务发现完成，启用 A002 通知…")
             enableTransferNotifications(gatt)
         }
@@ -724,13 +971,45 @@ class MainActivity : ComponentActivity() {
             // 先让握手模块处理（只关心 A002）
             handshakeClient.onNotification(gatt, characteristic)
 
+            BatteryTelemetry.parse(characteristic.uuid, value)?.let { state ->
+                setDevicePowerState(state)
+                logDevicePower("device_power_notification", state)
+            }
+
             // 录音逻辑：只处理 A003（不打印数据）
             if (characteristic.uuid == CHAR_UUID) {
-                writeToFile(value)
+                val now = SystemClock.elapsedRealtime()
                 totalPacketCount++
                 totalBytesCount += value.size
-                // 不再每秒打印统计信息，只在停止时给出总量
+                lastAudioPacketElapsedMs = now
+                lastAudioFrameId = extractAudioFrameId(value) ?: lastAudioFrameId
+                hasReceivedAudioPacket = true
+                audioStallMonitor.onPacket(now)?.let(::handleAudioStallEvent)
+                writeToFile(value)
             }
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            handleBatteryCharacteristicRead(gatt, characteristic, value, status)
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            handleBatteryCharacteristicRead(
+                gatt,
+                characteristic,
+                characteristic.value ?: byteArrayOf(),
+                status
+            )
         }
 
         override fun onDescriptorWrite(
@@ -739,6 +1018,14 @@ class MainActivity : ComponentActivity() {
             status: Int
         ) {
             super.onDescriptorWrite(gatt, descriptor, status)
+            diagnosticLogger.log(
+                "gatt_descriptor_write",
+                mapOf(
+                    "status" to status,
+                    "descriptor_uuid" to descriptor.uuid.toString(),
+                    "characteristic_uuid" to descriptor.characteristic.uuid.toString()
+                )
+            )
 
             if (descriptor.uuid == CCCD_UUID &&
                 descriptor.characteristic.uuid.toString()
@@ -746,17 +1033,219 @@ class MainActivity : ComponentActivity() {
             ) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     isTransferNotificationEnabled = true
+                    transitionConnection(RecorderConnectionEvent.HandshakeNotificationsReady)
                     appendDebug("A002 通知已启用")
-                    if (autoHandshakeOnConnect) {
-                        autoHandshakeOnConnect = false
-                        appendLog("自动握手中…")
-                        runOnUiThread {
-                            window.decorView.postDelayed({ performHandshake() }, 800)
-                        }
-                    }
+                    beginBatterySetup(gatt)
                 } else {
                     appendLog("启用 A002 通知失败 (status=$status)")
+                    transitionConnection(
+                        RecorderConnectionEvent.HandshakeFailed("启用握手通知失败 (status=$status)")
+                    )
                 }
+            }
+
+            if (descriptor.uuid == CCCD_UUID &&
+                descriptor.characteristic.uuid == batteryNotificationUuid
+            ) {
+                appendDebug(
+                    if (status == BluetoothGatt.GATT_SUCCESS) "电量通知已启用"
+                    else "电量通知启用失败 (status=$status)，保留单次读数"
+                )
+                finishBatterySetupAndHandshake()
+            }
+
+            if (descriptor.uuid == CCCD_UUID && descriptor.characteristic.uuid == CHAR_UUID) {
+                if (status == BluetoothGatt.GATT_SUCCESS &&
+                    viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING
+                ) {
+                    if (openFileForRecording()) {
+                        recording = true
+                        startRecordingDiagnostics()
+                        transitionConnection(RecorderConnectionEvent.RecordingStarted)
+                        appendLog("录制已开始")
+                    } else {
+                        gatt.setCharacteristicNotification(descriptor.characteristic, false)
+                        transitionConnection(
+                            RecorderConnectionEvent.RecordingStartFailed("无法创建录音会话")
+                        )
+                    }
+                } else if (status != BluetoothGatt.GATT_SUCCESS) {
+                    gatt.setCharacteristicNotification(descriptor.characteristic, false)
+                    appendLog("启用音频通知失败 (status=$status)")
+                    transitionConnection(
+                        RecorderConnectionEvent.RecordingStartFailed("启用音频通知失败 (status=$status)")
+                    )
+                }
+            }
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            super.onReadRemoteRssi(gatt, rssi, status)
+            diagnosticLogger.log("gatt_rssi", mapOf("status" to status, "rssi_dbm" to rssi))
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            super.onMtuChanged(gatt, mtu, status)
+            diagnosticLogger.log("gatt_mtu", mapOf("status" to status, "mtu" to mtu))
+        }
+
+        override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            super.onPhyUpdate(gatt, txPhy, rxPhy, status)
+            diagnosticLogger.log(
+                "gatt_phy",
+                mapOf("status" to status, "tx_phy" to txPhy, "rx_phy" to rxPhy)
+            )
+        }
+
+    }
+
+    private fun setDevicePowerState(state: DevicePowerState?) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            viewModel.setDevicePowerState(state)
+        } else {
+            runOnUiThread { viewModel.setDevicePowerState(state) }
+        }
+    }
+
+    private fun logDevicePower(event: String, state: DevicePowerState) {
+        diagnosticLogger.log(
+            event,
+            mapOf(
+                "percent" to state.percent,
+                "voltage_mv" to state.voltageMv,
+                "usb_present" to state.usbPresent,
+                "charging" to state.charging,
+                "source" to state.source?.name
+            )
+        )
+    }
+
+    private fun resetBatteryTelemetry(state: DevicePowerState?) {
+        batteryReadTimeout?.let(diagnosticHandler::removeCallbacks)
+        batteryReadTimeout = null
+        batteryReadCandidates.clear()
+        activeBatteryReadUuid = null
+        batteryNotificationUuid = null
+        batterySetupCompleted = false
+        setDevicePowerState(state)
+    }
+
+    private fun prepareBatteryCandidates(gatt: BluetoothGatt) {
+        batteryReadCandidates.clear()
+        activeBatteryReadUuid = null
+        batteryNotificationUuid = null
+        batterySetupCompleted = false
+
+        // A004 only exists on the extended firmware. If absent or malformed,
+        // the standard Battery Service keeps original Nuna devices compatible.
+        gatt.getService(SERVICE_UUID)
+            ?.getCharacteristic(BatteryTelemetry.NUNA_POWER_UUID)
+            ?.let(batteryReadCandidates::addLast)
+        gatt.getService(BatteryTelemetry.STANDARD_SERVICE_UUID)
+            ?.getCharacteristic(BatteryTelemetry.STANDARD_LEVEL_UUID)
+            ?.let(batteryReadCandidates::addLast)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun beginBatterySetup(gatt: BluetoothGatt) {
+        if (batterySetupCompleted) return
+        readNextBatteryCandidate(gatt)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readNextBatteryCandidate(gatt: BluetoothGatt) {
+        batteryReadTimeout?.let(diagnosticHandler::removeCallbacks)
+        batteryReadTimeout = null
+        activeBatteryReadUuid = null
+
+        val characteristic = batteryReadCandidates.pollFirst()
+        if (characteristic == null) {
+            setDevicePowerState(DevicePowerState.unsupported())
+            appendDebug("设备未提供兼容的电量特征，继续原 Nuna 握手流程")
+            finishBatterySetupAndHandshake()
+            return
+        }
+
+        activeBatteryReadUuid = characteristic.uuid
+        if (!gatt.readCharacteristic(characteristic)) {
+            appendDebug("读取电量特征 ${characteristic.uuid} 未入队，尝试回退")
+            activeBatteryReadUuid = null
+            readNextBatteryCandidate(gatt)
+            return
+        }
+
+        val expectedUuid = characteristic.uuid
+        batteryReadTimeout = Runnable {
+            if (gatt === this.gatt && activeBatteryReadUuid == expectedUuid) {
+                appendDebug("读取电量特征超时，尝试回退")
+                activeBatteryReadUuid = null
+                readNextBatteryCandidate(gatt)
+            }
+        }.also { diagnosticHandler.postDelayed(it, 2_000L) }
+    }
+
+    private fun handleBatteryCharacteristicRead(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+        status: Int
+    ) {
+        if (gatt !== this.gatt || characteristic.uuid != activeBatteryReadUuid) return
+        batteryReadTimeout?.let(diagnosticHandler::removeCallbacks)
+        batteryReadTimeout = null
+        activeBatteryReadUuid = null
+
+        val state = if (status == BluetoothGatt.GATT_SUCCESS) {
+            BatteryTelemetry.parse(characteristic.uuid, value)
+        } else null
+        if (state == null) {
+            appendDebug("电量特征 ${characteristic.uuid} 不可用 (status=$status)，尝试回退")
+            readNextBatteryCandidate(gatt)
+            return
+        }
+
+        setDevicePowerState(state)
+        logDevicePower("device_power_read", state)
+        enableBatteryNotifications(gatt, characteristic)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableBatteryNotifications(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic
+    ) {
+        val supportsNotify = characteristic.properties and
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+        val cccd = characteristic.getDescriptor(CCCD_UUID)
+        if (!supportsNotify || cccd == null ||
+            !gatt.setCharacteristicNotification(characteristic, true)
+        ) {
+            finishBatterySetupAndHandshake()
+            return
+        }
+
+        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        batteryNotificationUuid = characteristic.uuid
+        if (!gatt.writeDescriptor(cccd)) {
+            batteryNotificationUuid = null
+            gatt.setCharacteristicNotification(characteristic, false)
+            appendDebug("电量通知配置未入队，保留单次读数")
+            finishBatterySetupAndHandshake()
+        }
+    }
+
+    private fun finishBatterySetupAndHandshake() {
+        if (batterySetupCompleted) return
+        batterySetupCompleted = true
+        batteryReadTimeout?.let(diagnosticHandler::removeCallbacks)
+        batteryReadTimeout = null
+        activeBatteryReadUuid = null
+
+        if (autoHandshakeOnConnect) {
+            autoHandshakeOnConnect = false
+            appendLog("自动握手中…")
+            runOnUiThread {
+                window.decorView.postDelayed({ performHandshake() }, 800)
             }
         }
     }
@@ -775,11 +1264,16 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) {
             appendLog("Start recording: no permission to enable notifications.")
+            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("缺少蓝牙连接权限"))
             requestBlePermissions()
             return
         }
 
-        gatt.setCharacteristicNotification(characteristic, true)
+        if (!gatt.setCharacteristicNotification(characteristic, true)) {
+            appendLog("无法在本机启用音频通知")
+            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("本机通知注册失败"))
+            return
+        }
 
         val cccd = characteristic.getDescriptor(CCCD_UUID)
         if (cccd != null) {
@@ -787,15 +1281,16 @@ class MainActivity : ComponentActivity() {
             val success = gatt.writeDescriptor(cccd)
 
             if (success) {
-                openFileForRecording()
-                recording = true
-                viewModel.setConnectionStatus("录制中 · ${currentDeviceName}")
-                appendLog("录制已开始")
+                appendLog("正在启用音频通知…")
             } else {
                 appendLog("无法启用音频通知")
+                gatt.setCharacteristicNotification(characteristic, false)
+                transitionConnection(RecorderConnectionEvent.RecordingStartFailed("设备拒绝通知配置"))
             }
         } else {
             appendLog("Recording CCCD not found, cannot enable notifications.")
+            gatt.setCharacteristicNotification(characteristic, false)
+            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("音频通知描述符不存在"))
         }
     }
 
@@ -810,6 +1305,7 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) {
             appendLog("enableTransferNotifications: no permission.")
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("缺少蓝牙连接权限"))
             requestBlePermissions()
             return
         }
@@ -817,20 +1313,27 @@ class MainActivity : ComponentActivity() {
         val service = gatt.getService(SERVICE_UUID)
         if (service == null) {
             appendLog("TRANSFER service (A000) not found.")
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("未找到握手服务"))
             return
         }
 
         val transferChar = service.getCharacteristic(UUID.fromString(ProtoConfig.Service.TRANSFER_CHAR_UUID))
         if (transferChar == null) {
             appendLog("TRANSFER char (A002) not found.")
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("未找到握手特征"))
             return
         }
 
-        gatt.setCharacteristicNotification(transferChar, true)
+        if (!gatt.setCharacteristicNotification(transferChar, true)) {
+            appendLog("Failed to register TRANSFER notifications locally.")
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("本机握手通知注册失败"))
+            return
+        }
 
         val cccd = transferChar.getDescriptor(CCCD_UUID)
         if (cccd == null) {
             appendLog("TRANSFER CCCD not found.")
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("握手通知描述符不存在"))
             return
         }
 
@@ -838,28 +1341,37 @@ class MainActivity : ComponentActivity() {
         val okWrite = gatt.writeDescriptor(cccd)
         if (!okWrite) {
             appendLog("Failed to write TRANSFER CCCD.")
+            gatt.setCharacteristicNotification(transferChar, false)
+            transitionConnection(RecorderConnectionEvent.HandshakeFailed("设备拒绝握手通知配置"))
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun stopNotifyAndDisconnect() {
         try {
-            val g = gatt ?: return
+            val g = gatt ?: run {
+                resetBatteryTelemetry(null)
+                transitionConnection(RecorderConnectionEvent.Disconnected)
+                return
+            }
             appendLog("Disconnecting GATT...")
             g.disconnect()
             g.close()
             gatt = null
             recording = false
             isTransferNotificationEnabled = false
+            resetBatteryTelemetry(null)
+            transitionConnection(RecorderConnectionEvent.Disconnected)
         } catch (e: Exception) {
             appendLog("Error while disconnecting: ${e.message}")
+            transitionConnection(RecorderConnectionEvent.ConnectionFailed("断开连接失败"))
         }
     }
 
     // ----------------- 文件写入 -----------------
 
-    private fun openFileForRecording() {
-        try {
+    private fun openFileForRecording(): Boolean {
+        return try {
             val addr = gatt?.device?.address ?: viewModel.selectedDeviceAddress.value
             val options = RecordingOptions.from(viewModel.userSettings.value)
             sessionRecorder.start(currentDeviceName, addr, options)
@@ -874,9 +1386,14 @@ class MainActivity : ComponentActivity() {
                     append(if (options.autoVadOnRecord) " · 自动VAD" else " · 无VAD")
                 }
                 appendLog("会话 ${dir.name} ($mode)")
+                true
+            } else {
+                appendLog("开始录制失败: 无法创建会话目录")
+                false
             }
         } catch (e: Exception) {
             appendLog("开始录制失败: ${e.message}")
+            false
         }
     }
 
@@ -887,6 +1404,42 @@ class MainActivity : ComponentActivity() {
             appendLog("检测到 BLE 音频丢帧，本次会话已停止且不会自动上传")
             runOnUiThread {
                 if (recording) stopRecordingFlow()
+            }
+        }
+    }
+
+    private fun extractAudioFrameId(data: ByteArray): Int? {
+        if (data.size < 9 || (data[0].toInt() and 0xFF) != 0xAA ||
+            (data[1].toInt() and 0xFF) != 0x10
+        ) return null
+        return (data[7].toInt() and 0xFF) or ((data[8].toInt() and 0xFF) shl 8)
+    }
+
+    private fun shareDiagnosticLogs() {
+        diagnosticLogger.log("diagnostic_export_requested")
+        diagnosticLogger.snapshotFiles { files ->
+            runOnUiThread {
+                if (files.isEmpty()) {
+                    appendLog("暂无可分享的诊断日志")
+                    return@runOnUiThread
+                }
+                try {
+                    val uris = ArrayList(files.map {
+                        androidx.core.content.FileProvider.getUriForFile(
+                            this,
+                            "${packageName}.fileprovider",
+                            it
+                        )
+                    })
+                    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                        type = "application/x-ndjson"
+                        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(intent, "分享 Nuna 诊断日志"))
+                } catch (e: Exception) {
+                    appendLog("分享诊断日志失败: ${e.message}")
+                }
             }
         }
     }
@@ -991,6 +1544,7 @@ class MainActivity : ComponentActivity() {
 
 
     override fun onDestroy() {
+        diagnosticLogger.log("activity_destroyed", mapOf("recording" to recording))
         super.onDestroy()
         segmentPlayer.stop()
         stopRecordingFlow()

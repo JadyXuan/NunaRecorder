@@ -38,7 +38,7 @@ class SessionAutoUploadWorker(
 
         var uploadedThisRun = 0
         var sawFailure = false
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
+        val baseUrl = settings.apiBaseUrl()
 
         // 先传旧会话，避免长时间积压；每轮限量控制耗电和后台运行时长。
         for (sessionDir in SessionPaths.listSessionDirs().asReversed()) {
@@ -51,7 +51,9 @@ class SessionAutoUploadWorker(
                 client = OkHttpClient(),
                 baseUrl = baseUrl,
                 userId = settings.userId,
-                deviceMac = deviceMac
+                deviceMac = deviceMac,
+                basicAuthUsername = settings.basicAuthUsername,
+                basicAuthPassword = settings.basicAuthPassword
             )
 
             for (segment in manifest.segments.sortedBy { it.index }) {

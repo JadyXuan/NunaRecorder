@@ -1,6 +1,7 @@
 package com.example.nunarecorder.sync
 
 import com.example.nunarecorder.audio.AudioMetaUtil
+import com.example.nunarecorder.network.withServerBasicAuth
 import com.example.nunarecorder.session.SessionManifest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -16,10 +17,13 @@ import java.util.UUID
 
 class SessionSyncUploader(
     private val client: OkHttpClient,
-    private val baseUrl: String,
+    baseUrl: String,
     private val userId: String,
-    private val deviceMac: String
+    private val deviceMac: String,
+    private val basicAuthUsername: String = "",
+    private val basicAuthPassword: String = ""
 ) {
+    private val baseUrl = baseUrl.trimEnd('/')
 
     data class CommitResult(
         val ok: Boolean,
@@ -123,6 +127,7 @@ class SessionSyncUploader(
             .build()
         val request = Request.Builder()
             .url("$baseUrl/thingx/api/file/upload/audio")
+            .withServerBasicAuth(basicAuthUsername, basicAuthPassword)
             .apply {
                 if (clientUploadId != null) header("Idempotency-Key", clientUploadId)
             }
@@ -166,6 +171,7 @@ class SessionSyncUploader(
         }.toString()
         val request = Request.Builder()
             .url("$baseUrl/thingx/api/v1/session/sync/init")
+            .withServerBasicAuth(basicAuthUsername, basicAuthPassword)
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {
@@ -193,6 +199,7 @@ class SessionSyncUploader(
             .build()
         val request = Request.Builder()
             .url("$baseUrl/thingx/api/v1/session/sync/file")
+            .withServerBasicAuth(basicAuthUsername, basicAuthPassword)
             .post(body)
             .build()
         return try {
@@ -222,6 +229,7 @@ class SessionSyncUploader(
         }.toString()
         val request = Request.Builder()
             .url("$baseUrl/thingx/api/v1/session/sync/commit")
+            .withServerBasicAuth(basicAuthUsername, basicAuthPassword)
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
         return try {

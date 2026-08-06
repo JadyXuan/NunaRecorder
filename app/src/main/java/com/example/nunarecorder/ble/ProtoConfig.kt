@@ -25,6 +25,9 @@ object ProtoConfig {
         /** 实时音频传输特征（WRITE/INDICATE），音频数据 */
         const val RECORDING_CHAR_UUID = "0000A003-0000-1000-8000-00805F9B34FB"
 
+        /** 可选电源状态；原 Nuna 设备可以不提供，App 会回退标准 Battery Service。 */
+        const val POWER_CHAR_UUID = "0000A004-0000-1000-8000-00805F9B34FB"
+
         /** 客户端特征配置描述符 UUID（用于开启 Notify/Indicate） */
         const val CCCD_UUID = "00002902-0000-1000-8000-00805F9B34FB"
     }

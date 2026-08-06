@@ -113,12 +113,14 @@ object SessionSyncCoordinator {
         )
         SessionSyncStatusIO.write(dir, syncStatus)
 
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
+        val baseUrl = settings.apiBaseUrl()
         val uploader = SessionSyncUploader(
             httpClient,
             baseUrl,
             settings.userId.ifBlank { "mock-user-001" },
-            resolveDeviceMac(manifest)
+            resolveDeviceMac(manifest),
+            settings.basicAuthUsername,
+            settings.basicAuthPassword
         )
 
         val commit = uploader.tryV1Sync(
@@ -196,12 +198,14 @@ object SessionSyncCoordinator {
             )
             if (bin.exists()) files.add(bin)
         }
-        val baseUrl = "http://${settings.serverHost}:${settings.serverPort}"
+        val baseUrl = settings.apiBaseUrl()
         val uploader = SessionSyncUploader(
             httpClient,
             baseUrl,
             settings.userId.ifBlank { "mock-user-001" },
-            resolveDeviceMac(null, entry.opusFile)
+            resolveDeviceMac(null, entry.opusFile),
+            settings.basicAuthUsername,
+            settings.basicAuthPassword
         )
         var okCount = 0
         files.forEachIndexed { i, f ->

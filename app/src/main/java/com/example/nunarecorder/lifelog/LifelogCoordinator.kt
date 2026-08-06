@@ -17,6 +17,10 @@ import java.util.Locale
 import java.util.TimeZone
 
 object LifelogCoordinator {
+    // Object properties are initialized top-to-bottom. Keep UTC before _state because
+    // the initial state calls today(), which formats its date with this time zone.
+    private val UTC: TimeZone = TimeZone.getTimeZone("UTC")
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _state = MutableStateFlow(LifelogUiState(today()))
     val state: StateFlow<LifelogUiState> = _state.asStateFlow()
@@ -29,8 +33,10 @@ object LifelogCoordinator {
         enabled = settings.lifelogEnabled
         api = LifelogApiClient(
             httpClient = httpClient,
-            baseUrl = "http://${settings.serverHost}:${settings.serverPort}",
-            userId = settings.userId
+            baseUrl = settings.apiBaseUrl(),
+            userId = settings.userId,
+            basicAuthUsername = settings.basicAuthUsername,
+            basicAuthPassword = settings.basicAuthPassword
         )
     }
 
@@ -133,5 +139,4 @@ object LifelogCoordinator {
     private fun utcDateFormat() =
         SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = UTC }
 
-    private val UTC: TimeZone = TimeZone.getTimeZone("UTC")
 }

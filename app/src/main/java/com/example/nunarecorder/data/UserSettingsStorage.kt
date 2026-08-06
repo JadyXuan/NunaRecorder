@@ -16,10 +16,22 @@ class UserSettingsStorage(context: Context) {
         val json = sp.getString(KEY_SETTINGS, null) ?: return UserSettings()
         return try {
             val obj = JSONObject(json)
+            val defaults = UserSettings()
             UserSettings(
-                userId = obj.optString("userId", ""),
-                serverHost = obj.optString("serverHost", "10.0.2.2"),
-                serverPort = obj.optInt("serverPort", 9000),
+                userId = obj.optString("userId", UserSettings.DEFAULT_USER_ID)
+                    .ifBlank { UserSettings.DEFAULT_USER_ID },
+                // Existing installations do not have baseUrl. Move those installations
+                // to the deployed HTTPS service instead of retaining emulator-only hosts.
+                baseUrl = obj.optString("baseUrl", UserSettings.DEFAULT_BASE_URL)
+                    .ifBlank { UserSettings.DEFAULT_BASE_URL },
+                basicAuthUsername = obj.optString(
+                    "basicAuthUsername",
+                    defaults.basicAuthUsername
+                ).ifBlank { defaults.basicAuthUsername },
+                basicAuthPassword = obj.optString(
+                    "basicAuthPassword",
+                    defaults.basicAuthPassword
+                ).ifBlank { defaults.basicAuthPassword },
                 logLevel = LogLevel.entries.find {
                     it.name.equals(obj.optString("logLevel", "INFO"), ignoreCase = true)
                 } ?: LogLevel.INFO,
@@ -39,8 +51,9 @@ class UserSettingsStorage(context: Context) {
     fun save(settings: UserSettings) {
         val obj = JSONObject().apply {
             put("userId", settings.userId)
-            put("serverHost", settings.serverHost)
-            put("serverPort", settings.serverPort)
+            put("baseUrl", settings.baseUrl.trim().ifBlank { UserSettings.DEFAULT_BASE_URL })
+            put("basicAuthUsername", settings.basicAuthUsername)
+            put("basicAuthPassword", settings.basicAuthPassword)
             put("logLevel", settings.logLevel.name)
             put("autoVadOnRecord", settings.autoVadOnRecord)
             put("segmentEnabled", settings.segmentEnabled)

@@ -1,5 +1,6 @@
 package com.example.nunarecorder.recording
 
+import android.os.SystemClock
 import com.example.nunarecorder.ble.BleAudioReassembler
 import com.example.nunarecorder.session.AudioSegmentEntry
 import com.example.nunarecorder.session.SessionManifest
@@ -23,6 +24,12 @@ data class LiveRecordingStats(
  * 会话录制：可选按墙钟时长轮转 Opus 段；段封口后可选入队 Silero VAD。
  */
 class SessionRecorder(
+    private val wallClockMs: () -> Long = System::currentTimeMillis,
+    private val monotonicClockMs: () -> Long = SystemClock::elapsedRealtime,
+    private val sessionDirFactory: (String, String?, Long) -> File =
+        { deviceName, deviceAddress, startedAtMs ->
+            SessionPaths.newSessionDir(deviceName, deviceAddress, startedAtMs)
+        },
     private val onLog: (String) -> Unit
 ) {
     private var sessionDir: File? = null
@@ -31,8 +38,10 @@ class SessionRecorder(
     private var currentSegmentIndex = 0
     private var currentSegmentFile: File? = null
     private var currentSegmentStartMs = 0L
+    private var currentSegmentTimeSlot = 0L
     private var currentSegmentIntegrityIssue: String? = null
     private var sessionStartMs = 0L
+    private var sessionStartMonotonicMs = 0L
     private var options: RecordingOptions = RecordingOptions(
         segmentEnabled = true,
         segmentDurationMs = SessionPaths.SEGMENT_DURATION_MS,
@@ -64,8 +73,12 @@ class SessionRecorder(
     ) {
         stop()
         options = recordingOptions
-        sessionStartMs = System.currentTimeMillis()
-        val dir = SessionPaths.newSessionDir(deviceName, deviceAddress, sessionStartMs)
+        sessionStartMs = wallClockMs()
+        sessionStartMonotonicMs = monotonicClockMs()
+        currentSegmentIndex = 0
+        currentSegmentTimeSlot = 0L
+        currentSegmentStartMs = 0L
+        val dir = sessionDirFactory(deviceName, deviceAddress, sessionStartMs)
         sessionDir = dir
         manifest = SessionManifest(
             sessionId = dir.name,
@@ -83,7 +96,7 @@ class SessionRecorder(
         if (options.autoVadOnRecord) {
             VadPrelabelWriter.markRunning(dir, 0, sessionStartMs)
         }
-        openNextSegment()
+        openCurrentSegment()
         onLog("开始录制 → ${dir.name}")
     }
 
@@ -99,7 +112,7 @@ class SessionRecorder(
     fun stop() {
         val dir = sessionDir ?: return
         closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
-        manifest?.endedAtMs = System.currentTimeMillis()
+        manifest?.endedAtMs = wallClockMs()
         manifest?.recordingActive = false
         manifest?.openSegmentIndex = null
         manifest?.openSegmentBytes = 0L
@@ -111,24 +124,25 @@ class SessionRecorder(
     }
 
     private fun maybeRotateSegment() {
-        val elapsed = System.currentTimeMillis() - sessionStartMs
         val duration = options.segmentDurationMs
-        val expectedIndex = (elapsed / duration).toInt()
-        while (currentSegmentIndex < expectedIndex) {
-            closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
-            openNextSegment()
-        }
+        if (duration <= 0L) return
+
+        val elapsed = (monotonicClockMs() - sessionStartMonotonicMs).coerceAtLeast(0L)
+        val expectedTimeSlot = elapsed / duration
+        if (currentSegmentTimeSlot >= expectedTimeSlot) return
+
+        // Only rotate once per incoming notification. If callbacks were delayed for several
+        // segment windows, jump directly to the current window instead of creating empty files.
+        closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
+        currentSegmentTimeSlot = expectedTimeSlot
+        currentSegmentIndex = (manifest?.segments?.maxOfOrNull { it.index } ?: -1) + 1
+        currentSegmentStartMs = expectedTimeSlot * duration
+        openCurrentSegment()
     }
 
-    private fun openNextSegment() {
+    private fun openCurrentSegment() {
         val dir = sessionDir ?: return
         SessionPaths.audioDir(dir).mkdirs()
-        currentSegmentIndex = manifest?.segments?.size ?: 0
-        currentSegmentStartMs = if (options.segmentEnabled) {
-            currentSegmentIndex * options.segmentDurationMs
-        } else {
-            0L
-        }
         val rel = if (options.segmentEnabled) {
             SessionPaths.segmentRelativePath(currentSegmentIndex)
         } else {
@@ -147,6 +161,7 @@ class SessionRecorder(
         val file = currentSegmentFile ?: return
         currentSegmentIntegrityIssue = reassembler?.close()
         reassembler = null
+        currentSegmentFile = null
         if (!file.exists() || file.length() == 0L) {
             file.delete()
             return
@@ -190,11 +205,10 @@ class SessionRecorder(
         if (!entry.integrityOk) {
             onLog("分段 ${entry.index} 检测到 BLE 缺口，已禁止自动上传")
         }
-        currentSegmentFile = null
     }
 
     private fun maybeFlushManifest() {
-        val now = System.currentTimeMillis()
+        val now = monotonicClockMs()
         if (now - lastManifestFlushMs < 1000L) return
         flushManifestNow()
     }
@@ -202,7 +216,7 @@ class SessionRecorder(
     private fun flushManifestNow() {
         val dir = sessionDir ?: return
         val m = manifest ?: return
-        lastManifestFlushMs = System.currentTimeMillis()
+        lastManifestFlushMs = monotonicClockMs()
         m.recordingActive = true
         m.openSegmentIndex = currentSegmentIndex
         m.openSegmentBytes = currentSegmentFile?.takeIf { it.exists() }?.length() ?: 0L

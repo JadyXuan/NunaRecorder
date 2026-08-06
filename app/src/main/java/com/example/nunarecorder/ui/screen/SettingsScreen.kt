@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -17,12 +18,15 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.data.UserSettings
@@ -31,8 +35,9 @@ import com.example.nunarecorder.data.UserSettings
 fun SettingsScreen(
     userSettings: UserSettings,
     onUserIdChange: (String) -> Unit,
-    onServerHostChange: (String) -> Unit,
-    onServerPortChange: (String) -> Unit,
+    onBaseUrlChange: (String) -> Unit,
+    onBasicAuthUsernameChange: (String) -> Unit,
+    onBasicAuthPasswordChange: (String) -> Unit,
     onLogLevelChange: (LogLevel) -> Unit,
     onAutoVadChange: (Boolean) -> Unit,
     onSegmentEnabledChange: (Boolean) -> Unit,
@@ -41,6 +46,7 @@ fun SettingsScreen(
     onAnnotationPollingChange: (Boolean) -> Unit,
     onAutoUploadChange: (Boolean) -> Unit,
     onAutoUploadWifiOnlyChange: (Boolean) -> Unit,
+    onShareDiagnostics: () -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -121,18 +127,32 @@ fun SettingsScreen(
         Spacer(Modifier.height(8.dp))
 
         OutlinedTextField(
-            value = userSettings.serverHost,
-            onValueChange = onServerHostChange,
-            label = { Text("服务器地址") },
+            value = userSettings.baseUrl,
+            onValueChange = onBaseUrlChange,
+            label = { Text("Base URL") },
+            supportingText = {
+                Text("完整地址，例如 https://lifelog.transfur.tech/")
+            },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
         )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
-            value = userSettings.serverPort.toString(),
-            onValueChange = onServerPortChange,
-            label = { Text("端口") },
+            value = userSettings.basicAuthUsername,
+            onValueChange = onBasicAuthUsernameChange,
+            label = { Text("Basic Auth 用户名") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp)
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = userSettings.basicAuthPassword,
+            onValueChange = onBasicAuthPasswordChange,
+            label = { Text("Basic Auth 密码") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
@@ -210,6 +230,23 @@ fun SettingsScreen(
                 }
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onShareDiagnostics,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("分享诊断日志")
+        }
+        Text(
+            "包含 BLE 状态、音频停滞和低频统计；本机最多保留 7 天或 64 MB。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+            modifier = Modifier.padding(top = 6.dp)
+        )
 
         Spacer(Modifier.height(32.dp))
 

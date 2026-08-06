@@ -25,8 +25,10 @@ class LifelogPollWorker(
         return try {
             val api = LifelogApiClient(
                 OkHttpClient(),
-                "http://${settings.serverHost}:${settings.serverPort}",
-                settings.userId
+                settings.apiBaseUrl(),
+                settings.userId,
+                settings.basicAuthUsername,
+                settings.basicAuthPassword
             )
             val payload = api.pending()
             LifelogNotifications.showNewPrompts(applicationContext, payload.prompts)

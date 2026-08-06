@@ -1,5 +1,6 @@
 package com.example.nunarecorder.lifelog
 
+import com.example.nunarecorder.network.withServerBasicAuth
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,7 +11,9 @@ import java.io.IOException
 class LifelogApiClient(
     private val httpClient: OkHttpClient,
     baseUrl: String,
-    private val userId: String
+    private val userId: String,
+    private val basicAuthUsername: String = "",
+    private val basicAuthPassword: String = ""
 ) {
     private val baseUrl = baseUrl.trimEnd('/')
 
@@ -74,6 +77,7 @@ class LifelogApiClient(
             .url("$baseUrl$path")
             .header("Accept", "application/json")
             .header("X-Lifelog-Client", "NunaRecorder-Android")
+            .withServerBasicAuth(basicAuthUsername, basicAuthPassword)
             .apply {
                 if (userId.isNotBlank()) header("X-User-Id", userId)
             }

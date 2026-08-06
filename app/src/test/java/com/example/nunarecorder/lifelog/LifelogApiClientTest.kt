@@ -1,6 +1,7 @@
 package com.example.nunarecorder.lifelog
 
 import okhttp3.OkHttpClient
+import okhttp3.Credentials
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
@@ -21,7 +22,9 @@ class LifelogApiClientTest {
         client = LifelogApiClient(
             OkHttpClient(),
             server.url("/").toString(),
-            "test-user"
+            "test-user",
+            "pilot-user",
+            "pilot-pass"
         )
     }
 
@@ -47,6 +50,10 @@ class LifelogApiClientTest {
         val fallback = server.takeRequest()
         assertEquals("/api/pending", fallback.path)
         assertEquals("test-user", fallback.getHeader("X-User-Id"))
+        assertEquals(
+            Credentials.basic("pilot-user", "pilot-pass"),
+            fallback.getHeader("Authorization")
+        )
     }
 
     @Test

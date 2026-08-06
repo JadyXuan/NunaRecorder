@@ -4,4 +4,10 @@
     <external-path
         name="download"
         android:path="Download/" />
+    <external-files-path
+        name="diagnostics_external"
+        android:path="diagnostics/" />
+    <files-path
+        name="diagnostics_internal"
+        android:path="diagnostics/" />
 </paths>

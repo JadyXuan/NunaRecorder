@@ -7,6 +7,10 @@ import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.data.PairedDevice
 import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.data.UserSettings
+import com.example.nunarecorder.connection.RecorderConnectionEvent
+import com.example.nunarecorder.connection.RecorderConnectionReducer
+import com.example.nunarecorder.connection.RecorderConnectionState
+import com.example.nunarecorder.ble.DevicePowerState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -24,7 +28,8 @@ class MainViewModel : ViewModel() {
     val logText = mutableStateOf("")
     val deviceList = mutableStateListOf<ScannedDevice>()
     val pairedDevices = mutableStateListOf<PairedDevice>()
-    val connectionStatus = mutableStateOf("未连接")
+    val connectionState = mutableStateOf(RecorderConnectionState())
+    val devicePowerState = mutableStateOf<DevicePowerState?>(null)
     val userSettings = mutableStateOf(UserSettings())
     /** 0 设备、1 录音、2 生活、3 设置。放在 ViewModel 以支持通知 Intent 切页。 */
     val selectedTab = mutableStateOf(0)
@@ -65,8 +70,14 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun setConnectionStatus(status: String) {
-        connectionStatus.value = status
+    fun transitionConnection(event: RecorderConnectionEvent): Boolean {
+        val transition = RecorderConnectionReducer.reduce(connectionState.value, event)
+        if (transition.accepted) connectionState.value = transition.state
+        return transition.accepted
+    }
+
+    fun setDevicePowerState(state: DevicePowerState?) {
+        devicePowerState.value = state
     }
 
     fun selectDevice(address: String?) {
