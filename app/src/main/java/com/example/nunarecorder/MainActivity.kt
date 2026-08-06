@@ -259,6 +259,7 @@ class MainActivity : ComponentActivity() {
                             onShareEntry = { entry, withContext, withVad -> shareRecordingEntry(entry, withContext, withVad) },
                             onDeleteEntry = { entry, onDeleted -> deleteRecordingEntry(entry, onDeleted) },
                             onUploadEntry = { entry, withContext, withVad -> uploadRecordingEntry(entry, withContext, withVad) },
+                            onUploadAllPending = { uploadAllPending() },
                             onMigrateLegacy = { opus, options ->
                                 MigrationCoordinator.start(this@MainActivity, opus, options)
                             },
@@ -613,6 +614,51 @@ class MainActivity : ComponentActivity() {
             enrollment = code,
             httpClient = httpClient
         )
+    }
+
+    /** 一键上传所有未同步会话，按录制时间先后排队。 */
+    private fun uploadAllPending() {
+        val code = enrollmentStore.current()
+        if (code == null) {
+            appendLog("还没有入组配置，无法上传")
+            return
+        }
+        val pending = SessionPaths.listSessionDirs().mapNotNull { dir ->
+            val status = com.example.nunarecorder.sync.SessionSyncStatus.load(dir)
+            if (status?.status == "synced") return@mapNotNull null
+            val manifest = com.example.nunarecorder.session.SessionManifest
+                .load(SessionPaths.manifestFile(dir)) ?: return@mapNotNull null
+            if (manifest.recordingActive) return@mapNotNull null   // 正在录的不动
+            RecordingEntry.Session(dir = dir, manifest = manifest)
+        }
+        if (pending.isEmpty()) {
+            appendLog("没有需要上传的会话")
+            return
+        }
+        SessionSyncCoordinator.startBatch(
+            entries = pending,
+            includeContext = true,
+            includeVad = true,
+            enrollment = code,
+            httpClient = httpClient
+        )
+    }
+
+    /** 删除已确认同步的会话；未确认的一律不动。 */
+    private fun deleteSyncedSessions(onDone: () -> Unit) {
+        val candidates = com.example.nunarecorder.recording.SyncedSessionCleaner.listDeletable()
+        if (candidates.isEmpty()) {
+            appendLog("没有已确认同步的会话可以清理")
+            onDone()
+            return
+        }
+        val r = com.example.nunarecorder.recording.SyncedSessionCleaner.deleteAll(candidates)
+        appendLog(
+            "已清理 ${r.deleted} 个已同步会话，释放 " +
+                LiveRecordingUiStats.formatBytes(r.freedBytes) +
+                if (r.failed.isEmpty()) "" else "；跳过 ${r.failed.size} 个"
+        )
+        onDone()
     }
 
     private fun collectEntryFiles(

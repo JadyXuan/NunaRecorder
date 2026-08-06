@@ -271,6 +271,79 @@ object SessionSyncCoordinator {
         return "unknown"
     }
 
+    /**
+     * 一键上传所有未同步会话。
+     *
+     * **按 `started_at_ms` 升序排队，前一个 commit 成功才传下一个。**
+     * 这不是为了整齐：服务端的标注块成员资格是 `audio_data.id` 区间，而 id 是入库顺序。
+     * 同一天的会话乱序上传会让 id 顺序不等于时间顺序，一个跨越两段的标注块就会框进
+     * 时间上不连续的内容，而界面按 start_ts 排序显示，看起来完全正常。
+     * 见 doc/handoff/2026-08-03-data-platform-fix-prompt.md 问题 2。
+     */
+    fun startBatch(
+        entries: List<RecordingEntry>,
+        includeContext: Boolean,
+        includeVad: Boolean,
+        enrollment: EnrollmentCode,
+        httpClient: OkHttpClient
+    ) {
+        if (_state.value?.phase == Phase.SYNCING) {
+            log("已有上传在进行中")
+            return
+        }
+        val ordered = entries.sortedBy {
+            when (it) {
+                is RecordingEntry.Session -> it.manifest.startedAtMs
+                is RecordingEntry.LegacyOpus -> it.opusFile.lastModified()
+            }
+        }
+        if (ordered.isEmpty()) {
+            log("没有需要上传的会话")
+            return
+        }
+        cancelRequested.set(false)
+        log("开始批量上传 ${ordered.size} 个会话（按录制时间先后）")
+        scope.launch {
+            var done = 0
+            for (entry in ordered) {
+                if (cancelRequested.get()) {
+                    log("批量上传已取消，已完成 $done/${ordered.size}")
+                    break
+                }
+                val key = keyOf(entry)
+                _state.value = State(
+                    key, entry.displayName, Phase.SYNCING, 0f,
+                    "上传 ${done + 1}/${ordered.size}：${entry.displayName}"
+                )
+                val result = withContext(Dispatchers.IO) {
+                    when (entry) {
+                        is RecordingEntry.Session ->
+                            syncSession(entry, includeContext, includeVad, enrollment, httpClient)
+                        is RecordingEntry.LegacyOpus ->
+                            syncLegacy(entry, includeContext, enrollment, httpClient)
+                    }
+                }
+                if (!result.success) {
+                    // 前一个没成功就停下：继续传后面的会打乱入库顺序
+                    log("在 ${entry.displayName} 上停止：${result.message}")
+                    if (result.finalStatus == "token_rejected") onTokenRejected?.invoke()
+                    _state.value = State(key, entry.displayName, Phase.ERROR, 0f, result.message)
+                    return@launch
+                }
+                done++
+            }
+            log("批量上传完成 $done/${ordered.size}")
+            _state.value = State(
+                keyOf(ordered.last()), "批量上传", Phase.DONE, 1f, "已上传 $done 个会话"
+            )
+        }
+    }
+
+    private fun keyOf(entry: RecordingEntry): String = when (entry) {
+        is RecordingEntry.Session -> entry.dir.absolutePath
+        is RecordingEntry.LegacyOpus -> entry.opusFile.absolutePath
+    }
+
     fun clearDoneState() {
         val s = _state.value ?: return
         if (s.phase == Phase.DONE || s.phase == Phase.ERROR ||

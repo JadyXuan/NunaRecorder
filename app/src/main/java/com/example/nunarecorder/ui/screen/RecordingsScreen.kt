@@ -49,6 +49,7 @@ import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.recording.SegmentDeleter
+import com.example.nunarecorder.recording.SyncedSessionCleaner
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
@@ -68,6 +69,8 @@ fun RecordingsScreen(
     onShareEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
     onDeleteEntry: (RecordingEntry, () -> Unit) -> Unit,
     onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
+    /** 一键上传所有未同步会话 */
+    onUploadAllPending: () -> Unit = {},
     onMigrateLegacy: (File, MigrateOptions) -> Unit,
     activeRecordingPath: String?,
     liveRecordingStats: LiveRecordingUiStats? = null,

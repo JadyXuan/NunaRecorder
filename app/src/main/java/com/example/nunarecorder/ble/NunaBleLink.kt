@@ -254,7 +254,8 @@ class NunaBleLink(
         // 设备只接受一路 GATT 连接时，新连接在 ACL 层连上了但 GATT 操作全哑。
         // 建链慢是可以忍的，服务发现哑掉不行。
         val autoConnect = false
-        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试）")
+        connectionGeneration++
+        log(TAG, "connectGatt → $address（第 ${reconnectAttempt + 1} 次尝试，第 $connectionGeneration 代）")
         val device = try {
             a.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
@@ -315,13 +316,20 @@ class NunaBleLink(
      */
     private fun isStale(g: BluetoothGatt): Boolean = g !== gatt
 
+    /**
+     * 每次连接递增。回调里带上它，日志就能直接看出"这条回调属于第几次连接"，
+     * 而不必靠对比三份日志去猜。
+     */
+    private var connectionGeneration = 0
+
     private val gattCallback = object : BluetoothGattCallback() {
 
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            val gen = connectionGeneration
             handler.post {
                 if (isStale(g)) {
-                    log(TAG, "忽略旧连接的状态回调 status=$status newState=$newState")
+                    log(TAG, "丢弃旧连接的状态回调（第 $gen 代）status=$status newState=$newState")
                     return@post
                 }
                 if (!running.get()) {
@@ -331,6 +339,7 @@ class NunaBleLink(
                 if (newState == BluetoothProfile.STATE_CONNECTED &&
                     status == BluetoothGatt.GATT_SUCCESS
                 ) {
+                    val gen = connectionGeneration
                     reconnectAttempt = 0
                     connectedAtMs = System.currentTimeMillis()
                     val name = try {
@@ -338,29 +347,31 @@ class NunaBleLink(
                     } catch (_: SecurityException) {
                         "unknown"
                     }
-                    log(TAG, "已连接 $name，${SERVICE_DISCOVERY_DELAY_MS}ms 后开始服务发现")
+                    // **立刻发起服务发现，不再延迟。**
+                    // 我曾加过 600 ms 延迟，想躲开"拿到缓存的空列表"。但 2026-08-06 的
+                    // 日志显示延迟之后 onServicesDiscovered 一次都没回来过，而加延迟之前
+                    // （14:08 那份日志）是能正常列出 8 个 service 的。
+                    // 那个"连上 12 ms 就发现完且一个都没有"的现象另有其因——是旧实例的
+                    // 回调，已经由 isStale 守卫解决，不需要用延迟去躲。
+                    val started = g.discoverServices()
+                    log(TAG, "已连接 $name（第 $gen 代），discoverServices = $started")
                     listener.onGattConnected(name)
-                    // 连上立刻 discoverServices 常常拿到空的或缓存的结果。
-                    // 实测有一次连上 12 ms 就"发现完"且一个 service 都没有。
+                    if (!started) {
+                        teardownGatt()
+                        scheduleReconnect()
+                        return@post
+                    }
                     handler.postDelayed({
-                        if (isStale(g) || !running.get()) return@postDelayed
-                        val started = g.discoverServices()
-                        log(TAG, "discoverServices 已发起 = $started")
-                        if (!started) {
-                            teardownGatt()
-                            scheduleReconnect()
+                        if (isStale(g)) {
+                            log(TAG, "第 $gen 代的发现超时检查被跳过：连接已被替换")
                             return@postDelayed
                         }
-                        // 单独的发现超时：靠 30 秒的建链看门狗兜底太慢，
-                        // 而且分不清"发现没发起"和"发起了没回来"。
-                        handler.postDelayed({
-                            if (isStale(g) || !running.get() || servicesDiscovered) return@postDelayed
-                            log(TAG, "服务发现 ${SERVICE_DISCOVERY_TIMEOUT_MS / 1000} 秒无回调，重连重试")
-                            listener.onDisconnected("service_discovery_timeout")
-                            teardownGatt()
-                            scheduleReconnect()
-                        }, SERVICE_DISCOVERY_TIMEOUT_MS)
-                    }, SERVICE_DISCOVERY_DELAY_MS)
+                        if (!running.get() || servicesDiscovered) return@postDelayed
+                        log(TAG, "第 $gen 代服务发现 ${SERVICE_DISCOVERY_TIMEOUT_MS / 1000} 秒无回调，重连重试")
+                        listener.onDisconnected("service_discovery_timeout")
+                        teardownGatt()
+                        scheduleReconnect()
+                    }, SERVICE_DISCOVERY_TIMEOUT_MS)
                     return@post
                 }
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
@@ -375,8 +386,16 @@ class NunaBleLink(
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            val count = runCatching { g.services.size }.getOrDefault(-1)
             handler.post {
-                if (isStale(g) || !running.get()) return@post
+                // 先无条件记一笔：之前这里被守卫静默吃掉，日志上表现为"回调根本没来"，
+                // 害我对着三份日志猜了四轮。任何丢弃都必须留痕。
+                log(TAG, "onServicesDiscovered status=$status 共 $count 个 service")
+                if (isStale(g)) {
+                    log(TAG, "但它属于已被替换的连接，丢弃")
+                    return@post
+                }
+                if (!running.get()) return@post
                 servicesDiscovered = true
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     log(TAG, "服务发现失败 status=$status")
