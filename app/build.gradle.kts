@@ -4,6 +4,26 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+/**
+ * 发布签名。口令和 keystore 路径都从**用户级** `~/.gradle/gradle.properties` 读，
+ * 仓库里既没有 keystore 也没有口令。
+ *
+ * 为什么 debug 也用它签（T-2026-08-06-006）：Android 拒绝用不同签名的包做原地升级。
+ * 采集期间必然会修 bug 重新发包，如果签名变了，参与者必须先卸载——
+ * **而卸载会带走本地还没上传的录音**。所以发给参与者的每一个包，
+ * 不管是 debug 还是 release，都必须用同一个密钥。
+ */
+val egoKeystoreFile: String? = (project.findProperty("EGOAUDIO_KEYSTORE_FILE") as String?)
+    ?: System.getenv("EGOAUDIO_KEYSTORE_FILE")
+val egoKeystorePassword: String? = (project.findProperty("EGOAUDIO_KEYSTORE_PASSWORD") as String?)
+    ?: System.getenv("EGOAUDIO_KEYSTORE_PASSWORD")
+val egoKeyAlias: String? = (project.findProperty("EGOAUDIO_KEY_ALIAS") as String?)
+    ?: System.getenv("EGOAUDIO_KEY_ALIAS")
+val egoKeyPassword: String? = (project.findProperty("EGOAUDIO_KEY_PASSWORD") as String?)
+    ?: System.getenv("EGOAUDIO_KEY_PASSWORD")
+val egoSigningAvailable = egoKeystoreFile != null && file(egoKeystoreFile!!).exists() &&
+    egoKeystorePassword != null && egoKeyAlias != null && egoKeyPassword != null
+
 android {
     namespace = "com.example.nunarecorder"
     compileSdk = 36
@@ -12,10 +32,22 @@ android {
         applicationId = "com.example.nunarecorder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // 每次对外发包必须 +1，否则 Android 不认为是升级
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (egoSigningAvailable) {
+            create("egoaudio") {
+                storeFile = file(egoKeystoreFile!!)
+                storePassword = egoKeystorePassword
+                keyAlias = egoKeyAlias
+                keyPassword = egoKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -25,6 +57,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (egoSigningAvailable) signingConfig = signingConfigs.getByName("egoaudio")
+        }
+        debug {
+            // 没有配置密钥时退回 Android 默认 debug keystore，本机开发不受影响；
+            // 但那样签出来的包**不能**发给参与者。
+            if (egoSigningAvailable) signingConfig = signingConfigs.getByName("egoaudio")
         }
     }
     compileOptions {

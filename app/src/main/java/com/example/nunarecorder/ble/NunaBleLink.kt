@@ -68,6 +68,10 @@ class NunaBleLink(
     companion object {
         private const val TAG = "BleLink"
         private const val WATCHDOG_PERIOD_MS = 15_000L
+        /** 连上到发起服务发现之间的等待 */
+        private const val SERVICE_DISCOVERY_DELAY_MS = 600L
+        /** close() 到下一次 connectGatt 之间的最小间隔 */
+        private const val RECONNECT_SETTLE_MS = 1_200L
 
         private val SERVICE_UUID: UUID = UUID.fromString(ProtoConfig.Service.SERVICE_UUID)
         private val TRANSFER_CHAR_UUID: UUID = UUID.fromString(ProtoConfig.Service.TRANSFER_CHAR_UUID)
@@ -116,6 +120,8 @@ class NunaBleLink(
     private var awaitingStatusRead = false
     private var adapterReceiverRegistered = false
     private var profileDumped = false
+    /** 上一次 teardownGatt 的时刻；紧接着重连协议栈来不及清理 */
+    private var lastTeardownAtMs = 0L
 
     /** 蓝牙被用户关掉：不要空转重连，等它回来 */
     private val adapterReceiver = object : BroadcastReceiver() {
@@ -221,6 +227,13 @@ class NunaBleLink(
             return
         }
         teardownGatt()
+        // 关闭和重新 connectGatt 之间必须留出时间，否则协议栈还在清理上一个客户端，
+        // 新连接会拿到空的服务列表。
+        val sinceTeardown = System.currentTimeMillis() - lastTeardownAtMs
+        if (sinceTeardown in 0 until RECONNECT_SETTLE_MS) {
+            handler.postDelayed({ if (running.get()) connectNow() }, RECONNECT_SETTLE_MS - sinceTeardown)
+            return
+        }
         subscribed = false
         awaitingStatusRead = false
         connectedAtMs = 0L
@@ -275,6 +288,7 @@ class NunaBleLink(
         val g = gatt ?: return
         gatt = null
         subscribed = false
+        lastTeardownAtMs = System.currentTimeMillis()
         try {
             g.disconnect()
             g.close()
@@ -284,11 +298,26 @@ class NunaBleLink(
 
     // ── GATT 回调 ──────────────────────────────────────────────────────────
 
+    /**
+     * 所有 GATT 实例共用同一个 callback 对象，所以**必须**按实例身份过滤。
+     *
+     * 2026-08-06 实测（vivo V2303A / Android 16）：`teardownGatt()` 关掉旧连接后，
+     * 它迟到的 `onConnectionStateChange(DISCONNECTED)` 和 `onServicesDiscovered`
+     * 才到达，被当成当前链路的事件处理——于是刚建好的新连接被拆掉
+     * （日志里连上 32 ms 后就 `local_terminated(22)`），并触发又一次重连，无限循环。
+     * 还有一次连上仅 12 ms 就"发现完服务"且一个都没找到，同样是旧实例的回调。
+     */
+    private fun isStale(g: BluetoothGatt): Boolean = g !== gatt
+
     private val gattCallback = object : BluetoothGattCallback() {
 
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             handler.post {
+                if (isStale(g)) {
+                    log(TAG, "忽略旧连接的状态回调 status=$status newState=$newState")
+                    return@post
+                }
                 if (!running.get()) {
                     // 用户已经停止，这是我们自己 disconnect() 引发的迟到回调
                     return@post
@@ -303,13 +332,18 @@ class NunaBleLink(
                     } catch (_: SecurityException) {
                         "unknown"
                     }
-                    log(TAG, "已连接 $name，开始服务发现")
+                    log(TAG, "已连接 $name，${SERVICE_DISCOVERY_DELAY_MS}ms 后开始服务发现")
                     listener.onGattConnected(name)
-                    if (!g.discoverServices()) {
-                        log(TAG, "discoverServices 启动失败")
-                        teardownGatt()
-                        scheduleReconnect()
-                    }
+                    // 连上立刻 discoverServices 常常拿到空的或缓存的结果。
+                    // 实测有一次连上 12 ms 就"发现完"且一个 service 都没有。
+                    handler.postDelayed({
+                        if (isStale(g) || !running.get()) return@postDelayed
+                        if (!g.discoverServices()) {
+                            log(TAG, "discoverServices 启动失败")
+                            teardownGatt()
+                            scheduleReconnect()
+                        }
+                    }, SERVICE_DISCOVERY_DELAY_MS)
                     return@post
                 }
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
@@ -325,7 +359,7 @@ class NunaBleLink(
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             handler.post {
-                if (!running.get()) return@post
+                if (isStale(g) || !running.get()) return@post
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     log(TAG, "服务发现失败 status=$status")
                     teardownGatt()
@@ -336,7 +370,10 @@ class NunaBleLink(
                 subscribeBattery(g)
                 val transferChar = g.getService(SERVICE_UUID)?.getCharacteristic(TRANSFER_CHAR_UUID)
                 if (transferChar == null) {
-                    log(TAG, "未找到 A002 握手特征")
+                    // 服务列表不完整（协议栈缓存或发现被打断）。重来一次通常就好了，
+                    // 不是设备真的没有这个特征。
+                    log(TAG, "服务列表里没有 A002（共 ${g.services.size} 个 service），重连重试")
+                    listener.onDisconnected("incomplete_service_discovery")
                     teardownGatt()
                     scheduleReconnect()
                     return@post
