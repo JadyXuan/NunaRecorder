@@ -5,6 +5,7 @@ import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.List
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Face
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +30,7 @@ fun BottomNavBar(
         TabItem(Icons.Outlined.List, "录音"),
         TabItem(Icons.Outlined.AccountCircle, "入组"),
         TabItem(Icons.Outlined.Info, "登录"),
+        TabItem(Icons.Outlined.Face, "声纹"),
         TabItem(Icons.Outlined.Settings, "设置")
     )
 

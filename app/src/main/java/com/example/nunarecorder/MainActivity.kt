@@ -62,6 +62,9 @@ import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.screen.RecordingsScreen
 import com.example.nunarecorder.ui.screen.EnrollScreen
 import com.example.nunarecorder.ui.screen.LoginGuideScreen
+import com.example.nunarecorder.ui.screen.VoiceprintScreen
+import com.example.nunarecorder.voiceprint.VoiceprintSession
+import com.example.nunarecorder.voiceprint.VoiceprintUploader
 import com.example.nunarecorder.ui.screen.SettingsScreen
 import com.example.wearable.TranscriptionProvider
 import com.example.wearable.WearableConnectionConfig
@@ -136,6 +139,17 @@ class MainActivity : ComponentActivity() {
     private var selectedPairedDevice: PairedDevice? = null
 
 
+    /** 扫码入组：结果是原始入组码文本，交给同一条 applyEnrollmentCode 路径 */
+    private val enrollScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            result.data?.getStringExtra(
+                com.example.nunarecorder.enroll.EnrollScanActivity.EXTRA_CODE
+            )?.let { applyEnrollmentCode(it) }
+        }
+    }
+
     // 权限请求
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -192,6 +206,9 @@ class MainActivity : ComponentActivity() {
             val settingsChecking by viewModel.settingsCheckRunning
             val enrollment by viewModel.enrollment
             val enrollRevoked by viewModel.enrollmentRevoked
+            val voiceprint by VoiceprintSession.state.collectAsState()
+            val vpUploading by viewModel.voiceprintUploading
+            val vpMessage by viewModel.voiceprintMessage
             // 采集状态的唯一来源是服务，不是 Activity 的字段
             val linkStatus by RecordingController.link.collectAsState()
             val recorderStats by RecordingController.stats.collectAsState()
@@ -274,7 +291,14 @@ class MainActivity : ComponentActivity() {
                                 tokenRevoked = enrollRevoked,
                                 checkResult = settingsCheck,
                                 checkRunning = settingsChecking,
-                                onScanClick = { appendLog("扫码功能在下一版加入，请先粘贴文本码") },
+                                onScanClick = {
+                                    enrollScanLauncher.launch(
+                                        android.content.Intent(
+                                            this@MainActivity,
+                                            com.example.nunarecorder.enroll.EnrollScanActivity::class.java
+                                        )
+                                    )
+                                },
                                 onCodeEntered = { raw -> applyEnrollmentCode(raw) },
                                 onRecheck = { enrollment?.let { runServerCheck(it) } },
                                 onClearEnrollment = {
@@ -295,7 +319,21 @@ class MainActivity : ComponentActivity() {
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
-                            4 -> SettingsScreen(
+                            4 -> VoiceprintScreen(
+                                state = voiceprint,
+                                linkStreaming = linkStatus.isStreaming,
+                                uploading = vpUploading,
+                                uploadMessage = vpMessage,
+                                onStart = { step -> VoiceprintSession.start(this@MainActivity, step) },
+                                onStop = {
+                                    val r = VoiceprintSession.stop()
+                                    r?.let { appendLog("声纹：${it.advice}") }
+                                },
+                                onUpload = { uploadVoiceprints() },
+                                onSkip = { selectedTab = 0 },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            5 -> SettingsScreen(
                                 userSettings = userSettings,
                                 onLogLevelChange = { level ->
                                     viewModel.setUserSettings(userSettings.copy(logLevel = level))
@@ -660,6 +698,33 @@ class MainActivity : ComponentActivity() {
                 if (r.failed.isEmpty()) "" else "；跳过 ${r.failed.size} 个"
         )
         onDone()
+    }
+
+    /** 两段声纹依次上传；任一失败就停下并保留本地文件。 */
+    private fun uploadVoiceprints() {
+        val code = enrollmentStore.current()
+        if (code == null) {
+            appendLog("还没有入组配置，无法上传声纹")
+            return
+        }
+        viewModel.voiceprintUploading.value = true
+        viewModel.voiceprintMessage.value = null
+        lifecycleScope.launch {
+            val uploader = VoiceprintUploader(httpClient)
+            val steps = listOf(
+                VoiceprintSession.Step.READ to VoiceprintUploader.Kind.READ,
+                VoiceprintSession.Step.FREE to VoiceprintUploader.Kind.FREE
+            )
+            var message = "声纹已全部上传"
+            for ((step, kind) in steps) {
+                val file = VoiceprintSession.fileFor(this@MainActivity, step)
+                val r = withContext(Dispatchers.IO) { uploader.upload(code, kind, file) }
+                appendLog("声纹 ${kind.wire}：${r.message}")
+                if (!r.ok) { message = r.message; break }
+            }
+            viewModel.voiceprintUploading.value = false
+            viewModel.voiceprintMessage.value = message
+        }
     }
 
     private fun collectEntryFiles(

@@ -25,6 +25,7 @@ import com.example.nunarecorder.recording.SessionRecorder
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.DiagnosticsLog
 import com.example.nunarecorder.util.PowerProbe
+import com.example.nunarecorder.voiceprint.VoiceprintSession
 import com.example.nunarecorder.vad.VadJob
 import com.example.nunarecorder.vad.VadJobQueue
 
@@ -234,6 +235,9 @@ class RecordingService : Service() {
         override fun onAudioData(data: ByteArray) {
             // BLE 回调线程直写，不绕主线程
             recorder?.feed(data)
+            // 声纹录制期间同一份字节也喂给它：用的是同一台设备的同一个麦克风，
+            // 这正是把声纹做进 App 的理由——麦克风匹配自动成立。
+            VoiceprintSession.feed(data)
         }
 
         override fun onBatteryLevel(percent: Int) {

@@ -41,6 +41,9 @@ class MainViewModel : ViewModel() {
     val enrollment = mutableStateOf<com.example.nunarecorder.enroll.EnrollmentCode?>(null)
     val enrollmentRevoked = mutableStateOf(false)
 
+    val voiceprintUploading = mutableStateOf(false)
+    val voiceprintMessage = mutableStateOf<String?>(null)
+
     /** 最近一次开采自检结果 */
     val readinessReport =
         mutableStateOf<com.example.nunarecorder.util.CollectionReadiness.Report?>(null)
