@@ -91,6 +91,44 @@ class SessionRecorderTest {
     }
 
     @Test
+    fun productNunaBatchProducesCompleteUploadEligibleSegment() {
+        val root = Files.createTempDirectory("nuna-product-session-test").toFile()
+        val sessionDir = root.resolve("session")
+        val recorder = SessionRecorder(
+            onLog = {},
+            wallClockMs = { 1_000L },
+            monotonicClockMs = { 5_000L },
+            sessionDirFactory = { _, _, _ -> sessionDir }
+        )
+
+        try {
+            recorder.start(
+                deviceName = "Product Nuna",
+                deviceAddress = "4C:FF:01:A0:0D:F9",
+                recordingOptions = RecordingOptions(
+                    segmentEnabled = true,
+                    segmentDurationMs = 60_000L,
+                    autoVadOnRecord = false
+                )
+            )
+
+            repeat(6) { chunkId ->
+                assertNull(recorder.feed(productNunaNotification(frameId = 51, chunkId = chunkId)))
+            }
+            recorder.stop()
+
+            val segment = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
+                .segments.single()
+            assertTrue(segment.integrityOk)
+            assertNull(segment.integrityIssue)
+            assertEquals(2_880L, segment.bytes)
+            assertEquals(720L, segment.durationMs)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun normalRotationKeepsSavedSegmentIndexesContiguous() {
         val root = Files.createTempDirectory("nuna-recorder-test").toFile()
         var monotonicClockMs = 5_000L
@@ -142,6 +180,24 @@ class SessionRecorderTest {
             for (index in 0 until 80) {
                 this[21 + index] = index.toByte()
             }
+        }
+    }
+
+    private fun productNunaNotification(frameId: Int, chunkId: Int): ByteArray {
+        val opusBytes = ByteArray(480) { (chunkId + it).toByte() }
+        val payloadLength = 14 + opusBytes.size
+        return ByteArray(7 + payloadLength).apply {
+            this[0] = 0xAA.toByte()
+            this[1] = 0x10
+            putLe16(2, payloadLength)
+            this[4] = 0x01
+            this[5] = 0x34
+            this[6] = 0x12
+            putLe16(7, frameId)
+            putLe16(9, 80)
+            this[11] = chunkId.toByte()
+            this[12] = 6
+            opusBytes.copyInto(this, destinationOffset = 21)
         }
     }
 

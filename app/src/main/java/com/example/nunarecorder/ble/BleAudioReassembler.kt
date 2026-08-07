@@ -189,18 +189,29 @@ class BleAudioReassembler(
             pos += chunk.size
         }
 
-        if (concatenated.size != frame.frameSize) {
+        /*
+         * Product Nuna batches several fixed-size Opus frames into each chunk group
+         * (observed: 6 chunks x 480 B = 36 x 80 B), while the XIAO firmware sends
+         * one 80-byte Opus frame per group. In both protocols frameSize describes
+         * the individual Opus frame size, not necessarily the whole group size.
+         */
+        val trailingBytes = concatenated.size % frame.frameSize
+        val completeBytes = concatenated.size - trailingBytes
+        if (trailingBytes != 0) {
             markIntegrityError(
-                "frameId=${frame.frameId} 重组后 ${concatenated.size} B，声明 ${frame.frameSize} B"
+                "frameId=${frame.frameId} 重组后 ${concatenated.size} B 不是 " +
+                    "${frame.frameSize} B Opus 帧的整数倍，丢弃尾部 $trailingBytes B"
             )
+        }
+        if (completeBytes == 0) {
             return
         }
 
         try {
-            fos?.write(concatenated)
+            fos?.write(concatenated, 0, completeBytes)
             fos?.flush()
-            validFrameCount++
-            opusBytesWritten += concatenated.size
+            validFrameCount += completeBytes / frame.frameSize
+            opusBytesWritten += completeBytes
         } catch (e: Exception) {
             Log.e(TAG, "Error writing opus frame", e)
             markIntegrityError("写入文件失败: ${e.message}")

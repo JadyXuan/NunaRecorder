@@ -1,5 +1,6 @@
 package com.example.nunarecorder.ble
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -43,8 +44,78 @@ class BleAudioReassemblerTest {
         }
     }
 
-    private fun audioNotification(frameId: Int): ByteArray {
-        val payloadLength = 14 + 80
+    @Test
+    fun acceptsXiaoSingleOpusFrameGroups() {
+        val output = Files.createTempFile("nuna-xiao-single", ".opus").toFile()
+        try {
+            val reassembler = BleAudioReassembler(output)
+
+            reassembler.feed(audioNotification(frameId = 100))
+            reassembler.feed(audioNotification(frameId = 101))
+
+            assertTrue(reassembler.integrityOk)
+            assertNull(reassembler.close())
+            assertEquals(160L, output.length())
+        } finally {
+            output.delete()
+        }
+    }
+
+    @Test
+    fun acceptsProductNunaBatchedOpusFrames() {
+        val output = Files.createTempFile("nuna-product-batch", ".opus").toFile()
+        try {
+            val reassembler = BleAudioReassembler(output)
+
+            repeat(6) { chunkId ->
+                reassembler.feed(
+                    audioNotification(
+                        frameId = 51,
+                        chunkId = chunkId,
+                        totalChunks = 6,
+                        opusBytes = ByteArray(480) { (chunkId + it).toByte() }
+                    )
+                )
+            }
+
+            assertTrue(reassembler.integrityOk)
+            assertNull(reassembler.consumeNewIntegrityIssue())
+            assertNull(reassembler.close())
+            assertEquals(2_880L, output.length())
+        } finally {
+            output.delete()
+        }
+    }
+
+    @Test
+    fun keepsCompleteOpusFramesWhenBatchHasTrailingBytes() {
+        val output = Files.createTempFile("nuna-product-tail", ".opus").toFile()
+        try {
+            val reassembler = BleAudioReassembler(output)
+
+            reassembler.feed(
+                audioNotification(
+                    frameId = 7,
+                    opusBytes = ByteArray(161) { it.toByte() }
+                )
+            )
+
+            assertFalse(reassembler.integrityOk)
+            assertTrue(reassembler.consumeNewIntegrityIssue()?.contains("尾部 1 B") == true)
+            reassembler.close()
+            assertEquals(160L, output.length())
+        } finally {
+            output.delete()
+        }
+    }
+
+    private fun audioNotification(
+        frameId: Int,
+        chunkId: Int = 0,
+        totalChunks: Int = 1,
+        opusBytes: ByteArray = ByteArray(80) { it.toByte() }
+    ): ByteArray {
+        val payloadLength = 14 + opusBytes.size
         return ByteArray(7 + payloadLength).apply {
             this[0] = 0xAA.toByte()
             this[1] = 0x10
@@ -54,11 +125,9 @@ class BleAudioReassemblerTest {
             this[6] = 0x12
             putLe16(7, frameId)
             putLe16(9, 80)
-            this[11] = 0
-            this[12] = 1
-            for (index in 0 until 80) {
-                this[21 + index] = index.toByte()
-            }
+            this[11] = chunkId.toByte()
+            this[12] = totalChunks.toByte()
+            opusBytes.copyInto(this, destinationOffset = 21)
         }
     }
 
