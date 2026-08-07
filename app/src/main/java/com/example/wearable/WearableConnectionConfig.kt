@@ -12,5 +12,5 @@ data class WearableConnectionConfig(
     val deviceAddress: String,
     val verificationCode: String = "123456",
     val dumpOverlapWavToDebugDir: Boolean = true,
-    val deepgramApiKey: String? = "e7f545be263d0b4ad19cbd1983a8c84809ff4406"
+    val deepgramApiKey: String? = null
 )

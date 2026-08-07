@@ -50,6 +50,9 @@ fun SettingsScreen(
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val serverUrlInvalid = userSettings.baseUrl.isNotBlank() &&
+        !userSettings.hasValidServerUrl()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -76,6 +79,7 @@ fun SettingsScreen(
             value = userSettings.userId,
             onValueChange = onUserIdChange,
             label = { Text("用户 ID") },
+            supportingText = { Text("配置服务器时必填；不会再使用共享的默认用户") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
@@ -131,8 +135,15 @@ fun SettingsScreen(
             onValueChange = onBaseUrlChange,
             label = { Text("Base URL") },
             supportingText = {
-                Text("完整地址，例如 https://lifelog.transfur.tech/")
+                Text(
+                    if (serverUrlInvalid) {
+                        "请输入有效的 http:// 或 https:// 地址"
+                    } else {
+                        "默认留空且不联网，例如 https://your-server.example/"
+                    }
+                )
             },
+            isError = serverUrlInvalid,
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
@@ -142,6 +153,7 @@ fun SettingsScreen(
             value = userSettings.basicAuthUsername,
             onValueChange = onBasicAuthUsernameChange,
             label = { Text("Basic Auth 用户名") },
+            supportingText = { Text("可选；仅在服务器使用 HTTP Basic Auth 时填写") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)

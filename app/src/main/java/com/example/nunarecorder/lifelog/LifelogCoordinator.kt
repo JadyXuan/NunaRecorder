@@ -26,18 +26,24 @@ object LifelogCoordinator {
     val state: StateFlow<LifelogUiState> = _state.asStateFlow()
 
     private var api: LifelogApiClient? = null
-    private var enabled: Boolean = true
+    private var enabled: Boolean = false
+    private var configurationError: String? = "请先在设置中配置生活记录服务器"
     var onLog: ((String) -> Unit)? = null
 
     fun configure(httpClient: OkHttpClient, settings: UserSettings) {
         enabled = settings.lifelogEnabled
-        api = LifelogApiClient(
-            httpClient = httpClient,
-            baseUrl = settings.apiBaseUrl(),
-            userId = settings.userId,
-            basicAuthUsername = settings.basicAuthUsername,
-            basicAuthPassword = settings.basicAuthPassword
-        )
+        configurationError = settings.serverConfigurationError()
+        api = if (enabled && configurationError == null) {
+            LifelogApiClient(
+                httpClient = httpClient,
+                baseUrl = settings.apiBaseUrl(),
+                userId = settings.userId,
+                basicAuthUsername = settings.basicAuthUsername,
+                basicAuthPassword = settings.basicAuthPassword
+            )
+        } else {
+            null
+        }
     }
 
     fun refresh(date: String = _state.value.date) {
@@ -48,7 +54,14 @@ object LifelogCoordinator {
             )
             return
         }
-        val client = api ?: return
+        val client = api
+        if (client == null) {
+            _state.value = _state.value.copy(
+                loading = false,
+                error = configurationError ?: "请先在设置中配置生活记录服务器"
+            )
+            return
+        }
         if (_state.value.loading) return
         _state.value = _state.value.copy(date = date, loading = true, error = null)
         scope.launch {
@@ -88,7 +101,14 @@ object LifelogCoordinator {
         action: String,
         label: String? = null
     ) {
-        val client = api ?: return
+        val client = api
+        if (client == null) {
+            _state.value = _state.value.copy(
+                loading = false,
+                error = configurationError ?: "请先在设置中配置生活记录服务器"
+            )
+            return
+        }
         if (_state.value.loading) return
         _state.value = _state.value.copy(loading = true, error = null)
         scope.launch {

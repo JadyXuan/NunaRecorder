@@ -33,8 +33,7 @@ class SessionAutoUploadWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val settings = UserSettingsStorage(applicationContext).load()
         if (!settings.autoUploadEnabled) return@withContext Result.success()
-        // 自动上传绝不能把私人录音落到共享的 mock 用户空间。
-        if (settings.userId.isBlank()) return@withContext Result.success()
+        if (settings.serverConfigurationError() != null) return@withContext Result.success()
 
         var uploadedThisRun = 0
         var sawFailure = false
@@ -94,7 +93,7 @@ class SessionAutoUploadWorker(
 
         fun schedule(context: Context, settings: UserSettings) {
             val manager = WorkManager.getInstance(context)
-            if (!settings.autoUploadEnabled) {
+            if (!settings.autoUploadEnabled || settings.serverConfigurationError() != null) {
                 manager.cancelUniqueWork(UNIQUE_WORK)
                 return
             }

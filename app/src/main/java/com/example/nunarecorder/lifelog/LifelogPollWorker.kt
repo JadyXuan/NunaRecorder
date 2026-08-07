@@ -19,7 +19,10 @@ class LifelogPollWorker(
 
     override suspend fun doWork(): Result {
         val settings = UserSettingsStorage(applicationContext).load()
-        if (!settings.lifelogEnabled || !settings.annotationPollingEnabled) {
+        if (!settings.lifelogEnabled ||
+            !settings.annotationPollingEnabled ||
+            settings.serverConfigurationError() != null
+        ) {
             return Result.success()
         }
         return try {

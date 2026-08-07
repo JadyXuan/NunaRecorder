@@ -31,6 +31,7 @@ class NunaApplication : Application() {
         LifelogPollWorker.schedule(
             this,
             enabled = settings.lifelogEnabled && settings.annotationPollingEnabled
+                && settings.serverConfigurationError() == null
         )
         SessionAutoUploadWorker.schedule(this, settings)
     }

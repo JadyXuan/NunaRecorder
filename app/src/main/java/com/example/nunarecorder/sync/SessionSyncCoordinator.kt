@@ -60,6 +60,10 @@ object SessionSyncCoordinator {
             log("同步已在进行中")
             return
         }
+        settings.serverConfigurationError()?.let { error ->
+            fail(key, entry.displayName, error, "failed")
+            return
+        }
         _state.value = State(key, entry.displayName, Phase.SYNCING, 0f, "准备同步…")
         scope.launch {
             try {
@@ -117,7 +121,7 @@ object SessionSyncCoordinator {
         val uploader = SessionSyncUploader(
             httpClient,
             baseUrl,
-            settings.userId.ifBlank { "mock-user-001" },
+            settings.userId,
             resolveDeviceMac(manifest),
             settings.basicAuthUsername,
             settings.basicAuthPassword
@@ -202,7 +206,7 @@ object SessionSyncCoordinator {
         val uploader = SessionSyncUploader(
             httpClient,
             baseUrl,
-            settings.userId.ifBlank { "mock-user-001" },
+            settings.userId,
             resolveDeviceMac(null, entry.opusFile),
             settings.basicAuthUsername,
             settings.basicAuthPassword

@@ -12,9 +12,9 @@ NunaRecorder is a research prototype for collecting audio from a user-controlled
 
 ## Storage and transmission
 
-Recordings and diagnostics are stored in the app's private or app-scoped storage. Audio is not automatically uploaded by default. When the user enables automatic upload or manually uploads a recording, the selected files and metadata are sent to the server configured in Settings.
+Recordings and diagnostics are stored in the app's private or app-scoped storage. The app has no default application server: on a fresh install the server URL and user ID are empty, server-backed features are disabled, and no recording, metadata, timeline or annotation request is sent to an application server. When the user configures a server and enables automatic upload or manually uploads a recording, the selected files and metadata are sent to that server.
 
-The public APK contains no shared server password. Credentials entered by a user are stored locally for subsequent requests. Users should only configure a server they trust.
+The public APK contains no shared server password. Credentials entered by a user are stored locally for subsequent requests. Users should only configure a server they trust. Production servers should use HTTPS and a real user-authentication mechanism rather than treating the editable user ID as authentication.
 
 ## User control
 

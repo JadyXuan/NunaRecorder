@@ -27,7 +27,9 @@ Devices without a battery characteristic remain fully usable; the app reports th
 4. Tap **开始录制**. The app stores incoming Opus data in segmented recording sessions.
 5. Stop the session from the device page. Recordings can then be played, shared, processed or uploaded.
 
-The public APK does not embed shared server credentials. Configure the server URL, user ID and credentials in Settings only when you have access to a trusted server. Automatic audio upload is disabled by default.
+The public APK does not contain a default server or shared credentials. On a fresh install, the server URL and user ID are empty, server-backed features are disabled, and the app makes no application-server requests. Configure a trusted server explicitly in Settings when needed; automatic audio upload remains opt-in.
+
+To connect a self-hosted backend, see the [server integration guide](docs/SERVER_INTEGRATION.md). The guide documents authentication, raw Opus framing, upload endpoints, full-session sync, timelines, diaries and annotation APIs.
 
 ## Build from source
 

@@ -413,10 +413,15 @@ class MainActivity : ComponentActivity() {
                                     LifelogPollWorker.schedule(
                                         this@MainActivity,
                                         enabled = userSettings.lifelogEnabled &&
-                                            userSettings.annotationPollingEnabled
+                                            userSettings.annotationPollingEnabled &&
+                                            userSettings.serverConfigurationError() == null
                                     )
                                     SessionAutoUploadWorker.schedule(this@MainActivity, userSettings)
-                                    appendLog("设置已保存")
+                                    val serverError = userSettings.serverConfigurationError()
+                                    appendLog(
+                                        if (serverError == null) "设置已保存"
+                                        else "设置已保存；服务器未启用：$serverError"
+                                    )
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -1569,8 +1574,8 @@ class MainActivity : ComponentActivity() {
                 WearableConnectionConfig(
                     deviceAddress = WearableBleConfig.DEFAULT_DEVICE_ADDRESS,
                     verificationCode = "123456",
-                    dumpOverlapWavToDebugDir = true
-                    // deepgramApiKey 使用 WearableConnectionConfig 中的默认值
+                    dumpOverlapWavToDebugDir = true,
+                    deepgramApiKey = null
                 )
             )
             wearableDebugService = impl
@@ -1637,17 +1642,9 @@ class MainActivity : ComponentActivity() {
         } ?: appendWearableDebugLog("stopChunkDelivery: service null")
     }
 
-    /** 转写测试：使用 WearableConnectionConfig 中的 Deepgram API Key 并 startTranscription，转写结果持续写入调试日志和 Logcat。 */
+    /** 转写测试：仅在调用方显式提供 Deepgram API Key 时联网。 */
     private fun wearableDebugStartTranscription() {
         val svc = ensureWearableDebugService()
-        val cfgKey = kotlin.runCatching {
-            (svc as? NunaWearableServiceImpl)
-                ?.let { implField ->
-                    // 通过公開的 connectionConfig 间接读取 Deepgram API Key
-                    // 实际上 NunaWearableServiceImpl 已在 ensureWearableDebugService 中配置好 WearableConnectionConfig
-                    null
-                }
-        }.getOrNull()
         (svc as? TranscriptionProvider)?.let { tp ->
             tp.setListener { text, startMs, endMs ->
                 val msg = "onTranscriptionReady: \"$text\" [${startMs}ms - ${endMs}ms]"
@@ -1655,8 +1652,8 @@ class MainActivity : ComponentActivity() {
                 Log.d(NunaWearableServiceImpl.DEBUG_TAG, "[Transcription] $msg")
             }
             tp.startTranscription()
-            appendWearableDebugLog("Start 转写: Deepgram listen-flux 已连接，结果将持续打印到本页日志与 Logcat (WearableDebug)")
-            Log.d(NunaWearableServiceImpl.DEBUG_TAG, "[UI] Start 转写: Deepgram listen-flux 已连接")
+            appendWearableDebugLog("Start 转写已请求；未显式配置 Deepgram API Key 时不会联网")
+            Log.d(NunaWearableServiceImpl.DEBUG_TAG, "[UI] Start transcription requested")
         } ?: run {
             appendWearableDebugLog("Start 转写: service 未实现 TranscriptionProvider")
         }
