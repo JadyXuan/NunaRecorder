@@ -24,6 +24,11 @@ class SessionSyncUploader(
     private val uploadToken: String = ""
 ) {
 
+    companion object {
+        /** file 阶段的并发度；init/commit 不受影响 */
+        const val UPLOAD_CONCURRENCY = 4
+    }
+
     /**
      * EgoAudio 自有命名空间。历史上这里是 `/thingx/api/v1/...`，那是旧 Nuna 官方
      * 接口的路径，不是本项目的契约（见 ../doc/plan/TODO.md P0）。
@@ -117,25 +122,39 @@ class SessionSyncUploader(
             }
         }
 
-        files.forEachIndexed { index, entry ->
-            if (shouldCancel()) return CommitResult(false, "cancelled", emptyList(), "上传已取消")
-            if (entry.status == "synced") {
-                onFileProgress(entry, index, files.size)
-                return@forEachIndexed
+        // **只有 file 阶段并发**。init 和 commit 必须串行：commit 会按服务端已收到的
+        // 文件判定完整性，让它和还在传的文件重叠，就会在文件没传完时判定 synced。
+        //
+        // 一个小时的会话约 60 个文件，每个一次完整往返；顺序传时几乎全部时间花在
+        // 等待上而不是带宽上。并发度取 4——再高对手机的连接数和电量不划算，
+        // 而 4 路已经能把往返开销摊掉大部分。
+        val done = java.util.concurrent.atomic.AtomicInteger(0)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(UPLOAD_CONCURRENCY)
+        try {
+            val tasks = files.mapIndexed { index, entry ->
+                java.util.concurrent.Callable {
+                    if (shouldCancel() || entry.status == "synced") {
+                        onFileProgress(entry, done.getAndIncrement(), files.size)
+                        return@Callable
+                    }
+                    entry.status = "uploading"
+                    val f = File(sessionDir, entry.path)
+                    val ok = postFile(uploadId, entry, f)
+                    if (ok) {
+                        entry.status = "synced"
+                        entry.uploadedAtMs = System.currentTimeMillis()
+                        entry.error = null
+                    } else {
+                        entry.status = "failed"
+                        entry.error = "upload failed"
+                    }
+                    // 进度按完成数而不是下标：并发下下标不再单调
+                    onFileProgress(entry, done.getAndIncrement(), files.size)
+                }
             }
-            entry.status = "uploading"
-            onFileProgress(entry, index, files.size)
-            val f = File(sessionDir, entry.path)
-            val ok = postFile(uploadId, entry, f)
-            if (ok) {
-                entry.status = "synced"
-                entry.uploadedAtMs = System.currentTimeMillis()
-                entry.error = null
-            } else {
-                entry.status = "failed"
-                entry.error = "upload failed"
-            }
-            onFileProgress(entry, index, files.size)
+            pool.invokeAll(tasks)
+        } finally {
+            pool.shutdown()
         }
 
         if (shouldCancel()) return CommitResult(false, "cancelled", emptyList(), "上传已取消")

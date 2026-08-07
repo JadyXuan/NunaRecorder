@@ -49,6 +49,7 @@ import com.example.nunarecorder.recording.RecordingController
 import com.example.nunarecorder.sync.ServerHandshakeCheck
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.util.AppVersionCheck
 import com.example.nunarecorder.util.CollectionReadiness
 import com.example.nunarecorder.util.DiagnosticsLog
 import com.example.nunarecorder.vad.VadJobQueue
@@ -178,6 +179,7 @@ class MainActivity : ComponentActivity() {
         val initialSettings = userSettingsStorage.load()
         viewModel.setUserSettings(initialSettings)
         viewModel.setEnrollment(enrollmentStore.current(), enrollmentStore.isRevoked())
+        enrollmentStore.current()?.let { checkAppVersion(it) }
 
         requestBlePermissions()
         VadJobQueue.start(this)
@@ -469,8 +471,25 @@ class MainActivity : ComponentActivity() {
                         viewModel.setEnrollment(merged, false)
                         appendLog("已从服务器补齐标注网址与登录指引")
                     }
-                    runServerCheck(merged)
+                        runServerCheck(merged)
                 }
+            }
+        }
+    }
+
+    /** 启动后顺带查一次有没有新版；只提示，不自动安装。 */
+    private fun checkAppVersion(code: com.example.nunarecorder.enroll.EnrollmentCode) {
+        val current = runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode
+            else @Suppress("DEPRECATION") info.versionCode.toLong()
+        }.getOrDefault(0L)
+        lifecycleScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                AppVersionCheck.check(httpClient, code.serverUrl, current)
+            } ?: return@launch
+            if (r.hasUpdate) {
+                appendLog("有新版本 ${r.latestName}（${r.latestCode}），当前 $current。请到 ${code.serverUrl}/apk/latest 下载更新")
             }
         }
     }

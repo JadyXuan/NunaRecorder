@@ -20,6 +20,7 @@ import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.recording.LinkPhase
 import com.example.nunarecorder.recording.RecordingController
 import com.example.nunarecorder.recording.RecordingOptions
+import com.example.nunarecorder.recording.CollectionClock
 import com.example.nunarecorder.recording.RecordingStateMachine
 import com.example.nunarecorder.recording.SessionRecorder
 import com.example.nunarecorder.session.SessionPaths
@@ -67,10 +68,20 @@ class RecordingService : Service() {
     private var lastBatteryWarning = Int.MAX_VALUE
     private val powerProbe by lazy { PowerProbe(this) }
     private var lastPowerSampleMs = 0L
+    /** 当前会话所属的小时格起点；跨过它就换会话 */
+    private var currentHourStart = 0L
+    private var recordingDeviceName = ""
+    private var recordingDeviceAddress = ""
+    private var recordingOptions: RecordingOptions? = null
 
     private val ticker = object : Runnable {
         override fun run() {
             if (!active) return
+            // 先看要不要换会话，再 tick：否则新的一小时头几秒会写进旧会话
+            val nowMs = System.currentTimeMillis()
+            if (currentHourStart > 0L && !CollectionClock.sameHour(currentHourStart, nowMs)) {
+                rolloverSession()
+            }
             recorder?.tick()
             val stats = recorder?.liveStats()
             RecordingController.publishStats(stats)
@@ -142,7 +153,51 @@ class RecordingService : Service() {
         acquireWakeLock()
 
         val options = RecordingOptions.from(UserSettingsStorage(this).load())
+        recordingDeviceName = deviceName
+        recordingDeviceAddress = deviceAddress
+        recordingOptions = options
+        currentHourStart = CollectionClock.hourStart(System.currentTimeMillis())
         val sessionDir = SessionPaths.newSessionDir(deviceName, deviceAddress)
+        val rec = newRecorder(options)
+        recorder = rec
+        rec.start(sessionDir, deviceName, deviceAddress, options)
+        ContextDataService.start(this, sessionDir)
+
+        link = NunaBleLink(applicationContext, linkListener).also { it.start(deviceAddress) }
+        handler.post(ticker)
+    }
+
+    /**
+     * 跨小时换会话。
+     *
+     * 一个 16 小时会话意味着**整天传完才算数**，中途任何一次失败的爆炸半径是一整天。
+     * 切成小时之后就是 16 个各自可 commit 的单元，而且每个会话的 `context.jsonl`
+     * 也从几百 MB 降到几十 MB。
+     *
+     * 边界对齐**本地整点**（服务端采集日规则是 `Asia/Hong_Kong@4`，见 CollectionClock）：
+     * 两台手机在同一时刻采集，会话边界应当落在同一处，否则排障时无法横向对齐。
+     * BLE 链路完全不受影响——只是换了写入目标。
+     */
+    private fun rolloverSession() {
+        val options = recordingOptions ?: return
+        val old = recorder ?: return
+        val now = System.currentTimeMillis()
+        DiagnosticsLog.log(
+            TAG,
+            "跨小时切换会话（采集日 ${CollectionClock.dayId(now)}），旧会话封口并可独立上传"
+        )
+        old.stop()
+        ContextDataService.stop(this)
+
+        currentHourStart = CollectionClock.hourStart(now)
+        val dir = SessionPaths.newSessionDir(recordingDeviceName, recordingDeviceAddress)
+        val rec = newRecorder(options)
+        recorder = rec
+        rec.start(dir, recordingDeviceName, recordingDeviceAddress, options)
+        ContextDataService.start(this, dir)
+    }
+
+    private fun newRecorder(options: RecordingOptions): SessionRecorder {
         val rec = SessionRecorder(
             onLog = { DiagnosticsLog.log("Recorder", it) },
             onSegmentClosed = { closed ->
@@ -164,12 +219,7 @@ class RecordingService : Service() {
             appVersion = appVersionLabel()
         )
         rec.diagnosticsSnapshot = { DiagnosticsLog.snapshot() }
-        recorder = rec
-        rec.start(sessionDir, deviceName, deviceAddress, options)
-        ContextDataService.start(this, sessionDir)
-
-        link = NunaBleLink(applicationContext, linkListener).also { it.start(deviceAddress) }
-        handler.post(ticker)
+        return rec
     }
 
     private fun stopRecording() {
@@ -182,6 +232,8 @@ class RecordingService : Service() {
         link = null
         recorder?.stop()
         recorder = null
+        currentHourStart = 0L
+        recordingOptions = null
         ContextDataService.stop(this)
         releaseWakeLock()
 
