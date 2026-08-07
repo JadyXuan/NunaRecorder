@@ -94,13 +94,49 @@ Android 9+ 默认禁止明文，**不在白名单里的服务器地址会被系�
 
 ### 2.6 其他容易踩的点
 
-- `UserSettings.userId` 留空时，上传会用 `"mock-user-001"`（`SessionSyncCoordinator` 里的
-  `settings.userId.ifBlank { ... }`）。逐台设备核对，别把参与者数据写到同一个假账号下。
-- 默认 `serverHost=10.0.2.2`、`serverPort=9000`（模拟器回环），装机后必须改。
+- **服务器地址、参与者编号、上传令牌都不再是设置项**（2026-08-06 起）。它们只来自
+  入组码（`enroll/EnrollmentStore`），**App 里没有任何默认值**：没扫过码就是没配置，
+  而不是悄悄退回 `10.0.2.2` 或 `mock-user-001`。那两个默认值正是 07-31 和 08-03
+  两次"采完一整天才发现传不上去"的原因。
+- 二维码只装最小四项（约 197 字节，QR 编码上限 213）；标注网址和网关凭据入组后走
+  `GET /v1/enrollment/config` 用令牌拉取，所以换域名或轮换 SSO 凭据不用重发入组卡。
 - VAD 结果写在 `labels/vad_prelabel.json`，含 `has_speech` / `speech_ratio` / `speech_ms`，
   是**采集期机器证据**，不是权威人工标签，不得用来删音频或跳过 ASC/SED。
 
-## 3. 测试现状（2026-08-01）
+
+## 3. BLE 改动的两条硬规矩（从一次真实事故得出）
+
+2026-08-06 到 08-07，握手连续三天建立不起来，四轮排查都指错方向，最后靠
+「和能采集成功的版本对 diff」才定位。根因是**电量特征的 CCCD 写紧挨着 A002 握手的
+CCCD 写**——Android GATT 同一时刻只允许一个未完成操作，后写的被静默丢弃，
+A002 通知从未启用。
+
+### 5.1 碰 GATT 的改动，一次只做一件事，且单独出一个包
+
+BLE 的失败是**静默的**：操作被丢弃不抛异常、不打日志，只表现为「某个回调没来」。
+当时那个 commit 同时改了电量、manifest 写放大和 `autoConnect` 三件事，
+出问题时无法二分，于是先怀疑并回退了无辜的 `autoConnect`，白花了两轮。
+
+具体到这个设备：**握手完成前不要碰任何特征的 CCCD**。电量、固件版本这类辅助信息
+一律推迟到 A003 订阅成功之后，而且优先用 `read` 而不是 `notify`——
+订阅要写描述符，`read` 不用。
+
+### 5.2 守卫不要静默丢弃
+
+```kotlin
+// 错：日志上表现为"回调根本没来"，制造观测盲区
+if (isStale(g) || !running.get()) return
+
+// 对：先无条件记一笔，再判守卫；丢弃也要写明原因和它属于第几代连接
+log(TAG, "onServicesDiscovered status=$status 共 $count 个 service")
+if (isStale(g)) { log(TAG, "但它属于已被替换的连接，丢弃"); return }
+```
+
+回调是异步且可能来自已被 `close()` 的旧 GATT 实例，所以身份过滤是必需的；
+但过滤掉什么必须留痕，否则排查时分不清「协议栈没回调」和「回调被自己丢了」——
+这两种情况的修法完全不同。
+
+## 4. 测试现状（2026-08-07）
 
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
@@ -130,7 +166,7 @@ Android SDK 里的是桩，round-trip 测试会假失败。
 真机验证不可省的部分：BLE 断连重连、熄屏、切网、长时 soak、权限拒绝路径、
 系统深色模式下的配色。
 
-## 4. 修改本仓库时的完成标准
+## 5. 修改本仓库时的完成标准
 
 1. 改动落在 `feature/egoaudio-data-collection`，不动上游 `main`。
 2. 纯逻辑改动带 JVM 测试；涉及采集生命周期的改动附真机验证记录（时长、机型、Android 版本）。
