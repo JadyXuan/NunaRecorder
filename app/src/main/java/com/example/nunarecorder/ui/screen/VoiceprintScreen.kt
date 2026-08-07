@@ -85,6 +85,7 @@ fun VoiceprintScreen(
             body = VoiceprintSession.READ_SCRIPT,
             active = state.active && state.step == VoiceprintSession.Step.READ,
             elapsedMs = state.elapsedMs,
+            minMs = VoiceprintSession.minDurationFor(VoiceprintSession.Step.READ),
             enabled = linkStreaming && !state.active && !uploading,
             onStart = { onStart(VoiceprintSession.Step.READ) },
             onStop = onStop
@@ -92,12 +93,14 @@ fun VoiceprintScreen(
 
         StepBlock(
             index = 2,
-            title = "用自己的话说约 30 秒",
+            title = "用自己的话讲讲你的一天（至少 1 分钟，想讲多久都行）",
             done = state.freeDone,
             body = VoiceprintSession.FREE_PROMPT +
-                "\n\n（随便讲什么都行，重点是自然说话的语气——朗读和聊天的声学特征差别很大。）",
+                "\n\n（用自然聊天的语气，不要念稿——朗读和聊天的声学特征差别很大。" +
+                "讲满 1 分钟就可以停，但想多讲完全没问题。）",
             active = state.active && state.step == VoiceprintSession.Step.FREE,
             elapsedMs = state.elapsedMs,
+            minMs = VoiceprintSession.minDurationFor(VoiceprintSession.Step.FREE),
             enabled = linkStreaming && !state.active && !uploading,
             onStart = { onStart(VoiceprintSession.Step.FREE) },
             onStop = onStop
@@ -163,6 +166,7 @@ private fun StepBlock(
     done: Boolean,
     active: Boolean,
     elapsedMs: Long,
+    minMs: Long,
     enabled: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit
@@ -198,20 +202,32 @@ private fun StepBlock(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
             )
             if (active) {
-                val progress = (elapsedMs.toFloat() / VoiceprintQuality.TARGET_MS).coerceIn(0f, 1f)
+                // 进度条只画到"最低时长"为止；满了就变成满格，
+                // 因为再往后没有上限——不该让参与者觉得该停了。
+                val reached = elapsedMs >= minMs
                 LinearProgressIndicator(
-                    progress = { progress },
+                    progress = { (elapsedMs.toFloat() / minMs).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    "已录 %.0f 秒 / 目标 %d 秒".format(
-                        elapsedMs / 1000.0, VoiceprintQuality.TARGET_MS / 1000
-                    ),
-                    style = MaterialTheme.typography.labelSmall
+                    if (reached) {
+                        "已录 %.0f 秒 · 时长已够，想继续讲就继续".format(elapsedMs / 1000.0)
+                    } else {
+                        "已录 %.0f 秒 / 至少 %d 秒".format(elapsedMs / 1000.0, minMs / 1000)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (reached) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Spacer(Modifier.height(2.dp))
-                Button(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
-                    Text("录完了，停止")
+                Button(
+                    onClick = onStop,
+                    enabled = reached,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (reached) "讲完了，停止" else "至少还要 %d 秒".format(
+                        ((minMs - elapsedMs) / 1000).coerceAtLeast(0)
+                    ))
                 }
             } else {
                 OutlinedButton(

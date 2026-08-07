@@ -34,7 +34,7 @@ class VoiceprintQualityTest {
 
     @Test
     fun `录 3 秒当场判太短`() {
-        val r = VoiceprintQuality.evaluate(noise(3.0, 2000), sr)
+        val r = VoiceprintQuality.evaluate(noise(3.0, 2000), sr, VoiceprintQuality.MIN_READ_MS)
         assertEquals(VoiceprintQuality.Verdict.TOO_SHORT, r.verdict)
         assertTrue(r.advice, r.advice.contains("重录"))
     }
@@ -70,15 +70,35 @@ class VoiceprintQualityTest {
     }
 
     @Test
-    fun `刚好卡在最短时长边界`() {
+    fun `朗读段卡在 25 秒下限`() {
         assertEquals(
             VoiceprintQuality.Verdict.OK,
-            VoiceprintQuality.evaluate(noise(20.0, 2000), sr).verdict
+            VoiceprintQuality.evaluate(noise(25.0, 2000), sr, VoiceprintQuality.MIN_READ_MS).verdict
         )
         assertEquals(
             VoiceprintQuality.Verdict.TOO_SHORT,
-            VoiceprintQuality.evaluate(noise(19.9, 2000), sr).verdict
+            VoiceprintQuality.evaluate(noise(24.9, 2000), sr, VoiceprintQuality.MIN_READ_MS).verdict
         )
+    }
+
+    /** 自由说话段下限更高：那段内容本身对研究有价值，值得让参与者好好讲。 */
+    @Test
+    fun `自由说话段要求至少 1 分钟`() {
+        assertEquals(
+            VoiceprintQuality.Verdict.TOO_SHORT,
+            VoiceprintQuality.evaluate(noise(45.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
+        )
+        assertEquals(
+            VoiceprintQuality.Verdict.OK,
+            VoiceprintQuality.evaluate(noise(61.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
+        )
+    }
+
+    /** 上不封顶：讲很久不该被判不合格。 */
+    @Test
+    fun `讲满五分钟仍然合格`() {
+        val r = VoiceprintQuality.evaluate(noise(300.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS)
+        assertEquals(r.advice, VoiceprintQuality.Verdict.OK, r.verdict)
     }
 
     @Test

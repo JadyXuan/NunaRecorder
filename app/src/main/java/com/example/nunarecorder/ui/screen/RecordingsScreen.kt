@@ -57,6 +57,8 @@ import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.ui.components.RecordingItem
 import com.example.nunarecorder.ui.LiveRecordingUiStats
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -184,7 +186,12 @@ fun RecordingsScreen(
     }
 
     if (confirmCleanup) {
-        val candidates = remember { SyncedSessionCleaner.listDeletable() }
+        // 对话框里现算一次：数量是刚刚后台算的，体积要遍历文件，放在这里而不是
+        // 每次重组都算
+        var candidates by remember { mutableStateOf<List<SyncedSessionCleaner.Candidate>>(emptyList()) }
+        LaunchedEffect(Unit) {
+            candidates = withContext(Dispatchers.IO) { SyncedSessionCleaner.listDeletable() }
+        }
         val freed = candidates.sumOf { it.bytes }
         AlertDialog(
             onDismissRequest = { confirmCleanup = false },
@@ -389,7 +396,15 @@ fun RecordingsScreen(
             val pendingCount = entries.count {
                 it is RecordingEntry.Session && it.syncStatus?.status != "synced" && !it.isRecordingActive
             }
-            val deletableCount = remember(entries) { SyncedSessionCleaner.listDeletable().size }
+            // 原来是 remember(entries) 里同步算：
+            // ① 它遍历每个会话的全部文件求体积，几百个文件时会卡住主线程；
+            // ② entries 在批量上传后往往没变（还是同一批目录），于是一直显示旧的 0，
+            //    要等下一次列表刷新才变——用户看到的"过一小会才好"就是这个。
+            // 改成后台线程算，并且以上传状态为触发条件。
+            var deletableCount by remember { mutableStateOf(0) }
+            LaunchedEffect(entries, syncState?.phase) {
+                deletableCount = withContext(Dispatchers.IO) { SyncedSessionCleaner.listDeletable().size }
+            }
             Text(
                 "${entries.size} 项 · 待上传 $pendingCount · 可清理 $deletableCount",
                 style = MaterialTheme.typography.labelSmall,

@@ -113,21 +113,70 @@ class RecordingService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                RecordingIntent.save(this, name, address)
                 startRecording(name, address)
             }
             ACTION_STOP -> {
+                // 用户主动停止：清掉意图，否则系统重启服务时会自己又开始录
+                RecordingIntent.clear(this)
                 stopRecording()
                 stopSelf()
             }
             else -> {
-                // START_STICKY 重启时 intent 为 null：进程曾被杀死。
-                // 不自动恢复采集——设备连接状态未知，静默续录会产出无法解释的数据。
-                DiagnosticsLog.log(TAG, "服务被系统重启（intent=null），不自动恢复采集")
-                stopSelf()
-                return START_NOT_STICKY
+                // intent 为 null = 进程曾被系统杀死，START_STICKY 把服务拉了回来。
+                //
+                // 以前这里直接放弃，理由是"设备连接状态未知"。但实际后果是佩戴者
+                // 过一阵子打开 App 发现采集停了，而中间那段时间全丢——对 16 小时
+                // 佩戴来说这比"多一个会话"糟糕得多。
+                //
+                // 现在恢复，但**开一个新会话**而不是假装旧的还在继续：进程死过一次，
+                // 中间缺了多久无从得知，用新会话 + 日志留痕如实表达，
+                // 而不是把一段空白缝进旧会话的时间轴里。
+                val intent2 = RecordingIntent.load(this)
+                if (intent2 == null) {
+                    DiagnosticsLog.log(TAG, "服务被系统重启，但没有待恢复的采集意图，退出")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                DiagnosticsLog.log(
+                    TAG,
+                    "服务被系统重启（进程曾被杀死），以新会话恢复采集 device=${intent2.deviceName}"
+                )
+                startRecording(intent2.deviceName, intent2.deviceAddress)
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * 佩戴者把任务卡片划掉。
+     *
+     * 前台服务本应活下来，但部分 OEM（vivo / 华为 / 小米）会连带杀掉进程。
+     * 这里主动重排一次启动：如果进程真被杀了，`START_STICKY` 加上持久化的采集意图
+     * 会把它拉回来；如果没被杀，这次重排是无害的（`startRecording` 对重复 START 是幂等的）。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (active) {
+            DiagnosticsLog.log(TAG, "任务卡片被划掉，采集继续；已排重启兜底")
+            val restart = Intent(this, RecordingService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_DEVICE_NAME, recordingDeviceName)
+                putExtra(EXTRA_DEVICE_ADDRESS, recordingDeviceAddress)
+            }
+            val pi = PendingIntent.getForegroundService(
+                this, 1, restart,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+            runCatching {
+                (getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager)
+                    .set(
+                        android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        android.os.SystemClock.elapsedRealtime() + 2_000L,
+                        pi
+                    )
+            }
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {

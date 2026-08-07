@@ -34,7 +34,21 @@ object VoiceprintSession {
             "早上出门的时候会经过一条种满树的路，傍晚回来时那里很安静。" +
             "有时候我会听音乐，有时候什么也不做，就看看窗外。"
 
-    const val FREE_PROMPT = "请用自己的话讲讲：你平时一天是怎么过的？"
+    const val FREE_PROMPT =
+        "请用自己的话讲讲：你平时一天是怎么过的？从起床开始，去了哪些地方、" +
+            "做了什么、和谁在一起、什么时候最放松、什么时候最累。" +
+            "讲得越具体越好——这段话既用来认出你的声音，本身也是有价值的背景材料。"
+
+    /** 每段的最低时长；上不封顶 */
+    fun minDurationFor(step: Step): Long = when (step) {
+        Step.READ -> VoiceprintQuality.MIN_READ_MS
+        Step.FREE -> VoiceprintQuality.MIN_FREE_MS
+    }
+
+    fun suggestedDurationFor(step: Step): Long = when (step) {
+        Step.READ -> VoiceprintQuality.SUGGESTED_READ_MS
+        Step.FREE -> VoiceprintQuality.SUGGESTED_FREE_MS
+    }
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
@@ -63,7 +77,7 @@ object VoiceprintSession {
     /** 停止并判定。不合格也保留文件，便于排查。 */
     fun stop(): VoiceprintQuality.Result? {
         val c = capture ?: return null
-        val result = c.finish()
+        val result = c.finish(minDurationFor(_state.value.step))
         val s = _state.value
         _state.value = s.copy(
             active = false,

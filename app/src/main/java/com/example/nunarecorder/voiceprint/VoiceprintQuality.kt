@@ -13,11 +13,27 @@ import kotlin.math.sqrt
  */
 object VoiceprintQuality {
 
-    /** 目标时长，两段各约 30 秒 */
-    const val TARGET_MS = 30_000L
+    /**
+     * 两段的最低时长，**上不封顶**。
+     *
+     * 朗读段全体读同一段文字，读完就够，30 秒是够的。
+     * 自由说话段不一样：用户 2026-08-07 指出「一天怎么过」本身可能包含重要信息，
+     * 值得让参与者好好讲。声纹只需要够长，但**多讲没有坏处**——
+     * 更长的自然语音反而让说话人 embedding 更稳，而讲出来的内容对研究也有价值。
+     * 所以这里只设下限，界面上不设倒计时终点，参与者想讲多久讲多久。
+     */
+    const val MIN_READ_MS = 25_000L
+    const val MIN_FREE_MS = 60_000L
 
-    /** 低于这个就太短，配不出可靠的 embedding */
-    const val MIN_MS = 20_000L
+    /** 建议时长，仅用于界面上的进度提示，不是上限 */
+    const val SUGGESTED_READ_MS = 30_000L
+    const val SUGGESTED_FREE_MS = 120_000L
+
+    @Deprecated("按段区分下限", ReplaceWith("MIN_READ_MS"))
+    const val MIN_MS = 25_000L
+
+    @Deprecated("不再有统一目标时长", ReplaceWith("SUGGESTED_READ_MS"))
+    const val TARGET_MS = 30_000L
 
     /**
      * 静音判定阈值（16-bit 满量程 32768）。
@@ -39,7 +55,8 @@ object VoiceprintQuality {
         val verdict: Verdict,
         val durationMs: Long,
         val rms: Double,
-        val clipRatio: Double
+        val clipRatio: Double,
+        val minDurationMs: Long = MIN_READ_MS
     ) {
         val ok: Boolean get() = verdict == Verdict.OK
 
@@ -48,7 +65,9 @@ object VoiceprintQuality {
             get() = when (verdict) {
                 Verdict.OK -> "录制合格（%.1f 秒）".format(durationMs / 1000.0)
                 Verdict.TOO_SHORT ->
-                    "只有 %.1f 秒，至少需要 %d 秒，请重录".format(durationMs / 1000.0, MIN_MS / 1000)
+                    "只有 %.0f 秒，至少要 %d 秒，请重录".format(
+                        durationMs / 1000.0, minDurationMs / 1000
+                    )
                 Verdict.SILENT ->
                     "几乎没有声音（RMS %.0f），确认设备戴好、麦克风没被挡住，然后重录".format(rms)
                 Verdict.CLIPPED ->
@@ -61,17 +80,29 @@ object VoiceprintQuality {
      *
      * 换算回 16-bit 量纲再判定，这样阈值只有一套——两套阈值迟早会漂开。
      */
-    fun evaluate(pcm: FloatArray, sampleRate: Int = 16_000): Result =
-        evaluate(ShortArray(pcm.size) { (pcm[it] * 32768f).toInt().coerceIn(-32768, 32767).toShort() }, sampleRate)
+    fun evaluate(
+        pcm: FloatArray,
+        sampleRate: Int = 16_000,
+        minDurationMs: Long = MIN_READ_MS
+    ): Result =
+        evaluate(
+            ShortArray(pcm.size) { (pcm[it] * 32768f).toInt().coerceIn(-32768, 32767).toShort() },
+            sampleRate,
+            minDurationMs
+        )
 
     /**
      * @param pcm 16-bit 单声道 PCM
      * @param sampleRate 采样率
      */
-    fun evaluate(pcm: ShortArray, sampleRate: Int = 16_000): Result {
+    fun evaluate(
+        pcm: ShortArray,
+        sampleRate: Int = 16_000,
+        minDurationMs: Long = MIN_READ_MS
+    ): Result {
         val durationMs = if (sampleRate <= 0) 0L else pcm.size * 1000L / sampleRate
         if (pcm.isEmpty()) {
-            return Result(Verdict.TOO_SHORT, 0L, 0.0, 0.0)
+            return Result(Verdict.TOO_SHORT, 0L, 0.0, 0.0, minDurationMs)
         }
 
         var sumSquares = 0.0
@@ -87,11 +118,11 @@ object VoiceprintQuality {
         // 顺序有意为之：太短最容易发生也最容易纠正，先说它；
         // 过载比静音更少见但更具体，放在静音之前。
         val verdict = when {
-            durationMs < MIN_MS -> Verdict.TOO_SHORT
+            durationMs < minDurationMs -> Verdict.TOO_SHORT
             clipRatio > CLIP_RATIO -> Verdict.CLIPPED
             rms < SILENCE_RMS -> Verdict.SILENT
             else -> Verdict.OK
         }
-        return Result(verdict, durationMs, rms, clipRatio)
+        return Result(verdict, durationMs, rms, clipRatio, minDurationMs)
     }
 }

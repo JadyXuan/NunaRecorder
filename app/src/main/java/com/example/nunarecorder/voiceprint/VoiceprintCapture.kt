@@ -35,7 +35,7 @@ class VoiceprintCapture(private val outputFile: File) {
 
     /** 落盘并做质量判定。返回判定结果，文件保留（不合格也留着，便于排查）。 */
     @Synchronized
-    fun finish(): VoiceprintQuality.Result {
+    fun finish(minDurationMs: Long): VoiceprintQuality.Result {
         val bytes = opus.toByteArray()
         outputFile.parentFile?.mkdirs()
         outputFile.writeBytes(bytes)
@@ -44,7 +44,7 @@ class VoiceprintCapture(private val outputFile: File) {
         // 而声纹和采集音频必须是同一个量纲才能比对。
         val pcm = runCatching { OpusToPcmMono.decodeFileToMonoFloat(outputFile) }
             .getOrDefault(FloatArray(0))
-        return VoiceprintQuality.evaluate(pcm)
+        return VoiceprintQuality.evaluate(pcm, minDurationMs = minDurationMs)
     }
 
     @Synchronized
