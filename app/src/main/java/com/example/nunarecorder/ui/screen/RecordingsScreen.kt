@@ -26,6 +26,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -71,6 +73,8 @@ fun RecordingsScreen(
     onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
     /** 一键上传所有未同步会话 */
     onUploadAllPending: () -> Unit = {},
+    /** 一键清理已确认同步的会话，返回清理结果描述 */
+    onDeleteSynced: (onDone: () -> Unit) -> Unit = { it() },
     onMigrateLegacy: (File, MigrateOptions) -> Unit,
     activeRecordingPath: String?,
     liveRecordingStats: LiveRecordingUiStats? = null,
@@ -124,6 +128,7 @@ fun RecordingsScreen(
 
     val migrationState by MigrationCoordinator.state.collectAsState()
     val syncState by SessionSyncCoordinator.state.collectAsState()
+    var confirmCleanup by remember { mutableStateOf(false) }
     LaunchedEffect(migrationState) {
         when (migrationState?.phase) {
             MigrationCoordinator.Phase.DONE, MigrationCoordinator.Phase.ERROR -> {
@@ -176,6 +181,34 @@ fun RecordingsScreen(
             modifier = Modifier.fillMaxSize()
         )
         return
+    }
+
+    if (confirmCleanup) {
+        val candidates = remember { SyncedSessionCleaner.listDeletable() }
+        val freed = candidates.sumOf { it.bytes }
+        AlertDialog(
+            onDismissRequest = { confirmCleanup = false },
+            shape = RoundedCornerShape(16.dp),
+            title = { Text("清理已同步的录音", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "将删除 ${candidates.size} 个**服务器已确认收到**的会话，" +
+                        "释放约 ${LiveRecordingUiStats.formatBytes(freed)}。\n\n" +
+                        "只有 commit 返回 synced、且每个文件都核对过的会话才会被删。" +
+                        "上传失败或只传了一半的一律保留——手机上那份可能是唯一的一份。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteSynced { refreshList() }
+                    confirmCleanup = false
+                }) {
+                    Text("清理", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmCleanup = false }) { Text("取消") } }
+        )
     }
 
     entryToDelete?.let { entry ->
@@ -351,11 +384,35 @@ fun RecordingsScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             Text("录音文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+            // 未同步 / 已同步各有多少，决定两个批量操作是否可点
+            val pendingCount = entries.count {
+                it is RecordingEntry.Session && it.syncStatus?.status != "synced" && !it.isRecordingActive
+            }
+            val deletableCount = remember(entries) { SyncedSessionCleaner.listDeletable().size }
             Text(
-                "${entries.size} 项",
+                "${entries.size} 项 · 待上传 $pendingCount · 可清理 $deletableCount",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f)
             )
+            Spacer(Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onUploadAllPending,
+                    enabled = pendingCount > 0 && syncState?.phase != SessionSyncCoordinator.Phase.SYNCING,
+                    modifier = Modifier.weight(1f)
+                ) { Text("全部上传（$pendingCount）", style = MaterialTheme.typography.labelMedium) }
+
+                OutlinedButton(
+                    onClick = { confirmCleanup = true },
+                    enabled = deletableCount > 0,
+                    modifier = Modifier.weight(1f)
+                ) { Text("清理已同步（$deletableCount）", style = MaterialTheme.typography.labelMedium) }
+            }
             Spacer(Modifier.height(12.dp))
 
             if (entries.isEmpty()) {

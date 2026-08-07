@@ -24,6 +24,7 @@ import com.example.nunarecorder.recording.RecordingStateMachine
 import com.example.nunarecorder.recording.SessionRecorder
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.DiagnosticsLog
+import com.example.nunarecorder.util.PowerProbe
 import com.example.nunarecorder.vad.VadJob
 import com.example.nunarecorder.vad.VadJobQueue
 
@@ -47,6 +48,8 @@ class RecordingService : Service() {
         private const val LOW_BATTERY_NOTIFICATION_ID = 1003
         /** 从高到低；每个阈值只提醒一次 */
         private val LOW_BATTERY_THRESHOLDS = listOf(20, 10, 5)
+        /** 功耗采样周期 */
+        private const val POWER_SAMPLE_PERIOD_MS = 3 * 60_000L
 
         const val ACTION_START = "com.example.nunarecorder.action.START_RECORDING"
         const val ACTION_STOP = "com.example.nunarecorder.action.STOP_RECORDING"
@@ -61,12 +64,21 @@ class RecordingService : Service() {
     private var recorder: SessionRecorder? = null
     private var active = false
     private var lastBatteryWarning = Int.MAX_VALUE
+    private val powerProbe by lazy { PowerProbe(this) }
+    private var lastPowerSampleMs = 0L
 
     private val ticker = object : Runnable {
         override fun run() {
             if (!active) return
             recorder?.tick()
-            RecordingController.publishStats(recorder?.liveStats())
+            val stats = recorder?.liveStats()
+            RecordingController.publishStats(stats)
+            // 功耗采样：分钟级，本身开销可忽略，但没有它就只能凭"感觉有点热"改代码
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastPowerSampleMs >= POWER_SAMPLE_PERIOD_MS) {
+                lastPowerSampleMs = now
+                powerProbe.sample(stats?.receivedPackets ?: 0L, stats?.totalBytes ?: 0L)
+            }
             updateNotification()
             handler.postDelayed(this, TICK_PERIOD_MS)
         }
@@ -120,6 +132,8 @@ class RecordingService : Service() {
         }
         active = true
         lastBatteryWarning = Int.MAX_VALUE
+        powerProbe.reset()
+        lastPowerSampleMs = android.os.SystemClock.elapsedRealtime()
         DiagnosticsLog.log(TAG, "开始录制 device=$deviceName addr=$deviceAddress")
 
         publish(stateMachine.onStartRequested(deviceName, deviceAddress))

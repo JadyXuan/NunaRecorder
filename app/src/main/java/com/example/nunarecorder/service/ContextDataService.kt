@@ -46,7 +46,7 @@ class ContextDataService : Service() {
         private const val MAG_PERIOD_US = 200_000
         /** 缓冲落盘间隔；崩溃最多丢这么久的 context 行 */
         private const val FLUSH_PERIOD_MS = 5_000L
-        private const val CHANNEL_ID = "nuna_context_channel"
+        private const val CHANNEL_ID = "nuna_context_channel_v2"
         private const val NOTIFICATION_ID = 1002
 
         const val ACTION_START = "com.example.nunarecorder.action.START_CONTEXT"
@@ -255,7 +255,7 @@ class ContextDataService : Service() {
             val ch = NotificationChannel(
                 CHANNEL_ID,
                 "Nuna 上下文采集",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_LOW
             ).apply { description = "采集 GPS、IMU 与身体活动状态" }
             mgr.createNotificationChannel(ch)
         }

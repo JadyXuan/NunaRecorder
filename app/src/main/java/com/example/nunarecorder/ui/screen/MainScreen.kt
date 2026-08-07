@@ -449,18 +449,19 @@ private fun LinkHealthPanel(
                     "链路",
                     when {
                         staleMs == null -> "尚未收到任何音频帧"
-                        staleMs < LiveRecordingUiStats.STALE_THRESHOLD_MS ->
-                            "正常 · 最近 ${staleMs / 1000} 秒前收到数据"
+                        // 正常时只说"正常"。原来带秒数，而数据每 20ms 就来一次，
+                        // 那个数字在 0 和 1 之间反复跳，看着像在闪，也没有任何信息量。
+                        // 只有真的停了才需要知道停了多久。
+                        staleMs < LiveRecordingUiStats.STALE_THRESHOLD_MS -> "正常，持续收到数据"
                         else -> "已 ${staleMs / 1000} 秒没有数据"
                     },
                     emphasis = staleMs == null || staleMs >= LiveRecordingUiStats.STALE_THRESHOLD_MS
                 )
                 StatusLine(
                     "完整度",
-                    "%.0f%%（%,d / %,d 个 20ms 包）".format(
+                    "%.0f%%（已收 %,d 个 20ms 包）".format(
                         liveStats.completeness * 100,
-                        liveStats.receivedPackets,
-                        liveStats.expectedPackets
+                        liveStats.receivedPackets
                     ),
                     emphasis = liveStats.expectedPackets > 0 && liveStats.completeness < 0.9f
                 )
@@ -488,7 +489,8 @@ private fun StatusLine(label: String, value: String, emphasis: Boolean = false) 
             style = MaterialTheme.typography.bodySmall,
             fontWeight = if (emphasis) FontWeight.SemiBold else FontWeight.Normal,
             color = if (emphasis) MaterialTheme.colorScheme.error
-            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            modifier = Modifier.weight(1f)
         )
     }
 }

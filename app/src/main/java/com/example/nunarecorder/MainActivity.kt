@@ -260,6 +260,7 @@ class MainActivity : ComponentActivity() {
                             onDeleteEntry = { entry, onDeleted -> deleteRecordingEntry(entry, onDeleted) },
                             onUploadEntry = { entry, withContext, withVad -> uploadRecordingEntry(entry, withContext, withVad) },
                             onUploadAllPending = { uploadAllPending() },
+                            onDeleteSynced = { onDone -> deleteSyncedSessions(onDone) },
                             onMigrateLegacy = { opus, options ->
                                 MigrationCoordinator.start(this@MainActivity, opus, options)
                             },

@@ -16,8 +16,8 @@ import com.example.nunarecorder.R
  */
 object ProcessingNotifications {
 
-    const val VAD_CHANNEL_ID = "nuna_processing_vad"
-    const val MIGRATION_CHANNEL_ID = "nuna_processing_migration"
+    const val VAD_CHANNEL_ID = "nuna_processing_vad_v2"
+    const val MIGRATION_CHANNEL_ID = "nuna_processing_migration_v2"
     const val VAD_NOTIFICATION_ID = 1003
     const val MIGRATION_NOTIFICATION_ID = 1004
 
@@ -28,7 +28,7 @@ object ProcessingNotifications {
             NotificationChannel(
                 VAD_CHANNEL_ID,
                 "VAD 语音分析",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "后台 Silero VAD 预标注进度"
                 setShowBadge(true)
@@ -38,7 +38,7 @@ object ProcessingNotifications {
             NotificationChannel(
                 MIGRATION_CHANNEL_ID,
                 "录音格式迁移",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "后台将旧版录音转为分段格式"
                 setShowBadge(true)
