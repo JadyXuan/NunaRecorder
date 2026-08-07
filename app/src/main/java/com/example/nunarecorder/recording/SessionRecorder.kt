@@ -100,13 +100,20 @@ class SessionRecorder(
         onLog("开始录制 → ${dir.name}")
     }
 
-    fun feed(data: ByteArray): Boolean {
+    /**
+     * Feeds one BLE notification and returns a newly detected integrity issue once.
+     * A damaged segment remains excluded from VAD/automatic upload, while later audio can
+     * continue to be recorded into this and subsequent segments.
+     */
+    fun feed(data: ByteArray): String? {
         if (options.segmentEnabled) {
             maybeRotateSegment()
         }
-        reassembler?.feed(data)
+        val activeReassembler = reassembler
+        activeReassembler?.feed(data)
+        val newIntegrityIssue = activeReassembler?.consumeNewIntegrityIssue()
         maybeFlushManifest()
-        return reassembler?.integrityOk ?: true
+        return newIntegrityIssue
     }
 
     fun stop() {

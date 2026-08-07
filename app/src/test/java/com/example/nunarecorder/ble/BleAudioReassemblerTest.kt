@@ -1,6 +1,7 @@
 package com.example.nunarecorder.ble
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -18,6 +19,8 @@ class BleAudioReassemblerTest {
             reassembler.feed(audioNotification(frameId = 12))
 
             assertFalse(reassembler.integrityOk)
+            assertTrue(reassembler.consumeNewIntegrityIssue()?.contains("期望 11") == true)
+            assertNull(reassembler.consumeNewIntegrityIssue())
             assertTrue(reassembler.close()?.contains("期望 11") == true)
         } finally {
             output.delete()

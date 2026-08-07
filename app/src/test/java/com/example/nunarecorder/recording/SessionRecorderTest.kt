@@ -3,6 +3,8 @@ package com.example.nunarecorder.recording
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -36,7 +38,7 @@ class SessionRecorderTest {
             // No audio was written in the first two windows. The next notification must rotate
             // once, reuse segment index 0, and then be persisted instead of spinning forever.
             monotonicClockMs += 130_000L
-            assertTrue(recorder.feed(audioNotification(frameId = 1)))
+            assertNull(recorder.feed(audioNotification(frameId = 1)))
             recorder.stop()
 
             val manifest = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
@@ -45,6 +47,44 @@ class SessionRecorderTest {
             assertEquals(120_000L, manifest.segments.single().startMs)
             assertEquals(80L, manifest.segments.single().bytes)
             assertEquals(80L, sessionDir.resolve("audio/seg_000.opus").length())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun frameGapMarksSegmentButRecordingContinues() {
+        val root = Files.createTempDirectory("nuna-recorder-gap-test").toFile()
+        val sessionDir = root.resolve("session")
+        val recorder = SessionRecorder(
+            onLog = {},
+            wallClockMs = { 1_000L },
+            monotonicClockMs = { 5_000L },
+            sessionDirFactory = { _, _, _ -> sessionDir }
+        )
+
+        try {
+            recorder.start(
+                deviceName = "Nuna",
+                deviceAddress = "4C:FF:01:A0:01:0C",
+                recordingOptions = RecordingOptions(
+                    segmentEnabled = true,
+                    segmentDurationMs = 60_000L,
+                    autoVadOnRecord = false
+                )
+            )
+
+            assertNull(recorder.feed(audioNotification(frameId = 10)))
+            assertTrue(recorder.feed(audioNotification(frameId = 12))?.contains("期望 11") == true)
+            assertNull(recorder.feed(audioNotification(frameId = 13)))
+            assertTrue(recorder.isRecording)
+            recorder.stop()
+
+            val segment = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
+                .segments.single()
+            assertFalse(segment.integrityOk)
+            assertTrue(segment.integrityIssue?.contains("期望 11") == true)
+            assertEquals(240L, segment.bytes)
         } finally {
             root.deleteRecursively()
         }

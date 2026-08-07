@@ -32,6 +32,7 @@ class BleAudioReassembler(
     private var opusBytesWritten = 0L
     private var expectedFrameId: Int? = null
     private var integrityIssue: String? = null
+    private var pendingIntegrityIssue: String? = null
     val integrityOk: Boolean get() = integrityIssue == null
 
     private data class FrameInfo(
@@ -64,6 +65,14 @@ class BleAudioReassembler(
             markIntegrityError("写入文件失败: ${e.message}")
         }
         return integrityIssue
+    }
+
+    /**
+     * Returns a newly detected integrity issue once. The caller can warn the user without
+     * treating a recoverable BLE gap as a reason to stop the complete recording session.
+     */
+    fun consumeNewIntegrityIssue(): String? = pendingIntegrityIssue.also {
+        pendingIntegrityIssue = null
     }
 
     /**
@@ -204,6 +213,7 @@ class BleAudioReassembler(
     private fun markIntegrityError(message: String) {
         if (integrityIssue == null) {
             integrityIssue = message
+            pendingIntegrityIssue = message
             onLog("[reassembler] 完整性错误：$message")
         }
     }

@@ -1403,13 +1403,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun writeToFile(data: ByteArray) {
-        val integrityOk = sessionRecorder.feed(data)
+        val integrityIssue = sessionRecorder.feed(data)
         updateLiveRecordingStatsUi()
-        if (!integrityOk && recording) {
-            appendLog("检测到 BLE 音频丢帧，本次会话已停止且不会自动上传")
-            runOnUiThread {
-                if (recording) stopRecordingFlow()
-            }
+        if (integrityIssue != null && recording) {
+            appendLog(
+                "检测到 BLE 音频缺口（$integrityIssue）；将继续录制，" +
+                    "当前分段会标记为不完整且不会自动上传"
+            )
         }
     }
 
