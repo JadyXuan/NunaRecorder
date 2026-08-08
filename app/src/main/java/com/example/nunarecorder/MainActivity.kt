@@ -463,14 +463,16 @@ class MainActivity : ComponentActivity() {
                 lifecycleScope.launch {
                     // 二维码装不下标注网址和网关凭据，入组后用令牌向服务端补齐
                     val client = EnrollmentConfigClient(httpClient)
-                    val merged = withContext(Dispatchers.IO) {
-                        client.merge(r.code, client.fetch(r.code))
-                    }
+                    val outcome = withContext(Dispatchers.IO) { client.fetch(r.code) }
+                    val merged = client.merge(r.code, outcome.config)
                     if (merged != r.code) {
                         enrollmentStore.save(merged)
                         viewModel.setEnrollment(merged, false)
                         appendLog("已从服务器补齐标注网址与登录指引")
                     }
+                    // 拿不到就说出为什么。研究员此刻还站在旁边，是唯一能当场补救的时刻；
+                    // 原来这里失败是完全静默的，参与者要到回家登录网站时才发现没有凭据。
+                    outcome.problem?.let { appendLog("没能取到登录凭据：$it") }
                         runServerCheck(merged)
                 }
             }

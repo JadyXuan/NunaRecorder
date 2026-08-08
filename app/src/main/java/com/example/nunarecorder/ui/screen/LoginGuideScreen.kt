@@ -96,8 +96,12 @@ fun LoginGuideScreen(
                 CopyRow("网关账号", sso, onCopy)
                 enrollment.login.ssoPassword?.let { CopyRow("网关密码", it, onCopy, secret = true) }
             } else {
+                // 不要断言原因。这里拿不到凭据有两种可能——入组码本来就没带，
+                // 或者向服务端补齐时被拒了（例如那张码带的是共享令牌）。
+                // 具体原因在主页日志里，界面上只说该怎么办。
                 Text(
-                    "网关账号密码请向研究员索取（入组码里没有带）。",
+                    "网关账号密码请向研究员索取。若研究员说应该有，" +
+                        "请把主页日志里「没能取到登录凭据」那一行给他看。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
