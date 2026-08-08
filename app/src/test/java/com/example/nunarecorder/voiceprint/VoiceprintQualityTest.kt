@@ -83,14 +83,17 @@ class VoiceprintQualityTest {
 
     /** 自由说话段下限更高：那段内容本身对研究有价值，值得让参与者好好讲。 */
     @Test
-    fun `自由说话段要求至少 1 分钟`() {
+    fun `自由说话段要求至少 2 分钟`() {
+        // 2026-08-09 协调者定 120 秒。原来是 60 秒，用户说"30 秒太短，一天怎么过
+        // 本身可能包含重要信息，可以让大家好好讲讲"。
+        assertEquals(120_000L, VoiceprintQuality.MIN_FREE_MS)
         assertEquals(
             VoiceprintQuality.Verdict.TOO_SHORT,
-            VoiceprintQuality.evaluate(noise(45.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
+            VoiceprintQuality.evaluate(noise(119.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
         )
         assertEquals(
             VoiceprintQuality.Verdict.OK,
-            VoiceprintQuality.evaluate(noise(61.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
+            VoiceprintQuality.evaluate(noise(121.0, 2000), sr, VoiceprintQuality.MIN_FREE_MS).verdict
         )
     }
 

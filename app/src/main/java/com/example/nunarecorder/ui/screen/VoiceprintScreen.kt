@@ -54,7 +54,8 @@ fun VoiceprintScreen(
     ) {
         Text("录制声纹", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            "用你正在佩戴的 Nuna 设备录两段各约 30 秒。之后系统会用它自动区分录音里" +
+            "用你正在佩戴的 Nuna 设备录两段：一段朗读约 30 秒，一段自己讲至少 2 分钟" +
+            "（想多讲随时可以，不封顶）。之后系统会用它自动区分录音里" +
                 "哪些是你说的话，你不需要逐分钟去标注说话人。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
