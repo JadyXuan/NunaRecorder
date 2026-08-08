@@ -60,6 +60,13 @@ data class SessionManifest(
      * 错的量纲，如果当时带了版本号，事后一眼就能筛出来。
      */
     var appVersion: String? = null,
+    /**
+     * 设备固件版本，例如 `3.14.5.1813`；读不到时为 null。
+     *
+     * 2026-08-08：一台设备「用不了」，最后靠升级固件（1811 → 1813）解决。
+     * 固件版本会决定一台设备能不能采到数据，而数据里原来看不出来是哪个版本采的。
+     */
+    var deviceFirmware: String? = null,
     /** 参与者主动删除的分段；与 [missingSegments] 是两回事，不能混 */
     var deletedSegments: List<SegmentDeletion> = emptyList()
 ) {
@@ -73,6 +80,7 @@ data class SessionManifest(
         put("segment_duration_ms", segmentDurationMs)
         put("legacy", legacy)
         appVersion?.let { put("app_version", it) }
+        deviceFirmware?.let { put("device_firmware", it) }
         if (sourceOpus != null) put("source_opus", sourceOpus)
         put("audio", JSONObject().apply {
             put("codec", "opus_raw")
@@ -165,6 +173,7 @@ data class SessionManifest(
                 link = LinkHealth.fromJson(j.optJSONObject("link")),
                 missingSegments = missing,
                 appVersion = j.optString("app_version").takeIf { it.isNotEmpty() },
+                deviceFirmware = j.optString("device_firmware").takeIf { it.isNotEmpty() },
                 deletedSegments = deleted
             )
         } catch (_: Exception) {

@@ -211,7 +211,15 @@ class SessionRecorder(
         flushManifestNow()
     }
 
+    /** 设备固件版本；连上之后才读得到，所以是后置写入而不是构造参数。 */
     @Synchronized
+    fun setDeviceFirmware(version: String) {
+        val m = manifest ?: return
+        if (m.deviceFirmware == version) return
+        m.deviceFirmware = version
+        flushManifestNow()
+    }
+
     fun onReconnectAttempt() {
         if (openGapStartMs != null) openGapAttempts++
     }

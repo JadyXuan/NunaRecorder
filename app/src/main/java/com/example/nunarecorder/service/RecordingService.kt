@@ -349,6 +349,10 @@ class RecordingService : Service() {
             }
         }
 
+        override fun onFirmwareRevision(version: String) {
+            handler.post { recorder?.setDeviceFirmware(version) }
+        }
+
         override fun onFatal(reason: String) {
             handler.post {
                 DiagnosticsLog.log(TAG, "致命错误，停止录制：$reason")

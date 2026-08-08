@@ -73,6 +73,9 @@ class NunaBleLink(
         /** 设备电量 0–100；来自标准 BLE 电池服务 */
         fun onBatteryLevel(percent: Int)
 
+        /** 设备固件版本，例如 `3.14.5.1813`；来自标准 Device Information Service */
+        fun onFirmwareRevision(version: String)
+
         /** 无法自行恢复（缺权限、找不到服务），需要人工介入 */
         fun onFatal(reason: String)
     }
@@ -106,6 +109,18 @@ class NunaBleLink(
             UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
         private val BATTERY_LEVEL_UUID: UUID =
             UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
+
+        /**
+         * 标准 Device Information Service。2026-08-06 的 profile dump 里有 `0000180a`。
+         *
+         * 固件版本要进 manifest：2026-08-08 那次 01AF「用不了」，最后是升级固件
+         * （1811 → 1813）解决的。也就是说**固件版本会决定一台设备能不能采到数据**，
+         * 而数据里看不出来是哪个版本采的。
+         */
+        private val DEVICE_INFO_SERVICE_UUID: UUID =
+            UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
+        private val FIRMWARE_REVISION_UUID: UUID =
+            UUID.fromString("00002a26-0000-1000-8000-00805f9b34fb")
 
         /** GATT status → 人能看懂的原因，写进 manifest 的 link.events[].reason */
         fun describeStatus(status: Int): String = when (status) {
@@ -507,6 +522,7 @@ class NunaBleLink(
         ) {
             logStatusPayload(characteristic, value)
             reportBattery(characteristic, value)
+            reportFirmware(characteristic, value)
             handleStatusRead(g, characteristic)
         }
 
@@ -663,10 +679,12 @@ class NunaBleLink(
     private fun scheduleBatteryRead(g: BluetoothGatt) {
         handler.removeCallbacks(batteryPoll)
         batteryGatt = g
+        firmwareRead = false
         handler.postDelayed(batteryPoll, BATTERY_FIRST_READ_DELAY_MS)
     }
 
     private var batteryGatt: BluetoothGatt? = null
+    private var firmwareRead = false
 
     private val batteryPoll = object : Runnable {
         @SuppressLint("MissingPermission")
@@ -675,6 +693,20 @@ class NunaBleLink(
             val g = batteryGatt
             // 只在音频确实在流的时候读，避免和重连期间的操作撞车
             if (g != null && !isStale(g) && subscribed) {
+                // 固件只读一次，且和电量**错开**：GATT 一次只允许一个未完成操作，
+                // 两个 read 挤在一起后发的会被丢弃（这正是 08-06 握手卡死的成因）。
+                if (!firmwareRead) {
+                    val fw = g.getService(DEVICE_INFO_SERVICE_UUID)
+                        ?.getCharacteristic(FIRMWARE_REVISION_UUID)
+                    if (fw != null) {
+                        firmwareRead = true
+                        runCatching { g.readCharacteristic(fw) }
+                        handler.postDelayed(this, BATTERY_POLL_PERIOD_MS)
+                        return
+                    }
+                    firmwareRead = true
+                    log(TAG, "设备没有 Device Information Service，读不到固件版本")
+                }
                 val ch = g.getService(BATTERY_SERVICE_UUID)?.getCharacteristic(BATTERY_LEVEL_UUID)
                 if (ch == null) {
                     log(TAG, "设备没有标准电池服务，电量不可用")
@@ -684,6 +716,14 @@ class NunaBleLink(
             }
             handler.postDelayed(this, BATTERY_POLL_PERIOD_MS)
         }
+    }
+
+    private fun reportFirmware(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        if (characteristic.uuid != FIRMWARE_REVISION_UUID || value.isEmpty()) return
+        val version = String(value, Charsets.UTF_8).trim().trim('\u0000')
+        if (version.isEmpty()) return
+        log(TAG, "设备固件版本 $version")
+        listener.onFirmwareRevision(version)
     }
 
     private fun reportBattery(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
