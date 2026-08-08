@@ -43,8 +43,20 @@ class NunaBleLink(
     private val context: Context,
     private val listener: Listener,
     private val policy: ReconnectPolicy = ReconnectPolicy(),
-    /** 订阅成功后多久没收到音频就判定链路已死 */
+    /**
+     * **出过流之后**停了多久算链路已死。设备正常时 50 帧/秒，停 45 秒一定不对。
+     */
     private val dataTimeoutMs: Long = 45_000L,
+    /**
+     * 订阅成功后到**第一帧**的宽限时间。
+     *
+     * 这个必须比 [dataTimeoutMs] 宽得多。2026-08-08 八台设备实测出现大量
+     * `no_audio_for_50s/57s`，而用户观察到多台设备「需要在充电板配对后连接后才可以采数据」——
+     * 也就是设备连上之后要过一阵才出流。原来这里和"出过流又停了"共用 45 秒，
+     * 于是我们在设备还没准备好时就掐掉重连，而重连又要重走整个握手，
+     * **永远到不了出流那一刻**，成了自我挫败的循环。
+     */
+    private val firstDataGraceMs: Long = 150_000L,
     /** GATT 连上后多久还没订阅到 A003 就重来 */
     private val setupTimeoutMs: Long = 30_000L
 ) {
@@ -122,6 +134,10 @@ class NunaBleLink(
     private var reconnectAttempt = 0
     private var subscribed = false
     private var lastDataAtMs = 0L
+    /** A003 订阅成功的时刻；宽限期从这里算 */
+    private var subscribedAtMs = 0L
+    /** 本次连接是否收到过哪怕一帧 */
+    private var receivedAnyData = false
     private var connectedAtMs = 0L
     private var awaitingStatusRead = false
     private var adapterReceiverRegistered = false
@@ -169,8 +185,14 @@ class NunaBleLink(
             if (!running.get()) return
             val now = System.currentTimeMillis()
             val dead = when {
-                subscribed && lastDataAtMs > 0L && now - lastDataAtMs > dataTimeoutMs ->
-                    "no_audio_for_${(now - lastDataAtMs) / 1000}s"
+                // 订阅了但一帧都还没来：给足宽限，别把还在启动的设备掐掉
+                subscribed && !receivedAnyData && subscribedAtMs > 0L &&
+                    now - subscribedAtMs > firstDataGraceMs ->
+                    "no_first_audio_for_${(now - subscribedAtMs) / 1000}s"
+                // 出过流又停了：这个是真的坏了
+                subscribed && receivedAnyData && lastDataAtMs > 0L &&
+                    now - lastDataAtMs > dataTimeoutMs ->
+                    "audio_stalled_for_${(now - lastDataAtMs) / 1000}s"
                 !subscribed && connectedAtMs > 0L && now - connectedAtMs > setupTimeoutMs ->
                     "subscribe_timeout_${(now - connectedAtMs) / 1000}s"
                 else -> null
@@ -247,6 +269,8 @@ class NunaBleLink(
         awaitingStatusRead = false
         connectedAtMs = 0L
         lastDataAtMs = 0L
+        subscribedAtMs = 0L
+        receivedAnyData = false
         profileDumped = false
         servicesDiscovered = false
         // **一律 autoConnect=false。**
@@ -463,7 +487,9 @@ class NunaBleLink(
                     }
                     RECORDING_CHAR_UUID -> {
                         subscribed = true
-                        lastDataAtMs = System.currentTimeMillis()
+                        subscribedAtMs = System.currentTimeMillis()
+                        receivedAnyData = false
+                        lastDataAtMs = subscribedAtMs
                         // 音频起来了再管电量，且延迟几秒，彻底避开订阅阶段的操作槽
                         scheduleBatteryRead(g)
                         log(TAG, "A003 已订阅，等待音频")
@@ -508,6 +534,10 @@ class NunaBleLink(
                 }
                 BATTERY_LEVEL_UUID -> handler.post { reportBattery(characteristic, value) }
                 RECORDING_CHAR_UUID -> {
+                    if (!receivedAnyData) {
+                        receivedAnyData = true
+                        log(TAG, "收到第一帧音频（订阅后 ${(System.currentTimeMillis() - subscribedAtMs) / 1000} 秒）")
+                    }
                     // 音频走热路径：不 post 到 handler，直接交给上层写文件。
                     // 50 帧/秒 × 一次 post 的排队开销在 16 小时里是笔真钱。
                     lastDataAtMs = System.currentTimeMillis()
