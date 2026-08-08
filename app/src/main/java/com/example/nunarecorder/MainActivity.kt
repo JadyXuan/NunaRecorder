@@ -705,20 +705,32 @@ class MainActivity : ComponentActivity() {
     }
 
     /** 删除已确认同步的会话；未确认的一律不动。 */
+    /**
+     * 清理已同步会话。**整个过程都在 IO 线程**。
+     *
+     * 2026-08-09 用户实测"点击清理已同步（35 条）还发生过一次闪退"——原来这里
+     * 在主线程上先 walk 每个会话的全部文件求体积，再 deleteRecursively 删掉几千个
+     * 文件，主线程一卡死就是 ANR。会话越多越必然，而明天会有 700–900 条。
+     */
     private fun deleteSyncedSessions(onDone: () -> Unit) {
-        val candidates = com.example.nunarecorder.recording.SyncedSessionCleaner.listDeletable()
-        if (candidates.isEmpty()) {
-            appendLog("没有已确认同步的会话可以清理")
+        lifecycleScope.launch {
+            appendLog("正在统计可清理的会话…")
+            val cleaner = com.example.nunarecorder.recording.SyncedSessionCleaner
+            val candidates = withContext(Dispatchers.IO) { cleaner.listDeletable() }
+            if (candidates.isEmpty()) {
+                appendLog("没有已确认同步的会话可以清理")
+                onDone()
+                return@launch
+            }
+            appendLog("正在清理 ${candidates.size} 个已同步会话…")
+            val r = withContext(Dispatchers.IO) { cleaner.deleteAll(candidates) }
+            appendLog(
+                "已清理 ${r.deleted} 个已同步会话，释放 " +
+                    LiveRecordingUiStats.formatBytes(r.freedBytes) +
+                    if (r.failed.isEmpty()) "" else "；跳过 ${r.failed.size} 个"
+            )
             onDone()
-            return
         }
-        val r = com.example.nunarecorder.recording.SyncedSessionCleaner.deleteAll(candidates)
-        appendLog(
-            "已清理 ${r.deleted} 个已同步会话，释放 " +
-                LiveRecordingUiStats.formatBytes(r.freedBytes) +
-                if (r.failed.isEmpty()) "" else "；跳过 ${r.failed.size} 个"
-        )
-        onDone()
     }
 
     /** 两段声纹依次上传；任一失败就停下并保留本地文件。 */

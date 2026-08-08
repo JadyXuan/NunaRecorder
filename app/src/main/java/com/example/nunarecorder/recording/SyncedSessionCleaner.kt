@@ -17,15 +17,27 @@ object SyncedSessionCleaner {
 
     data class Result(val deleted: Int, val freedBytes: Long, val failed: List<String>)
 
-    /** 列出可以安全删除的会话，不做任何改动。 */
+    /** 判据：整体 synced，且每个文件都单独确认过（整体 synced 但个别文件 failed 不能删） */
+    private fun isDeletable(dir: File): Boolean {
+        val status = SessionSyncStatus.load(dir) ?: return false
+        return status.status == "synced" && status.files.all { it.status == "synced" }
+    }
+
+    /**
+     * 只数个数，**不遍历文件求体积**。
+     *
+     * 界面上那行"可清理 N"每次列表变化都要刷新，而求体积要 walk 每个会话的全部文件：
+     * 35 个会话 × 60 段就是两千多次 stat，一天 900 段更多。体积只有确认对话框需要。
+     */
+    fun countDeletable(): Int = SessionPaths.listSessionDirs().count { isDeletable(it) }
+
+    /** 列出可以安全删除的会话（含体积，会遍历文件），不做任何改动。 */
     fun listDeletable(): List<Candidate> =
-        SessionPaths.listSessionDirs().mapNotNull { dir ->
-            val status = SessionSyncStatus.load(dir) ?: return@mapNotNull null
-            if (status.status != "synced") return@mapNotNull null
-            // 再核一遍每个文件都确认过：整体 synced 但个别文件 failed 的话不能删
-            if (status.files.any { it.status != "synced" }) return@mapNotNull null
-            Candidate(dir, dir.name, dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() })
-        }
+        SessionPaths.listSessionDirs()
+            .filter { isDeletable(it) }
+            .map { dir ->
+                Candidate(dir, dir.name, dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() })
+            }
 
     fun deleteAll(candidates: List<Candidate>): Result {
         var deleted = 0

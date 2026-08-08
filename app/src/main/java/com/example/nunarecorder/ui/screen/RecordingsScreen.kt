@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.nunarecorder.audio.SegmentPlaybackState
 import com.example.nunarecorder.data.RecordingEntry
+import com.example.nunarecorder.data.RecordingEntryLoader
 import com.example.nunarecorder.migration.MigrateOptions
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.recording.SegmentDeleter
@@ -99,21 +101,27 @@ fun RecordingsScreen(
     var migrateDoVad by remember { mutableStateOf(true) }
     var migrateSegmentSec by remember { mutableStateOf("60") }
 
-    fun refreshList() {
-        val sessions = SessionPaths.listSessionDirs().mapNotNull { dir ->
-            SessionManifest.load(SessionPaths.manifestFile(dir))?.let {
-                RecordingEntry.Session(dir, it)
-            }
-        }
-        val legacy = SessionPaths.listLegacyOpusFiles().map { RecordingEntry.LegacyOpus(it) }
-        entries = (sessions + legacy).sortedByDescending { it.sortKey }
+    // 列表加载全部走 IO 线程 + 缓存。构造 RecordingEntry.Session 本身要读盘，
+    // 解析 manifest 更贵，而录制期间这个刷新每秒跑一次。
+    val loader = remember { RecordingEntryLoader() }
+    // 每完成一次刷新就 +1，用来触发那些"列表变了才该重算"的后台计算，
+    // 而不是拿 entries 当 key —— entries 每秒都是新对象，会把重算也变成每秒一次。
+    var listRevision by remember { mutableIntStateOf(0) }
+
+    suspend fun reload() {
+        entries = withContext(Dispatchers.IO) { loader.load() }
+        listRevision++
     }
 
-    LaunchedEffect(Unit) { refreshList() }
+    fun refreshList() {
+        scope.launch { reload() }
+    }
+
+    LaunchedEffect(Unit) { reload() }
 
     LaunchedEffect(activeRecordingPath) {
         while (activeRecordingPath != null) {
-            refreshList()
+            reload()
             delay(1000)
         }
     }
@@ -221,9 +229,15 @@ fun RecordingsScreen(
     entryToDelete?.let { entry ->
         // 本地删除以 1 分钟片段为粒度（P1-12）。整会话删除只在片段清空后才允许，
         // 避免一次误触丢掉一整天。
-        val remainingSegments = when (entry) {
-            is RecordingEntry.Session -> SegmentDeleter.remainingSegmentCount(entry.dir)
-            is RecordingEntry.LegacyOpus -> 0
+        // 组合期不读盘：这里要解析整份 manifest，一天 900 段时对话框会卡着才弹出来
+        var remainingSegments by remember(entry) { mutableIntStateOf(-1) }
+        LaunchedEffect(entry) {
+            remainingSegments = withContext(Dispatchers.IO) {
+                when (entry) {
+                    is RecordingEntry.Session -> SegmentDeleter.remainingSegmentCount(entry.dir)
+                    is RecordingEntry.LegacyOpus -> 0
+                }
+            }
         }
         AlertDialog(
             onDismissRequest = { entryToDelete = null },
@@ -233,7 +247,9 @@ fun RecordingsScreen(
                 Text(
                     when (entry) {
                         is RecordingEntry.Session ->
-                            if (remainingSegments > 0) {
+                            if (remainingSegments < 0) {
+                                "正在统计这个会话里还剩多少片段…"
+                            } else if (remainingSegments > 0) {
                                 "这个会话里还有 $remainingSegments 个 1 分钟片段。" +
                                     "整会话删除会一次丢掉一整天的采集，所以请先进入会话按片段删除，" +
                                     "清空后再删除会话本身。"
@@ -402,8 +418,11 @@ fun RecordingsScreen(
             //    要等下一次列表刷新才变——用户看到的"过一小会才好"就是这个。
             // 改成后台线程算，并且以上传状态为触发条件。
             var deletableCount by remember { mutableStateOf(0) }
-            LaunchedEffect(entries, syncState?.phase) {
-                deletableCount = withContext(Dispatchers.IO) { SyncedSessionCleaner.listDeletable().size }
+            LaunchedEffect(listRevision, syncState?.phase) {
+                // countDeletable 不遍历文件求体积——只有对话框需要体积。
+                // 原来这里调 listDeletable()，每个已同步会话都要 walk 一遍全部文件；
+                // 又以 entries 为 key，于是录制期间每秒把几千次 stat 跑一遍。
+                deletableCount = withContext(Dispatchers.IO) { SyncedSessionCleaner.countDeletable() }
             }
             Text(
                 "${entries.size} 项 · 待上传 $pendingCount · 可清理 $deletableCount",
