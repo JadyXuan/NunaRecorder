@@ -76,6 +76,7 @@ fun MainScreen(
     onPairedDeviceClick: (PairedDevice) -> Unit,
     onScanClick: () -> Unit,
     onConnectClick: () -> Unit,
+    onDisconnectClick: () -> Unit,
     onStartRecordingClick: () -> Unit,
     onStopRecordingClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -138,15 +139,19 @@ fun MainScreen(
         )
 
         ElevatedButton(
-            onClick = onConnectClick,
+            onClick = {
+                if (connectionState.canDisconnect) onDisconnectClick() else onConnectClick()
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(48.dp),
             shape = RoundedCornerShape(10.dp),
-            enabled = selectedDeviceAddress != null && connectionState.canConnect
+            enabled = connectionState.canDisconnect ||
+                (selectedDeviceAddress != null && connectionState.canConnect)
         ) {
             Text(
                 when {
+                    connectionState.canDisconnect -> "断开设备"
                     selectedDeviceAddress == null -> "请先在上方选择设备"
                     connectionState.canConnect -> "连接 + 握手"
                     else -> connectionState.title
@@ -179,6 +184,7 @@ fun MainScreen(
                         RecorderConnectionPhase.STARTING_RECORDING -> "正在启动"
                         RecorderConnectionPhase.RECORDING,
                         RecorderConnectionPhase.AUDIO_STALLED -> "录制进行中"
+                        RecorderConnectionPhase.STOPPING_RECORDING -> "正在停止"
                         else -> "开始录制"
                     },
                     fontWeight = FontWeight.Medium

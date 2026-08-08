@@ -11,6 +11,7 @@ enum class RecorderConnectionPhase {
     STARTING_RECORDING,
     RECORDING,
     AUDIO_STALLED,
+    STOPPING_RECORDING,
     DISCONNECTING,
     ERROR
 }
@@ -30,6 +31,7 @@ data class RecorderConnectionState(
             RecorderConnectionPhase.STARTING_RECORDING,
             RecorderConnectionPhase.RECORDING,
             RecorderConnectionPhase.AUDIO_STALLED,
+            RecorderConnectionPhase.STOPPING_RECORDING,
             RecorderConnectionPhase.DISCONNECTING
         )
 
@@ -40,6 +42,7 @@ data class RecorderConnectionState(
     val canStartRecording: Boolean get() = phase == RecorderConnectionPhase.READY
     val canStopRecording: Boolean
         get() = phase == RecorderConnectionPhase.STARTING_RECORDING || isRecording
+    val canDisconnect: Boolean get() = phase == RecorderConnectionPhase.READY
     val canConnect: Boolean
         get() = phase == RecorderConnectionPhase.DISCONNECTED || phase == RecorderConnectionPhase.ERROR
     val canScanOrSelect: Boolean get() = canConnect
@@ -56,7 +59,8 @@ data class RecorderConnectionState(
             RecorderConnectionPhase.STARTING_RECORDING -> "正在启动录制"
             RecorderConnectionPhase.RECORDING -> "正在录制"
             RecorderConnectionPhase.AUDIO_STALLED -> "音频流停滞"
-            RecorderConnectionPhase.DISCONNECTING -> "正在停止"
+            RecorderConnectionPhase.STOPPING_RECORDING -> "正在停止录制"
+            RecorderConnectionPhase.DISCONNECTING -> "正在断开"
             RecorderConnectionPhase.ERROR -> "连接失败"
         }
 }
@@ -75,7 +79,10 @@ sealed interface RecorderConnectionEvent {
     data class RecordingStartFailed(val reason: String) : RecorderConnectionEvent
     data object AudioStalled : RecorderConnectionEvent
     data object AudioRecovered : RecorderConnectionEvent
+    data class RecordingRecoveryStarted(val reason: String) : RecorderConnectionEvent
     data object StopRequested : RecorderConnectionEvent
+    data class RecordingStopped(val detail: String) : RecorderConnectionEvent
+    data object DisconnectRequested : RecorderConnectionEvent
     data object Disconnected : RecorderConnectionEvent
     data class ConnectionFailed(val reason: String) : RecorderConnectionEvent
 }
@@ -178,9 +185,24 @@ object RecorderConnectionReducer {
                 if (current.phase != RecorderConnectionPhase.AUDIO_STALLED) rejected()
                 else accepted(RecorderConnectionPhase.RECORDING, "音频流已恢复")
             }
+            is RecorderConnectionEvent.RecordingRecoveryStarted -> {
+                if (current.phase != RecorderConnectionPhase.STARTING_RECORDING) rejected()
+                else accepted(
+                    RecorderConnectionPhase.STOPPING_RECORDING,
+                    "${event.reason}；正在复位设备录音状态"
+                )
+            }
             RecorderConnectionEvent.StopRequested -> {
                 if (!current.canStopRecording) rejected()
-                else accepted(RecorderConnectionPhase.DISCONNECTING, "正在封口录音并断开设备")
+                else accepted(RecorderConnectionPhase.STOPPING_RECORDING, "正在停止设备录音")
+            }
+            is RecorderConnectionEvent.RecordingStopped -> {
+                if (current.phase != RecorderConnectionPhase.STOPPING_RECORDING) rejected()
+                else accepted(RecorderConnectionPhase.READY, event.detail)
+            }
+            RecorderConnectionEvent.DisconnectRequested -> {
+                if (!current.canDisconnect) rejected()
+                else accepted(RecorderConnectionPhase.DISCONNECTING, "正在断开设备")
             }
             RecorderConnectionEvent.Disconnected -> accepted(
                 RecorderConnectionPhase.DISCONNECTED,

@@ -20,14 +20,26 @@ sealed interface HandshakeEvent {
     data class Failed(val reason: String) : HandshakeEvent
 }
 
+enum class RecordingControlAction {
+    START,
+    STOP
+}
+
 sealed interface RecordingControlEvent {
-    data class Accepted(val commandId: Int) : RecordingControlEvent
+    data class Accepted(
+        val commandId: Int,
+        val action: RecordingControlAction
+    ) : RecordingControlEvent
     data class Rejected(
         val commandId: Int,
+        val action: RecordingControlAction,
         val status: Int,
         val errorCode: Int?
     ) : RecordingControlEvent
-    data class TimedOut(val commandId: Int) : RecordingControlEvent
+    data class TimedOut(
+        val commandId: Int,
+        val action: RecordingControlAction
+    ) : RecordingControlEvent
 }
 
 class HandshakeClient(
@@ -45,6 +57,7 @@ class HandshakeClient(
     private var nextCommandId: Int = 0x2d01
     private var pendingSetTimeCommandId: Int? = null
     private var pendingRecordingCommandId: Int? = null
+    private var pendingRecordingAction: RecordingControlAction? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var handshakeGeneration = 0
     private var timeoutRunnable: Runnable? = null
@@ -103,28 +116,44 @@ class HandshakeClient(
      * Legacy/XIAO devices may already stream merely because A003 was subscribed; callers
      * should therefore treat the first audio notification as authoritative.
      */
-    fun requestRecordingStart(gatt: BluetoothGatt): Boolean {
+    fun requestRecordingStart(gatt: BluetoothGatt): Boolean =
+        requestRecordingControl(gatt, RecordingControlAction.START)
+
+    fun requestRecordingStop(gatt: BluetoothGatt): Boolean =
+        requestRecordingControl(gatt, RecordingControlAction.STOP)
+
+    private fun requestRecordingControl(
+        gatt: BluetoothGatt,
+        action: RecordingControlAction
+    ): Boolean {
         cancelPendingRecordingControl()
         val commandId = nextCommandId()
-        val data = RecordingControlProtocol.recordingCommandData(commandId, enabled = true)
+        val enabled = action == RecordingControlAction.START
+        val data = RecordingControlProtocol.recordingCommandData(commandId, enabled = enabled)
         val packet = MessagePacker.pack(MessageType.CONTROL_REQUEST, data)
         pendingRecordingCommandId = commandId
-        log("REC_CTRL: send START commandId=$commandId packet=${packet.toHex()}")
+        pendingRecordingAction = action
+        log("REC_CTRL: send $action commandId=$commandId packet=${packet.toHex()}")
 
         if (!writeToTransferChar(gatt, packet)) {
             pendingRecordingCommandId = null
-            log("REC_CTRL: START write was not queued")
+            pendingRecordingAction = null
+            log("REC_CTRL: $action write was not queued")
             return false
         }
 
         recordingTimeoutRunnable = Runnable {
             if (pendingRecordingCommandId == commandId) {
                 pendingRecordingCommandId = null
+                pendingRecordingAction = null
                 recordingTimeoutRunnable = null
-                log("REC_CTRL: response timeout commandId=$commandId")
-                onRecordingControlEvent(RecordingControlEvent.TimedOut(commandId))
+                log("REC_CTRL: $action response timeout commandId=$commandId")
+                onRecordingControlEvent(RecordingControlEvent.TimedOut(commandId, action))
             }
-        }.also { handler.postDelayed(it, 4_000L) }
+        }.also {
+            val timeoutMs = if (action == RecordingControlAction.STOP) 1_500L else 4_000L
+            handler.postDelayed(it, timeoutMs)
+        }
         return true
     }
 
@@ -132,6 +161,7 @@ class HandshakeClient(
         recordingTimeoutRunnable?.let(handler::removeCallbacks)
         recordingTimeoutRunnable = null
         pendingRecordingCommandId = null
+        pendingRecordingAction = null
     }
 
     fun onNotification(
@@ -210,15 +240,18 @@ class HandshakeClient(
         )
 
         if (requestId == pendingRecordingCommandId) {
+            val action = pendingRecordingAction ?: RecordingControlAction.START
             pendingRecordingCommandId = null
+            pendingRecordingAction = null
             recordingTimeoutRunnable?.let(handler::removeCallbacks)
             recordingTimeoutRunnable = null
             if (statusCode == 0) {
-                onRecordingControlEvent(RecordingControlEvent.Accepted(requestId))
+                onRecordingControlEvent(RecordingControlEvent.Accepted(requestId, action))
             } else {
                 onRecordingControlEvent(
                     RecordingControlEvent.Rejected(
                         commandId = requestId,
+                        action = action,
                         status = statusCode,
                         errorCode = response.errorCode
                     )

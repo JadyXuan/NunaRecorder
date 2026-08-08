@@ -79,6 +79,54 @@ class RecorderConnectionReducerTest {
         assertEquals(RecorderConnectionPhase.RECORDING, state.phase)
     }
 
+    @Test
+    fun stoppingRecordingReturnsToReadyWithoutDisconnecting() {
+        var state = readyState()
+        state = next(state, RecorderConnectionEvent.RecordingStartRequested)
+        state = next(state, RecorderConnectionEvent.RecordingStarted)
+
+        state = next(state, RecorderConnectionEvent.StopRequested)
+        assertEquals(RecorderConnectionPhase.STOPPING_RECORDING, state.phase)
+        assertTrue(state.isConnected)
+        assertFalse(state.canStartRecording)
+        assertFalse(state.canDisconnect)
+
+        state = next(
+            state,
+            RecorderConnectionEvent.RecordingStopped("录制已停止，设备保持连接")
+        )
+        assertEquals(RecorderConnectionPhase.READY, state.phase)
+        assertTrue(state.isConnected)
+        assertTrue(state.canStartRecording)
+        assertTrue(state.canDisconnect)
+    }
+
+    @Test
+    fun disconnectIsSeparateFromStop() {
+        var state = readyState()
+
+        state = next(state, RecorderConnectionEvent.DisconnectRequested)
+
+        assertEquals(RecorderConnectionPhase.DISCONNECTING, state.phase)
+        assertFalse(state.canStartRecording)
+        assertFalse(state.canDisconnect)
+    }
+
+    @Test
+    fun failedStartCanEnterRecoveryStopBeforeReturningReady() {
+        var state = readyState()
+        state = next(state, RecorderConnectionEvent.RecordingStartRequested)
+
+        state = next(
+            state,
+            RecorderConnectionEvent.RecordingRecoveryStarted("未收到音频")
+        )
+        assertEquals(RecorderConnectionPhase.STOPPING_RECORDING, state.phase)
+
+        state = next(state, RecorderConnectionEvent.RecordingStopped("已复位"))
+        assertEquals(RecorderConnectionPhase.READY, state.phase)
+    }
+
     private fun readyState(): RecorderConnectionState {
         var state = RecorderConnectionState()
         state = next(state, RecorderConnectionEvent.ConnectRequested("Nuna"))

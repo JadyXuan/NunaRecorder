@@ -46,6 +46,7 @@ import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.ble.HandshakeClient
 import com.example.nunarecorder.ble.HandshakeEvent
 import com.example.nunarecorder.ble.RecordingControlEvent
+import com.example.nunarecorder.ble.RecordingControlAction
 import com.example.nunarecorder.ble.BatteryTelemetry
 import com.example.nunarecorder.ble.DevicePowerState
 import com.example.nunarecorder.ble.NunaProtocolInspector
@@ -99,6 +100,8 @@ class MainActivity : ComponentActivity() {
         private const val PRODUCT_AUDIO_MIN_ATT_MTU = 504
         private const val MTU_NEGOTIATION_TIMEOUT_MS = 2_000L
         private const val FIRST_AUDIO_TIMEOUT_MS = 8_000L
+        private const val STOP_CONFIRM_GRACE_MS = 600L
+        private const val STOP_OVERALL_TIMEOUT_MS = 2_500L
         private const val MAX_EARLY_AUDIO_PACKETS = 32
     }
 
@@ -129,6 +132,13 @@ class MainActivity : ComponentActivity() {
     private var recordingStartCommandAttempted = false
     private var recordingControlStatus = "idle"
     private val earlyAudioPackets = ArrayDeque<ByteArray>()
+    private var deviceReportedRecording: Boolean? = null
+    private var recordingStopTimeout: Runnable? = null
+    private var recordingStopFinalizeStarted = false
+    private var pendingAudioDisableForStop = false
+    private var recordingStopDetail = "录制已停止，设备保持连接"
+    private var pendingStartAfterStop = false
+    private var recordingStartRecoveryAttempted = false
 
     // 可选电量能力：XIAO 的 A004 优先，标准 BAS 作为原 Nuna 回退。
     private val batteryReadCandidates = ArrayDeque<BluetoothGattCharacteristic>()
@@ -345,6 +355,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onScanClick = { startScanForList() },
                                 onConnectClick = { startConnectFlow() },
+                                onDisconnectClick = { disconnectFromUi() },
                                 onStartRecordingClick = { startRecordingOnly() },
                                 onStopRecordingClick = { stopRecordingFlow() },
                                 modifier = Modifier.fillMaxSize()
@@ -571,46 +582,70 @@ class MainActivity : ComponentActivity() {
     private fun handleRecordingControlEvent(event: RecordingControlEvent) {
         when (event) {
             is RecordingControlEvent.Accepted -> {
-                recordingControlStatus = "accepted"
+                recordingControlStatus = "${event.action.name.lowercase()}_accepted"
                 diagnosticLogger.log(
                     "recording_control_accepted",
-                    mapOf("command_id" to event.commandId, "mtu" to negotiatedMtu)
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase(),
+                        "mtu" to negotiatedMtu
+                    )
                 )
-                appendDebug("设备已接受录音命令 (cmdId=${event.commandId})")
-                if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING) {
-                    transitionConnection(RecorderConnectionEvent.RecordingTransportReady)
+                if (event.action == RecordingControlAction.START) {
+                    appendDebug("设备已接受开始录音命令 (cmdId=${event.commandId})")
+                    if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING) {
+                        transitionConnection(RecorderConnectionEvent.RecordingTransportReady)
+                    }
+                } else {
+                    appendDebug("设备已接受停止录音命令 (cmdId=${event.commandId})")
+                    if (deviceReportedRecording == false) {
+                        beginStopTransportFinalize("设备已确认停止录音，GATT 保持连接")
+                    } else {
+                        scheduleStopFinalizeGrace("停止命令已确认，GATT 保持连接")
+                    }
                 }
             }
             is RecordingControlEvent.Rejected -> {
-                recordingControlStatus = "rejected"
+                recordingControlStatus = "${event.action.name.lowercase()}_rejected"
                 diagnosticLogger.log(
                     "recording_control_rejected",
                     mapOf(
                         "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase(),
                         "status" to event.status,
                         "error_code" to event.errorCode,
                         "received_audio" to hasReceivedAudioPacket
                     )
                 )
-                val reason = "设备拒绝录音命令 (status=${event.status}, error=${event.errorCode ?: "未知"})"
-                if (hasReceivedAudioPacket) {
+                val reason = "设备拒绝${if (event.action == RecordingControlAction.START) "开始" else "停止"}" +
+                    "录音命令 (status=${event.status}, error=${event.errorCode ?: "未知"})"
+                if (event.action == RecordingControlAction.STOP) {
+                    appendDebug("$reason；按兼容模式关闭音频通知")
+                    beginStopTransportFinalize("停止反馈被拒绝，已关闭音频通道并保持连接")
+                } else if (hasReceivedAudioPacket) {
                     // Legacy/XIAO behavior: CCCD subscription itself may already have started audio.
                     appendDebug("$reason；已有音频流，按兼容模式继续")
                 } else {
-                    failRecordingStartup(reason)
+                    recoverFailedRecordingStart(reason)
                 }
             }
             is RecordingControlEvent.TimedOut -> {
-                recordingControlStatus = "timeout"
+                recordingControlStatus = "${event.action.name.lowercase()}_timeout"
                 diagnosticLogger.log(
                     "recording_control_timeout",
                     mapOf(
                         "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase(),
                         "mtu" to negotiatedMtu,
                         "received_audio" to hasReceivedAudioPacket
                     )
                 )
-                appendDebug("录音控制反馈超时；继续等待兼容设备的首个音频包")
+                if (event.action == RecordingControlAction.STOP) {
+                    appendDebug("停止录音反馈超时；按兼容模式关闭音频通知")
+                    beginStopTransportFinalize("停止反馈超时，已关闭音频通道并保持连接")
+                } else {
+                    appendDebug("开始录音反馈超时；继续等待兼容设备的首个音频包")
+                }
             }
         }
     }
@@ -622,7 +657,7 @@ class MainActivity : ComponentActivity() {
             if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING &&
                 !hasReceivedAudioPacket
             ) {
-                failRecordingStartup(
+                recoverFailedRecordingStart(
                     "${FIRST_AUDIO_TIMEOUT_MS / 1000} 秒内未收到音频" +
                         "（MTU=$negotiatedMtu，控制=$recordingControlStatus）"
                 )
@@ -662,6 +697,131 @@ class MainActivity : ComponentActivity() {
         disableAudioNotificationsBestEffort()
         transitionConnection(RecorderConnectionEvent.RecordingStartFailed(reason))
         appendLog("录制启动失败：$reason")
+    }
+
+    private fun recoverFailedRecordingStart(reason: String) {
+        if (viewModel.connectionState.value.phase != RecorderConnectionPhase.STARTING_RECORDING) return
+        val retry = !recordingStartRecoveryAttempted
+        recordingStartRecoveryAttempted = true
+        pendingStartAfterStop = retry
+        transitionConnection(RecorderConnectionEvent.RecordingRecoveryStarted(reason))
+        appendLog(
+            if (retry) "录制启动异常：$reason；正在停止设备并自动重试一次"
+            else "录制启动异常：$reason；正在停止设备并恢复就绪状态"
+        )
+        beginRecordingStop(
+            detail = if (retry) "设备录音状态已复位，准备自动重试" else "设备录音状态已复位，可以重试"
+        )
+    }
+
+    private fun beginRecordingStop(detail: String) {
+        recordingStopDetail = detail
+        recordingStopFinalizeStarted = false
+        pendingAudioDisableForStop = false
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        cancelFirstAudioTimeout()
+        handshakeClient.cancelPendingRecordingControl()
+        earlyAudioPackets.clear()
+
+        val activeGatt = gatt
+        if (activeGatt == null) {
+            closeLocalRecordingForStop()
+            pendingStartAfterStop = false
+            transitionConnection(RecorderConnectionEvent.ConnectionFailed("停止录音时 BLE 已断开"))
+            return
+        }
+
+        val queued = handshakeClient.requestRecordingStop(activeGatt)
+        diagnosticLogger.log(
+            "recording_stop_requested",
+            mapOf(
+                "queued" to queued,
+                "device_reported_recording" to deviceReportedRecording,
+                "retry_after_stop" to pendingStartAfterStop
+            )
+        )
+        if (!queued) {
+            appendDebug("停止录音命令未入队；按兼容模式关闭 A003")
+            beginStopTransportFinalize("停止命令未入队，已关闭音频通道并保持连接")
+            return
+        }
+
+        recordingStopTimeout = Runnable {
+            recordingStopTimeout = null
+            beginStopTransportFinalize("停止确认超时，已关闭音频通道并保持连接")
+        }.also { diagnosticHandler.postDelayed(it, STOP_OVERALL_TIMEOUT_MS) }
+    }
+
+    private fun scheduleStopFinalizeGrace(detail: String) {
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = Runnable {
+            recordingStopTimeout = null
+            beginStopTransportFinalize(detail)
+        }.also { diagnosticHandler.postDelayed(it, STOP_CONFIRM_GRACE_MS) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun beginStopTransportFinalize(detail: String) {
+        if (recordingStopFinalizeStarted ||
+            viewModel.connectionState.value.phase != RecorderConnectionPhase.STOPPING_RECORDING
+        ) return
+        recordingStopFinalizeStarted = true
+        recordingStopDetail = detail
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = null
+        handshakeClient.cancelPendingRecordingControl()
+        closeLocalRecordingForStop()
+
+        val activeGatt = gatt
+        val characteristic = activeGatt?.getService(SERVICE_UUID)?.getCharacteristic(CHAR_UUID)
+        if (activeGatt == null || characteristic == null) {
+            finalizeRecordingStop()
+            return
+        }
+
+        activeGatt.setCharacteristicNotification(characteristic, false)
+        val cccd = characteristic.getDescriptor(CCCD_UUID)
+        if (cccd == null) {
+            finalizeRecordingStop()
+            return
+        }
+        cccd.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+        pendingAudioDisableForStop = true
+        if (!activeGatt.writeDescriptor(cccd)) {
+            pendingAudioDisableForStop = false
+            finalizeRecordingStop()
+        }
+    }
+
+    private fun closeLocalRecordingForStop() {
+        stopRecordingDiagnostics("recording_stop_completed")
+        recording = false
+        if (sessionRecorder.isRecording) sessionRecorder.stop()
+        viewModel.setActiveRecordingPath(null)
+        com.example.nunarecorder.service.ContextDataService.stop(this)
+    }
+
+    private fun finalizeRecordingStop() {
+        if (viewModel.connectionState.value.phase != RecorderConnectionPhase.STOPPING_RECORDING) return
+        pendingAudioDisableForStop = false
+        recordingStopFinalizeStarted = false
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = null
+        val retry = pendingStartAfterStop
+        pendingStartAfterStop = false
+        transitionConnection(RecorderConnectionEvent.RecordingStopped(recordingStopDetail))
+        appendLog(recordingStopDetail)
+        diagnosticLogger.log(
+            "recording_stop_completed",
+            mapOf(
+                "detail" to recordingStopDetail,
+                "gatt_kept_connected" to (gatt != null),
+                "automatic_retry" to retry
+            )
+        )
+        if (retry && gatt != null) {
+            diagnosticHandler.postDelayed({ startRecordingOnly(isAutomaticRetry = true) }, 350L)
+        }
     }
 
     private fun resetStreamingStats() {
@@ -759,7 +919,7 @@ class MainActivity : ComponentActivity() {
      * 点击"Start Recording"时调用：
      * 在已经连接的情况下，对指定 service/char 开启 notify 并开始写文件。
      */
-    private fun startRecordingOnly() {
+    private fun startRecordingOnly(isAutomaticRetry: Boolean = false) {
         if (!transitionConnectionNow(RecorderConnectionEvent.RecordingStartRequested)) {
             appendLog("设备尚未完成握手，暂时不能开始录制")
             return
@@ -769,8 +929,33 @@ class MainActivity : ComponentActivity() {
             appendLog("BLE 连接已丢失，请重新连接")
             return
         }
+        if (!isAutomaticRetry) recordingStartRecoveryAttempted = false
         resetStreamingStats()
         appendLog("准备开始录制…")
+
+        if (!isAutomaticRetry && deviceReportedRecording == null) {
+            appendDebug("正在等待 A001 初始录音状态，避免接入残留音频流…")
+            diagnosticHandler.postDelayed({
+                if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING) {
+                    continueRecordingStartAfterStatusCheck()
+                }
+            }, 700L)
+            return
+        }
+        continueRecordingStartAfterStatusCheck()
+    }
+
+    private fun continueRecordingStartAfterStatusCheck() {
+        if (deviceReportedRecording == true && !recordingStartRecoveryAttempted) {
+            recordingStartRecoveryAttempted = true
+            pendingStartAfterStop = true
+            transitionConnection(
+                RecorderConnectionEvent.RecordingRecoveryStarted("设备报告仍处于录音状态")
+            )
+            appendLog("设备仍处于录音状态，先发送停止命令清理旧会话")
+            beginRecordingStop("旧录音状态已清理，准备开始新录音")
+            return
+        }
 
         val g = gatt ?: return
         val service = g.getService(SERVICE_UUID)
@@ -813,18 +998,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopRecordingFlow() {
-        transitionConnectionNow(RecorderConnectionEvent.StopRequested)
+        if (!transitionConnectionNow(RecorderConnectionEvent.StopRequested)) return
         appendLog("停止录制（共 ${totalPacketCount} 包 · ${formatBytes(totalBytesCount)}）")
+        pendingStartAfterStop = false
+        beginRecordingStop("录制已停止，设备保持连接")
+    }
 
-        stopRecordingDiagnostics("user_or_activity_stop")
-        cancelFirstAudioTimeout()
-        handshakeClient.cancelPendingRecordingControl()
-        earlyAudioPackets.clear()
-        recording = false
-        sessionRecorder.stop()
-        viewModel.setActiveRecordingPath(null)
-        com.example.nunarecorder.service.ContextDataService.stop(this)
-
+    private fun disconnectFromUi() {
+        if (!transitionConnectionNow(RecorderConnectionEvent.DisconnectRequested)) return
+        appendLog("正在断开设备…")
         stopScan()
         stopNotifyAndDisconnect()
     }
@@ -1178,6 +1360,7 @@ class MainActivity : ComponentActivity() {
                     .equals(ProtoConfig.Service.STATUS_CHAR_UUID, ignoreCase = true)
             ) {
                 logProtocolPacket("a001_notify", value, includeStatus = true)
+                handleStatusNotification(value)
             } else if (characteristic.uuid.toString()
                     .equals(ProtoConfig.Service.TRANSFER_CHAR_UUID, ignoreCase = true)
             ) {
@@ -1303,7 +1486,15 @@ class MainActivity : ComponentActivity() {
             }
 
             if (descriptor.uuid == CCCD_UUID && descriptor.characteristic.uuid == CHAR_UUID) {
-                if (status == BluetoothGatt.GATT_SUCCESS &&
+                if (pendingAudioDisableForStop &&
+                    viewModel.connectionState.value.phase == RecorderConnectionPhase.STOPPING_RECORDING
+                ) {
+                    pendingAudioDisableForStop = false
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        recordingStopDetail += "（A003 通知关闭反馈=$status）"
+                    }
+                    finalizeRecordingStop()
+                } else if (status == BluetoothGatt.GATT_SUCCESS &&
                     viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING
                 ) {
                     if (openFileForRecording()) {
@@ -1380,6 +1571,13 @@ class MainActivity : ComponentActivity() {
         statusNotificationSetupAttempted = false
         statusNotificationUuid = null
         protocolAudioPacketCount = 0L
+        deviceReportedRecording = null
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = null
+        recordingStopFinalizeStarted = false
+        pendingAudioDisableForStop = false
+        pendingStartAfterStop = false
+        recordingStartRecoveryAttempted = false
         setDevicePowerState(state)
     }
 
@@ -1466,6 +1664,25 @@ class MainActivity : ComponentActivity() {
                     "message_type" to "0x${envelope.type.toString(16).padStart(2, '0')}"
                 )
             )
+        }
+    }
+
+    private fun handleStatusNotification(raw: ByteArray) {
+        val envelope = NunaProtocolInspector.parseEnvelope(raw) ?: return
+        if (envelope.type != 0x11 || envelope.data.isEmpty()) return
+        val reportedRecording = (envelope.data[0].toInt() and 0xFF) == 1
+        deviceReportedRecording = reportedRecording
+        diagnosticLogger.log(
+            "device_recording_status",
+            mapOf(
+                "recording" to reportedRecording,
+                "app_phase" to viewModel.connectionState.value.phase.name
+            )
+        )
+        if (!reportedRecording &&
+            viewModel.connectionState.value.phase == RecorderConnectionPhase.STOPPING_RECORDING
+        ) {
+            beginStopTransportFinalize("设备已确认停止录音，GATT 保持连接")
         }
     }
 
@@ -1792,7 +2009,9 @@ class MainActivity : ComponentActivity() {
         val phase = viewModel.connectionState.value.phase
         if (phase != RecorderConnectionPhase.STARTING_RECORDING &&
             phase != RecorderConnectionPhase.RECORDING &&
-            phase != RecorderConnectionPhase.AUDIO_STALLED
+            phase != RecorderConnectionPhase.AUDIO_STALLED &&
+            !(phase == RecorderConnectionPhase.STOPPING_RECORDING &&
+                hasReceivedAudioPacket && sessionRecorder.isRecording)
         ) {
             diagnosticLogger.log(
                 "audio_notification_ignored",
@@ -1853,6 +2072,9 @@ class MainActivity : ComponentActivity() {
 
         if (firstPacket) {
             cancelFirstAudioTimeout()
+            recordingStartRecoveryAttempted = false
+            pendingStartAfterStop = false
+            deviceReportedRecording = true
             recording = true
             startRecordingDiagnostics()
             transitionConnection(RecorderConnectionEvent.RecordingStarted)
@@ -2046,13 +2268,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         diagnosticLogger.log("activity_destroyed", mapOf("recording" to recording))
-        super.onDestroy()
         segmentPlayer.stop()
-        stopRecordingFlow()
+        cancelFirstAudioTimeout()
+        recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = null
+        stopRecordingDiagnostics("activity_destroyed")
+        recording = false
+        if (sessionRecorder.isRecording) sessionRecorder.stop()
+        viewModel.setActiveRecordingPath(null)
+        com.example.nunarecorder.service.ContextDataService.stop(this)
+        if (gatt != null) stopNotifyAndDisconnect()
         // DEBUG_WEARABLE_START
         wearableDebugService?.stopRecording()
         wearableDebugService = null
         // DEBUG_WEARABLE_END
+        super.onDestroy()
     }
 
     // DEBUG_WEARABLE_START
