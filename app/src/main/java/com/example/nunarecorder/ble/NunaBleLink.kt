@@ -701,7 +701,10 @@ class NunaBleLink(
                     if (fw != null) {
                         firmwareRead = true
                         runCatching { g.readCharacteristic(fw) }
-                        handler.postDelayed(this, BATTERY_POLL_PERIOD_MS)
+                        // 错开一轮就够了，**不能**等满一个轮询周期：那会把首次电量
+                        // 从 5 秒推到 5 分零 5 秒。错峰是为了让上一个 read 先完成，
+                        // 不是为了省电——5 秒远超一次 GATT read 的耗时。
+                        handler.postDelayed(this, BATTERY_FIRST_READ_DELAY_MS)
                         return
                     }
                     firmwareRead = true
