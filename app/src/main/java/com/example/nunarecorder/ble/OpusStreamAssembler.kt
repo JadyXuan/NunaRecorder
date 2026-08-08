@@ -37,6 +37,8 @@ data class AssemblerDiagnostics(
     val incompleteFrames: Int = 0,
     /** 为了找回 0xAA 帧头而丢弃的字节数；持续非 0 说明链路在丢包或错帧 */
     val resyncSkippedBytes: Int = 0,
+    /** 设备在连接内重置了帧序号的次数；不是丢数据，只是重新起算 */
+    val sequenceResets: Int = 0,
     /** 跨 notification 携带、最终没能凑成完整消息而被丢弃的字节数 */
     val droppedCarryOverBytes: Int = 0
 )
@@ -85,6 +87,12 @@ class OpusStreamAssembler(
         /** u16 序号差值超过一半量程时按「回退/乱序」处理，而不是「丢了 6 万帧」 */
         private const val SEQUENCE_HALF_RANGE = 0x8000
         private const val SEQUENCE_MASK = 0xFFFF
+
+        /**
+         * 连续这么多帧低于水位就认定设备重置了序号，而不是乱序。
+         * 取 3：真实的乱序不会连着来，而重置之后是持续的。
+         */
+        private const val SEQUENCE_RESET_RUN = 3
     }
 
     private class PendingFrame(
@@ -96,9 +104,12 @@ class OpusStreamAssembler(
     private val pending = LinkedHashMap<Int, PendingFrame>()
     private var carryOver: ByteArray = ByteArray(0)
     private var lastEmittedFrameId: Int? = null
+    /** 连续多少帧比水位低；用来识别"设备在连接内重置了序号" */
+    private var consecutiveBackwards = 0
 
     private var emittedFrames = 0
     private var reorderedFrames = 0
+    private var sequenceResets = 0
     private var duplicateFrames = 0
     private var incompleteFrames = 0
     private var resyncSkippedBytes = 0
@@ -106,19 +117,33 @@ class OpusStreamAssembler(
 
     fun diagnostics(): AssemblerDiagnostics = AssemblerDiagnostics(
         emittedFrames = emittedFrames,
-        reorderedFrames = reorderedFrames,
+        reorderedFrames = reorderedFrames.coerceAtLeast(0),
+        sequenceResets = sequenceResets,
         duplicateFrames = duplicateFrames,
         incompleteFrames = incompleteFrames,
         resyncSkippedBytes = resyncSkippedBytes,
         droppedCarryOverBytes = droppedCarryOverBytes
     )
 
-    /** 断连后重连调用：丢掉半条消息和未凑齐的帧，但**保留** [lastEmittedFrameId] 以便继续算空洞。 */
+    /**
+     * 断连后重连调用。
+     *
+     * **必须把 [lastEmittedFrameId] 清掉。** 之前我保留它，理由是"以便继续算空洞"——
+     * 那个理由是错的：跨越一次断连，我们无从知道设备是继续计数还是从头开始，
+     * 而按墙钟算的 `unaccounted` 本来就覆盖了这段缺口。
+     *
+     * 保留它的实际后果（2026-08-08 八台设备实测暴露）：设备重连后从低序号重新开始时，
+     * 每一帧都低于旧的高水位而被判成"乱序"，且判成乱序时不推进水位，
+     * 于是**后续每一帧都重复触发**，一路失控——018A 一台就累计出 2384 次。
+     * 那个数字不代表任何真实的乱序。
+     */
     fun onLinkInterrupted() {
         droppedCarryOverBytes += carryOver.size
         carryOver = ByteArray(0)
         incompleteFrames += pending.size
         pending.clear()
+        lastEmittedFrameId = null
+        consecutiveBackwards = 0
     }
 
     /** 会话结束/换设备时的完全复位。 */
@@ -225,12 +250,25 @@ class OpusStreamAssembler(
                 0
             }
             delta >= SEQUENCE_HALF_RANGE -> {
-                // 序号回退：乱序到达，不是丢失。不推进 lastEmittedFrameId，
-                // 否则后面每一帧都会被算成一个巨大的空洞。
-                reorderedFrames++
+                // 序号比水位低。单独一两帧确实是乱序（不推进水位是对的，
+                // 否则后面每帧都会被算成巨大空洞）。
+                //
+                // 但**连续**低于水位不是乱序，是设备重置了序号。这时候死守旧水位
+                // 会让后面每一帧都重复计数，2026-08-08 实测一台设备累计出 2384 次。
+                // 连续超过阈值就认定重置，就地重新起算。
+                consecutiveBackwards++
+                if (consecutiveBackwards >= SEQUENCE_RESET_RUN) {
+                    sequenceResets++
+                    reorderedFrames -= (consecutiveBackwards - 1).coerceAtLeast(0)
+                    consecutiveBackwards = 0
+                    lastEmittedFrameId = frameId
+                } else {
+                    reorderedFrames++
+                }
                 0
             }
             else -> {
+                consecutiveBackwards = 0
                 lastEmittedFrameId = frameId
                 delta - 1
             }

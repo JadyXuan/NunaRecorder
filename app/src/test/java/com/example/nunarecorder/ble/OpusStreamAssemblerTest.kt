@@ -162,20 +162,67 @@ class OpusStreamAssemblerTest {
         assertEquals(6, a.diagnostics().incompleteFrames)
     }
 
+    /**
+     * 回归：断链后**必须**清掉序号水位。
+     *
+     * 我原来保留它，理由是"以便继续算空洞"。2026-08-08 八台设备实测证明那是错的：
+     * 设备重连后从低序号重新开始，每一帧都低于旧水位而被判成乱序，且判乱序时
+     * 不推进水位，于是后续每帧都重复触发——一台设备累计出 2384 次假"乱序"。
+     *
+     * 跨越一次断连本来就无从知道设备是继续计数还是从头开始，
+     * 而按墙钟算的 unaccounted 已经覆盖了这段缺口。
+     */
     @Test
-    fun `断链清掉半条消息但保留序号连续性`() {
+    fun `断链后序号重新起算而不是死守旧水位`() {
         val a = OpusStreamAssembler()
-        a.feed(audioMessage(200, opus(0)))
-        val msg = audioMessage(201, opus(0))
+        a.feed(audioMessage(60000, opus(0)))
+        val msg = audioMessage(60001, opus(0))
         a.feed(msg.copyOfRange(0, 20))
 
         a.onLinkInterrupted()
         assertEquals(20, a.diagnostics().droppedCarryOverBytes)
 
-        // 重连后设备从 205 继续：空洞应算 4 帧（201..204）
-        val frames = a.feed(audioMessage(205, opus(0)))
-        assertEquals(1, frames.size)
-        assertEquals(4, frames[0].missingBefore)
+        // 设备重连后从 0 重新计数：不该产生任何"乱序"，也不该报出巨大空洞
+        var reorderedBurst = 0
+        for (i in 0 until 50) {
+            val f = a.feed(audioMessage(i, opus(0)))
+            if (f.isNotEmpty()) reorderedBurst += f[0].missingBefore
+        }
+        assertEquals("重新起算之后不该报空洞", 0, reorderedBurst)
+        assertEquals("更不该把它们记成乱序", 0, a.diagnostics().reorderedFrames)
+    }
+
+    /**
+     * 设备在**同一个连接内**重置序号也要能识别。
+     * 单独一两帧低于水位是真乱序；连续低于水位是重置。
+     */
+    @Test
+    fun `连接内序号重置被识别而不是记成成片乱序`() {
+        val a = OpusStreamAssembler()
+        for (i in 5000 until 5010) a.feed(audioMessage(i, opus(0)))
+
+        // 设备从 0 重新开始
+        for (i in 0 until 100) a.feed(audioMessage(i, opus(0)))
+
+        val d = a.diagnostics()
+        assertEquals("应当识别为一次重置", 1, d.sequenceResets)
+        assertTrue(
+            "重置不该留下成片的假乱序，实际 ${d.reorderedFrames}",
+            d.reorderedFrames <= 2
+        )
+    }
+
+    /** 真正的单帧乱序仍然要被认出来，不能被重置检测吞掉。 */
+    @Test
+    fun `孤立的乱序帧仍记为乱序`() {
+        val a = OpusStreamAssembler()
+        a.feed(audioMessage(50, opus(0)))
+        a.feed(audioMessage(48, opus(0)))   // 单独一帧回退
+        a.feed(audioMessage(51, opus(0)))   // 立刻回到正常序列
+
+        val d = a.diagnostics()
+        assertEquals(1, d.reorderedFrames)
+        assertEquals(0, d.sequenceResets)
     }
 
     @Test
