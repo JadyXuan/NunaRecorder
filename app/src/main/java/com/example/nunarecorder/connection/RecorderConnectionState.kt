@@ -70,6 +70,7 @@ sealed interface RecorderConnectionEvent {
     data object HandshakeSucceeded : RecorderConnectionEvent
     data class HandshakeFailed(val reason: String) : RecorderConnectionEvent
     data object RecordingStartRequested : RecorderConnectionEvent
+    data object RecordingTransportReady : RecorderConnectionEvent
     data object RecordingStarted : RecorderConnectionEvent
     data class RecordingStartFailed(val reason: String) : RecorderConnectionEvent
     data object AudioStalled : RecorderConnectionEvent
@@ -143,7 +144,17 @@ object RecorderConnectionReducer {
             }
             RecorderConnectionEvent.RecordingStartRequested -> {
                 if (!current.canStartRecording) rejected()
-                else accepted(RecorderConnectionPhase.STARTING_RECORDING, "正在启用 A003 音频通知")
+                else accepted(
+                    RecorderConnectionPhase.STARTING_RECORDING,
+                    "正在订阅音频并请求设备开始录音"
+                )
+            }
+            RecorderConnectionEvent.RecordingTransportReady -> {
+                if (current.phase != RecorderConnectionPhase.STARTING_RECORDING) rejected()
+                else accepted(
+                    RecorderConnectionPhase.STARTING_RECORDING,
+                    "设备已接受录音命令，正在等待首个音频包"
+                )
             }
             RecorderConnectionEvent.RecordingStarted -> {
                 if (current.phase != RecorderConnectionPhase.STARTING_RECORDING) rejected()

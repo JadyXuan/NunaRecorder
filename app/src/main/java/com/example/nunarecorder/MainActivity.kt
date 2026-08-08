@@ -45,6 +45,7 @@ import com.example.nunarecorder.audio.SegmentAudioPlayer
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.ble.HandshakeClient
 import com.example.nunarecorder.ble.HandshakeEvent
+import com.example.nunarecorder.ble.RecordingControlEvent
 import com.example.nunarecorder.ble.BatteryTelemetry
 import com.example.nunarecorder.ble.DevicePowerState
 import com.example.nunarecorder.connection.RecorderConnectionEvent
@@ -92,6 +93,12 @@ class MainActivity : ComponentActivity() {
         private val SERVICE_UUID: UUID get() = UUID.fromString(ProtoConfig.Service.SERVICE_UUID)
         private val CHAR_UUID: UUID get() = UUID.fromString(ProtoConfig.Service.RECORDING_CHAR_UUID)
         private val CCCD_UUID: UUID get() = UUID.fromString(ProtoConfig.Service.CCCD_UUID)
+
+        private const val PREFERRED_ATT_MTU = 517
+        private const val PRODUCT_AUDIO_MIN_ATT_MTU = 504
+        private const val MTU_NEGOTIATION_TIMEOUT_MS = 2_000L
+        private const val FIRST_AUDIO_TIMEOUT_MS = 8_000L
+        private const val MAX_EARLY_AUDIO_PACKETS = 32
     }
 
     // 记录当前选中的设备 MAC 地址（来自列表点击，存于 ViewModel）
@@ -112,6 +119,15 @@ class MainActivity : ComponentActivity() {
     private var isTransferNotificationEnabled = false
     // 点击"连接+握手"时设为 true，通知使能成功后会自动触发握手
     private var autoHandshakeOnConnect = false
+    private var negotiatedMtu = 23
+    private var serviceDiscoveryStarted = false
+    private var mtuNegotiationTimeout: Runnable? = null
+
+    // Recording startup is intentionally two-phase: A003 transport readiness, then audio.
+    private var firstAudioTimeout: Runnable? = null
+    private var recordingStartCommandAttempted = false
+    private var recordingControlStatus = "idle"
+    private val earlyAudioPackets = ArrayDeque<ByteArray>()
 
     // 可选电量能力：XIAO 的 A004 优先，标准 BAS 作为原 Nuna 回退。
     private val batteryReadCandidates = ArrayDeque<BluetoothGattCharacteristic>()
@@ -238,7 +254,8 @@ class MainActivity : ComponentActivity() {
                         appendLog("握手失败：${event.reason}")
                     }
                 }
-            }
+            },
+            onRecordingControlEvent = ::handleRecordingControlEvent
         )
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -544,6 +561,102 @@ class MainActivity : ComponentActivity() {
         handshakeClient.startHandshake(g)
     }
 
+    private fun handleRecordingControlEvent(event: RecordingControlEvent) {
+        when (event) {
+            is RecordingControlEvent.Accepted -> {
+                recordingControlStatus = "accepted"
+                diagnosticLogger.log(
+                    "recording_control_accepted",
+                    mapOf("command_id" to event.commandId, "mtu" to negotiatedMtu)
+                )
+                appendDebug("设备已接受录音命令 (cmdId=${event.commandId})")
+                if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING) {
+                    transitionConnection(RecorderConnectionEvent.RecordingTransportReady)
+                }
+            }
+            is RecordingControlEvent.Rejected -> {
+                recordingControlStatus = "rejected"
+                diagnosticLogger.log(
+                    "recording_control_rejected",
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "status" to event.status,
+                        "error_code" to event.errorCode,
+                        "received_audio" to hasReceivedAudioPacket
+                    )
+                )
+                val reason = "设备拒绝录音命令 (status=${event.status}, error=${event.errorCode ?: "未知"})"
+                if (hasReceivedAudioPacket) {
+                    // Legacy/XIAO behavior: CCCD subscription itself may already have started audio.
+                    appendDebug("$reason；已有音频流，按兼容模式继续")
+                } else {
+                    failRecordingStartup(reason)
+                }
+            }
+            is RecordingControlEvent.TimedOut -> {
+                recordingControlStatus = "timeout"
+                diagnosticLogger.log(
+                    "recording_control_timeout",
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "mtu" to negotiatedMtu,
+                        "received_audio" to hasReceivedAudioPacket
+                    )
+                )
+                appendDebug("录音控制反馈超时；继续等待兼容设备的首个音频包")
+            }
+        }
+    }
+
+    private fun scheduleFirstAudioTimeout() {
+        firstAudioTimeout?.let(diagnosticHandler::removeCallbacks)
+        firstAudioTimeout = Runnable {
+            firstAudioTimeout = null
+            if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING &&
+                !hasReceivedAudioPacket
+            ) {
+                failRecordingStartup(
+                    "${FIRST_AUDIO_TIMEOUT_MS / 1000} 秒内未收到音频" +
+                        "（MTU=$negotiatedMtu，控制=$recordingControlStatus）"
+                )
+            }
+        }.also { diagnosticHandler.postDelayed(it, FIRST_AUDIO_TIMEOUT_MS) }
+    }
+
+    private fun cancelFirstAudioTimeout() {
+        firstAudioTimeout?.let(diagnosticHandler::removeCallbacks)
+        firstAudioTimeout = null
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disableAudioNotificationsBestEffort() {
+        val activeGatt = gatt ?: return
+        val characteristic = activeGatt.getService(SERVICE_UUID)?.getCharacteristic(CHAR_UUID) ?: return
+        try {
+            activeGatt.setCharacteristicNotification(characteristic, false)
+            characteristic.getDescriptor(CCCD_UUID)?.let { cccd ->
+                cccd.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                activeGatt.writeDescriptor(cccd)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun failRecordingStartup(reason: String) {
+        if (viewModel.connectionState.value.phase != RecorderConnectionPhase.STARTING_RECORDING) return
+        cancelFirstAudioTimeout()
+        handshakeClient.cancelPendingRecordingControl()
+        earlyAudioPackets.clear()
+        stopRecordingDiagnostics("startup_failed")
+        recording = false
+        if (sessionRecorder.isRecording) sessionRecorder.stop()
+        viewModel.setActiveRecordingPath(null)
+        com.example.nunarecorder.service.ContextDataService.stop(this)
+        disableAudioNotificationsBestEffort()
+        transitionConnection(RecorderConnectionEvent.RecordingStartFailed(reason))
+        appendLog("录制启动失败：$reason")
+    }
+
     private fun resetStreamingStats() {
         totalPacketCount = 0
         totalBytesCount = 0
@@ -552,6 +665,10 @@ class MainActivity : ComponentActivity() {
         hasReceivedAudioPacket = false
         lastDiagnosticStatsMs = 0L
         lastDiagnosticRssiRequestMs = 0L
+        recordingStartCommandAttempted = false
+        recordingControlStatus = "pending"
+        earlyAudioPackets.clear()
+        cancelFirstAudioTimeout()
     }
 
     private fun startRecordingDiagnostics() {
@@ -584,6 +701,8 @@ class MainActivity : ComponentActivity() {
         "byte_count" to totalBytesCount,
         "last_frame_id" to lastAudioFrameId,
         "received_any_audio" to hasReceivedAudioPacket,
+        "negotiated_mtu" to negotiatedMtu,
+        "recording_control_status" to recordingControlStatus,
         "last_audio_age_ms" to if (lastAudioPacketElapsedMs > 0L) {
             (now - lastAudioPacketElapsedMs).coerceAtLeast(0L)
         } else null
@@ -659,6 +778,12 @@ class MainActivity : ComponentActivity() {
             appendLog("未找到音频特征")
             return
         }
+        if (negotiatedMtu < PRODUCT_AUDIO_MIN_ATT_MTU) {
+            appendDebug(
+                "当前 MTU=$negotiatedMtu，低于产品版 501 B 音频包建议值 " +
+                    "$PRODUCT_AUDIO_MIN_ATT_MTU；仍将尝试兼容启动"
+            )
+        }
         appendDebug("启用 A003 音频通知…")
         enableNotifications(g, characteristic)
     }
@@ -685,6 +810,9 @@ class MainActivity : ComponentActivity() {
         appendLog("停止录制（共 ${totalPacketCount} 包 · ${formatBytes(totalBytesCount)}）")
 
         stopRecordingDiagnostics("user_or_activity_stop")
+        cancelFirstAudioTimeout()
+        handshakeClient.cancelPendingRecordingControl()
+        earlyAudioPackets.clear()
         recording = false
         sessionRecorder.stop()
         viewModel.setActiveRecordingPath(null)
@@ -847,6 +975,67 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    @SuppressLint("MissingPermission")
+    private fun beginGattInitialization(gatt: BluetoothGatt) {
+        serviceDiscoveryStarted = false
+        negotiatedMtu = 23
+        mtuNegotiationTimeout?.let(diagnosticHandler::removeCallbacks)
+        mtuNegotiationTimeout = null
+
+        val priorityQueued = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        val mtuQueued = gatt.requestMtu(PREFERRED_ATT_MTU)
+        diagnosticLogger.log(
+            "gatt_link_setup_requested",
+            mapOf(
+                "preferred_mtu" to PREFERRED_ATT_MTU,
+                "mtu_queued" to mtuQueued,
+                "priority_queued" to priorityQueued
+            )
+        )
+        appendDebug("正在协商 BLE MTU=$PREFERRED_ATT_MTU…")
+
+        if (!mtuQueued) {
+            appendDebug("MTU 请求未入队，使用系统默认值继续")
+            discoverServicesOnce(gatt, "mtu_request_rejected")
+            return
+        }
+
+        mtuNegotiationTimeout = Runnable {
+            mtuNegotiationTimeout = null
+            if (gatt === this.gatt && !serviceDiscoveryStarted) {
+                appendDebug("MTU 协商回调超时，继续发现服务")
+                diagnosticLogger.log("gatt_mtu_timeout", mapOf("assumed_mtu" to negotiatedMtu))
+                discoverServicesOnce(gatt, "mtu_timeout")
+            }
+        }.also { diagnosticHandler.postDelayed(it, MTU_NEGOTIATION_TIMEOUT_MS) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun discoverServicesOnce(gatt: BluetoothGatt, reason: String) {
+        if (gatt !== this.gatt || serviceDiscoveryStarted) return
+        serviceDiscoveryStarted = true
+        mtuNegotiationTimeout?.let(diagnosticHandler::removeCallbacks)
+        mtuNegotiationTimeout = null
+
+        val ok = gatt.discoverServices()
+        diagnosticLogger.log(
+            "gatt_service_discovery_requested",
+            mapOf("accepted" to ok, "reason" to reason, "mtu" to negotiatedMtu)
+        )
+        if (!ok) {
+            appendLog("服务发现启动失败")
+            transitionConnection(RecorderConnectionEvent.ConnectionFailed("无法启动服务发现"))
+        }
+    }
+
+    private fun resetGattInitialization() {
+        mtuNegotiationTimeout?.let(diagnosticHandler::removeCallbacks)
+        mtuNegotiationTimeout = null
+        serviceDiscoveryStarted = false
+        negotiatedMtu = 23
+    }
+
+
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(
@@ -884,6 +1073,10 @@ class MainActivity : ComponentActivity() {
                 }
                 stopRecordingDiagnostics("gatt_error_$status")
                 resetBatteryTelemetry(null)
+                resetGattInitialization()
+                cancelFirstAudioTimeout()
+                handshakeClient.cancelPendingRecordingControl()
+                earlyAudioPackets.clear()
                 recording = false
                 isTransferNotificationEnabled = false
                 sessionRecorder.stop()
@@ -927,17 +1120,17 @@ class MainActivity : ComponentActivity() {
                     transitionConnection(RecorderConnectionEvent.ConnectionFailed("缺少蓝牙连接权限"))
                     return
                 }
-                val ok = gatt.discoverServices()
-                if (!ok) {
-                    appendLog("服务发现启动失败")
-                    transitionConnection(RecorderConnectionEvent.ConnectionFailed("无法启动服务发现"))
-                }
+                beginGattInitialization(gatt)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 appendLog("已断开连接")
                 stopRecordingDiagnostics("gatt_disconnected")
                 recording = false
                 isTransferNotificationEnabled = false
                 resetBatteryTelemetry(null)
+                resetGattInitialization()
+                cancelFirstAudioTimeout()
+                handshakeClient.cancelPendingRecordingControl()
+                earlyAudioPackets.clear()
 
                 sessionRecorder.stop()
                 viewModel.setActiveRecordingPath(null)
@@ -983,14 +1176,7 @@ class MainActivity : ComponentActivity() {
 
             // 录音逻辑：只处理 A003（不打印数据）
             if (characteristic.uuid == CHAR_UUID) {
-                val now = SystemClock.elapsedRealtime()
-                totalPacketCount++
-                totalBytesCount += value.size
-                lastAudioPacketElapsedMs = now
-                lastAudioFrameId = extractAudioFrameId(value) ?: lastAudioFrameId
-                hasReceivedAudioPacket = true
-                audioStallMonitor.onPacket(now)?.let(::handleAudioStallEvent)
-                writeToFile(value)
+                handleAudioNotification(value)
             }
         }
 
@@ -1064,22 +1250,17 @@ class MainActivity : ComponentActivity() {
                     viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING
                 ) {
                     if (openFileForRecording()) {
-                        recording = true
-                        startRecordingDiagnostics()
-                        transitionConnection(RecorderConnectionEvent.RecordingStarted)
-                        appendLog("录制已开始")
+                        appendLog("音频通知已启用，正在请求设备开始录音…")
+                        scheduleFirstAudioTimeout()
+                        sendRecordingStartCommandIfNeeded(gatt)
+                        flushEarlyAudioPackets()
                     } else {
                         gatt.setCharacteristicNotification(descriptor.characteristic, false)
-                        transitionConnection(
-                            RecorderConnectionEvent.RecordingStartFailed("无法创建录音会话")
-                        )
+                        failRecordingStartup("无法创建录音会话")
                     }
                 } else if (status != BluetoothGatt.GATT_SUCCESS) {
                     gatt.setCharacteristicNotification(descriptor.characteristic, false)
-                    appendLog("启用音频通知失败 (status=$status)")
-                    transitionConnection(
-                        RecorderConnectionEvent.RecordingStartFailed("启用音频通知失败 (status=$status)")
-                    )
+                    failRecordingStartup("启用音频通知失败 (status=$status)")
                 }
             }
         }
@@ -1091,7 +1272,14 @@ class MainActivity : ComponentActivity() {
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             super.onMtuChanged(gatt, mtu, status)
+            if (gatt !== this@MainActivity.gatt) return
+            negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
             diagnosticLogger.log("gatt_mtu", mapOf("status" to status, "mtu" to mtu))
+            appendDebug(
+                if (status == BluetoothGatt.GATT_SUCCESS) "BLE MTU 已协商为 $mtu"
+                else "BLE MTU 协商失败 (status=$status)，使用默认值继续"
+            )
+            discoverServicesOnce(gatt, "mtu_callback_$status")
         }
 
         override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
@@ -1269,14 +1457,14 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) {
             appendLog("Start recording: no permission to enable notifications.")
-            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("缺少蓝牙连接权限"))
+            failRecordingStartup("缺少蓝牙连接权限")
             requestBlePermissions()
             return
         }
 
         if (!gatt.setCharacteristicNotification(characteristic, true)) {
             appendLog("无法在本机启用音频通知")
-            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("本机通知注册失败"))
+            failRecordingStartup("本机通知注册失败")
             return
         }
 
@@ -1290,12 +1478,12 @@ class MainActivity : ComponentActivity() {
             } else {
                 appendLog("无法启用音频通知")
                 gatt.setCharacteristicNotification(characteristic, false)
-                transitionConnection(RecorderConnectionEvent.RecordingStartFailed("设备拒绝通知配置"))
+                failRecordingStartup("设备拒绝通知配置")
             }
         } else {
             appendLog("Recording CCCD not found, cannot enable notifications.")
             gatt.setCharacteristicNotification(characteristic, false)
-            transitionConnection(RecorderConnectionEvent.RecordingStartFailed("音频通知描述符不存在"))
+            failRecordingStartup("音频通知描述符不存在")
         }
     }
 
@@ -1354,6 +1542,10 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     private fun stopNotifyAndDisconnect() {
         try {
+            cancelFirstAudioTimeout()
+            handshakeClient.cancelPendingRecordingControl()
+            earlyAudioPackets.clear()
+            resetGattInitialization()
             val g = gatt ?: run {
                 resetBatteryTelemetry(null)
                 transitionConnection(RecorderConnectionEvent.Disconnected)
@@ -1374,6 +1566,82 @@ class MainActivity : ComponentActivity() {
     }
 
     // ----------------- 文件写入 -----------------
+
+    private fun sendRecordingStartCommandIfNeeded(gatt: BluetoothGatt) {
+        if (recordingStartCommandAttempted) return
+        recordingStartCommandAttempted = true
+        val queued = handshakeClient.requestRecordingStart(gatt)
+        recordingControlStatus = if (queued) "pending" else "not_queued"
+        diagnosticLogger.log(
+            "recording_control_requested",
+            mapOf("queued" to queued, "mtu" to negotiatedMtu)
+        )
+        if (!queued) {
+            // Do not fail yet: old XIAO/legacy Nuna starts streaming when A003 CCCD is enabled.
+            appendDebug("录音控制命令未入队；继续等待兼容设备自动推流")
+        }
+    }
+
+    private fun flushEarlyAudioPackets() {
+        if (earlyAudioPackets.isEmpty()) return
+        appendDebug("处理订阅确认前缓存的 ${earlyAudioPackets.size} 个音频包")
+        while (earlyAudioPackets.isNotEmpty()) {
+            processAudioNotification(earlyAudioPackets.removeFirst())
+        }
+    }
+
+    private fun handleAudioNotification(value: ByteArray) {
+        val phase = viewModel.connectionState.value.phase
+        if (phase != RecorderConnectionPhase.STARTING_RECORDING &&
+            phase != RecorderConnectionPhase.RECORDING &&
+            phase != RecorderConnectionPhase.AUDIO_STALLED
+        ) {
+            diagnosticLogger.log(
+                "audio_notification_ignored",
+                mapOf("phase" to phase.name, "bytes" to value.size)
+            )
+            return
+        }
+
+        if (!sessionRecorder.isRecording) {
+            if (earlyAudioPackets.size >= MAX_EARLY_AUDIO_PACKETS) {
+                earlyAudioPackets.removeFirst()
+                diagnosticLogger.log("early_audio_buffer_overflow")
+            }
+            earlyAudioPackets.addLast(value.copyOf())
+            return
+        }
+        processAudioNotification(value)
+    }
+
+    private fun processAudioNotification(value: ByteArray) {
+        val now = SystemClock.elapsedRealtime()
+        val firstPacket = !hasReceivedAudioPacket
+        totalPacketCount++
+        totalBytesCount += value.size
+        lastAudioPacketElapsedMs = now
+        lastAudioFrameId = extractAudioFrameId(value) ?: lastAudioFrameId
+        hasReceivedAudioPacket = true
+
+        if (firstPacket) {
+            cancelFirstAudioTimeout()
+            recording = true
+            startRecordingDiagnostics()
+            transitionConnection(RecorderConnectionEvent.RecordingStarted)
+            appendLog("录制已开始（收到首个音频包 · ${value.size} B · MTU=$negotiatedMtu）")
+            diagnosticLogger.log(
+                "first_audio_notification",
+                mapOf(
+                    "bytes" to value.size,
+                    "mtu" to negotiatedMtu,
+                    "control_status" to recordingControlStatus
+                )
+            )
+        } else {
+            audioStallMonitor.onPacket(now)?.let(::handleAudioStallEvent)
+        }
+        writeToFile(value)
+    }
 
     private fun openFileForRecording(): Boolean {
         return try {

@@ -61,6 +61,11 @@ class RecorderConnectionReducerTest {
     fun recordingStallAndRecoveryKeepButtonStateConsistent() {
         var state = readyState()
         state = next(state, RecorderConnectionEvent.RecordingStartRequested)
+        state = next(state, RecorderConnectionEvent.RecordingTransportReady)
+        assertEquals(RecorderConnectionPhase.STARTING_RECORDING, state.phase)
+        assertFalse(state.isRecording)
+        assertTrue(state.canStopRecording)
+
         state = next(state, RecorderConnectionEvent.RecordingStarted)
         assertTrue(state.isRecording)
         assertTrue(state.canStopRecording)

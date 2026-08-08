@@ -33,8 +33,8 @@ android {
         applicationId = "tech.transfur.nunarecorder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.0-beta.4"
+        versionCode = 5
+        versionName = "0.1.0-beta.5-test.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
