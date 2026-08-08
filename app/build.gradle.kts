@@ -33,8 +33,15 @@ android {
         minSdk = 26
         targetSdk = 36
         // 每次对外发包必须 +1，否则 Android 不认为是升级
-        versionCode = 13
-        versionName = "1.12"
+        versionCode = 1
+        versionName = "1.12-exp-connprio"
+
+        // **实验分支专用**：独立包名，与参与者包并排安装。
+        // 如果实验包覆盖装在生产包上，事后要装回正式版就是降级，Android 会要求
+        // 先卸载——**而卸载会带走本地还没上传的录音**。并排安装还顺带保证
+        // 实验不会碰到生产包的入组信息和会话目录。
+        // FileProvider authority 用的是 ${applicationId}，所以不会撞。
+        applicationIdSuffix = ".exp"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

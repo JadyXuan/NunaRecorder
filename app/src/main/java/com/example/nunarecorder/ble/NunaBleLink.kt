@@ -398,6 +398,22 @@ class NunaBleLink(
                     // （14:08 那份日志）是能正常列出 8 个 service 的。
                     // 那个"连上 12 ms 就发现完且一个都没有"的现象另有其因——是旧实例的
                     // 回调，已经由 isStale 守卫解决，不需要用延迟去躲。
+                    // ===== 实验分支唯一的改动（T-2026-08-09-022 §3）=====
+                    // 假设：08-08 八台设备里横跨 4 台的 gatt_status=8（连接监督超时）
+                    // 与默认的连接间隔有关。设备每秒推约 50 个 20 ms 包，
+                    // 默认 BALANCED 的间隔（约 30–50 ms）对这个速率偏松。
+                    // CONNECTION_PRIORITY_HIGH 把间隔压到 11.25–15 ms。
+                    //
+                    // 这不是 GATT 队列操作（不走 read/write 的"一次一个"约束），
+                    // 是一次链路层参数更新，所以放在 discoverServices 之前不会挤掉它。
+                    //
+                    // **这个分支只有这一处改动**，不要往里加别的东西——
+                    // 08-06 那三天就是混变量混出来的。
+                    val prio = runCatching {
+                        g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    }.getOrDefault(false)
+                    log(TAG, "[实验] requestConnectionPriority(HIGH) = $prio")
+                    // ===== 实验改动结束 =====
                     val started = g.discoverServices()
                     log(TAG, "已连接 $name（第 $gen 代），discoverServices = $started")
                     listener.onGattConnected(name)
