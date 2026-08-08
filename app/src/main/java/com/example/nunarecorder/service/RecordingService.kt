@@ -442,7 +442,13 @@ class RecordingService : Service() {
         val downMs = now - outageStartedAtMs
         if (outageAlerted || downMs < OUTAGE_ALERT_AFTER_MS) return
         outageAlerted = true
-        DiagnosticsLog.log(TAG, "链路已中断 ${downMs / 60000} 分钟，提醒佩戴者")
+        // 一帧都没收到过 vs 收到过又停了，是两种完全不同的处置
+        val neverStreamed = stats?.lastFrameAtMs == null
+        DiagnosticsLog.log(
+            TAG,
+            "链路已中断 ${downMs / 60000} 分钟，提醒佩戴者" +
+                if (neverStreamed) "（本次会话从未出流，疑似还在充电板上）" else ""
+        )
         runCatching {
             val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             mgr.notify(
@@ -450,12 +456,24 @@ class RecordingService : Service() {
                 androidx.core.app.NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
                     .setSmallIcon(R.drawable.ic_stat_nuna)
                     .setContentTitle("已经 ${downMs / 60000} 分钟没有收到录音数据")
-                    .setContentText("请检查 Nuna 设备是否还戴着、有没有电。这段时间的音频没有被采到。")
+                    .setContentText(
+                        if (neverStreamed) "设备可能还在充电板上——充电时它不采集。"
+                        else "请检查 Nuna 设备是否还戴着、有没有电。这段时间的音频没有被采到。"
+                    )
                     .setStyle(
                         androidx.core.app.NotificationCompat.BigTextStyle().bigText(
-                            "已经 ${downMs / 60000} 分钟没有收到录音数据。" +
-                                "请检查设备是否还戴在身上、是否还有电、是否离手机太远。" +
-                                "采集仍在自动重连，这段时间的音频没有被采到。"
+                            if (neverStreamed) {
+                                // 用户 2026-08-09 指出：设备在充电时不采集，这是固件行为。
+                                // 一次都没收到过数据，最可能就是它还在充电板上——
+                                // 把这个原因排在最前面，而不是让人先去怀疑设备坏了。
+                                "开始采集 ${downMs / 60000} 分钟了，一直没有收到数据。" +
+                                    "设备很可能还在充电板上——充电时它不采集。" +
+                                    "把它拿下来戴好，链路会自动恢复。"
+                            } else {
+                                "已经 ${downMs / 60000} 分钟没有收到录音数据。" +
+                                    "请检查设备是否还戴在身上、是否还有电、是否离手机太远。" +
+                                    "采集仍在自动重连，这段时间的音频没有被采到。"
+                            }
                         )
                     )
                     .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)

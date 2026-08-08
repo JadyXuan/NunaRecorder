@@ -389,6 +389,29 @@ private fun LinkHealthPanel(
         LinkPhase.RECORDING -> if (streaming) "正在采集" else "已订阅，但没有收到数据"
     }
 
+    /**
+     * 订阅成功却一帧都没来时，把**最可能的原因**摆在最前面。
+     *
+     * 用户 2026-08-09：「那个超时，可能是我选择 nuna 还在充电器上的时候进行连接，
+     * 这个时候就会只订阅无消息，我从充电器拿下来后，会自动重连一次，再之后就正常
+     * 收发数据了，这应该是固件定义的行为。」
+     *
+     * 也就是说"订阅成功但没有流"很可能**根本不是故障**，是设备在充电时不采集。
+     * 原来这里只说"没有收到数据"，佩戴者无从判断该等还是该动手；
+     * 而这一步不解决就出门，那一天就白采了。
+     *
+     * 区分两种情况：本次会话**一帧都没收到过** → 多半还在充电板上；
+     * 收到过又停了 → 那才是走远了、没电了或者真断了。
+     */
+    val neverReceived = liveStats != null && liveStats.lastFrameAtMs == null
+    val hint = when {
+        linkStatus.phase != LinkPhase.RECORDING || streaming -> null
+        neverReceived ->
+            "设备可能还在充电板上——充电时它不采集。请把它拿下来戴好，链路会自动恢复。"
+        else ->
+            "刚才还在收数据，现在停了。检查设备是不是离得太远、掉了，或者没电了。"
+    }
+
     val dotColor by animateColorAsState(
         targetValue = when {
             healthy -> NunaSuccess
@@ -434,6 +457,14 @@ private fun LinkHealthPanel(
                         linkStatus.isSessionActive -> MaterialTheme.colorScheme.error
                         else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     }
+                )
+            }
+
+            hint?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             }
 
