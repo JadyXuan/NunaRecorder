@@ -97,6 +97,12 @@ fun MainScreen(
         it.name?.contains("nuna", ignoreCase = true) == true
     }
 
+    // 状态面板和开始/停止**钉在顶部**，其余内容滚动。
+    //
+    // 2026-08-08 用户实测："设备一多，我在主页连开始和暂停都点不到了"。
+    // 根布局原来是不可滚动的 Column，两个设备列表各占到 156dp 之后就把按钮
+    // 挤出了屏幕。缩小列表只是拖延——出门前点不到"开始"是字面意义的阻断，
+    // 这两个控件必须与列表长度无关地始终可达。
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -108,6 +114,60 @@ fun MainScreen(
             liveStats = liveRecordingStats,
             nowMs = nowMs
         )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ElevatedButton(
+                onClick = onStartRecordingClick,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.elevatedButtonColors(
+                    containerColor = NunaSuccess,
+                    contentColor = Color.White
+                ),
+                enabled = selectedDeviceAddress != null && !sessionActive
+            ) {
+                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (selectedDeviceAddress == null) "请先选择设备" else "开始采集",
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            OutlinedButton(
+                onClick = onStopRecordingClick,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.error.copy(alpha = if (sessionActive) 0.5f else 0.15f)
+                ),
+                enabled = sessionActive
+            ) {
+                Icon(Icons.Outlined.Close, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("停止采集", fontWeight = FontWeight.SemiBold)
+            }
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+
+        // 以下随内容滚动
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
 
         FilledTonalButton(
             onClick = onScanClick,
@@ -141,52 +201,6 @@ fun MainScreen(
             }
         )
 
-        // 连接和录制合成一个动作：佩戴者不需要理解「先连接握手，再开始录制」，
-        // 而且分两步意味着中间那一步失败时没人会发现。
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            ElevatedButton(
-                onClick = onStartRecordingClick,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.elevatedButtonColors(
-                    containerColor = NunaSuccess,
-                    contentColor = Color.White
-                ),
-                enabled = selectedDeviceAddress != null && !sessionActive
-            ) {
-                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    if (selectedDeviceAddress == null) "请先选择设备" else "开始采集",
-                    fontWeight = FontWeight.Medium
-                )
-            }
-            OutlinedButton(
-                onClick = onStopRecordingClick,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    MaterialTheme.colorScheme.error.copy(alpha = if (sessionActive) 0.5f else 0.15f)
-                ),
-                enabled = sessionActive
-            ) {
-                Icon(Icons.Outlined.Close, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("停止采集", fontWeight = FontWeight.Medium)
-            }
-        }
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -208,7 +222,7 @@ fun MainScreen(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .height(220.dp),
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
@@ -226,6 +240,8 @@ fun MainScreen(
                         .verticalScroll(logScrollState)
                 )
             }
+        }
+        Spacer(Modifier.height(8.dp))
         }
     }
 }
