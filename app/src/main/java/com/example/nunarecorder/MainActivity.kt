@@ -48,6 +48,7 @@ import com.example.nunarecorder.ble.HandshakeEvent
 import com.example.nunarecorder.ble.RecordingControlEvent
 import com.example.nunarecorder.ble.BatteryTelemetry
 import com.example.nunarecorder.ble.DevicePowerState
+import com.example.nunarecorder.ble.NunaProtocolInspector
 import com.example.nunarecorder.connection.RecorderConnectionEvent
 import com.example.nunarecorder.connection.RecorderConnectionPhase
 import com.example.nunarecorder.data.RecordingEntry
@@ -135,6 +136,12 @@ class MainActivity : ComponentActivity() {
     private var batteryNotificationUuid: UUID? = null
     private var batterySetupCompleted = false
     private var batteryReadTimeout: Runnable? = null
+
+    // Protocol-test telemetry. Optional A001 subscription is only attempted after
+    // the normal handshake-trigger read completes, so it cannot delay the proven flow.
+    private var statusNotificationSetupAttempted = false
+    private var statusNotificationUuid: UUID? = null
+    private var protocolAudioPacketCount = 0L
 
     // DEBUG_WEARABLE_START — 与主流程 GATT 独立；若主界面已连同一设备请先断开再测
     private var wearableDebugService: NunaWearableServiceImpl? = null
@@ -1152,6 +1159,7 @@ class MainActivity : ComponentActivity() {
                 transitionConnection(RecorderConnectionEvent.ConnectionFailed("服务发现失败 (status=$status)"))
                 return
             }
+            logGattCapabilities(gatt)
             prepareBatteryCandidates(gatt)
             transitionConnection(RecorderConnectionEvent.ServicesDiscovered)
             appendDebug("服务发现完成，启用 A002 通知…")
@@ -1165,6 +1173,16 @@ class MainActivity : ComponentActivity() {
             value: ByteArray
         ) {
             super.onCharacteristicChanged(gatt, characteristic, value)
+
+            if (characteristic.uuid.toString()
+                    .equals(ProtoConfig.Service.STATUS_CHAR_UUID, ignoreCase = true)
+            ) {
+                logProtocolPacket("a001_notify", value, includeStatus = true)
+            } else if (characteristic.uuid.toString()
+                    .equals(ProtoConfig.Service.TRANSFER_CHAR_UUID, ignoreCase = true)
+            ) {
+                logProtocolPacket("a002_notify", value)
+            }
 
             // 先让握手模块处理（只关心 A002）
             handshakeClient.onNotification(gatt, characteristic)
@@ -1186,6 +1204,18 @@ class MainActivity : ComponentActivity() {
             value: ByteArray,
             status: Int
         ) {
+            if (characteristic.uuid.toString()
+                    .equals(ProtoConfig.Service.STATUS_CHAR_UUID, ignoreCase = true)
+            ) {
+                diagnosticLogger.log(
+                    "protocol_characteristic_read",
+                    mapOf("source" to "a001", "status" to status, "bytes" to value.size)
+                )
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    logProtocolPacket("a001_read", value, includeStatus = true)
+                }
+                enableStatusNotificationsBestEffort(gatt, characteristic)
+            }
             handleBatteryCharacteristicRead(gatt, characteristic, value, status)
         }
 
@@ -1195,10 +1225,23 @@ class MainActivity : ComponentActivity() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            val value = characteristic.value ?: byteArrayOf()
+            if (characteristic.uuid.toString()
+                    .equals(ProtoConfig.Service.STATUS_CHAR_UUID, ignoreCase = true)
+            ) {
+                diagnosticLogger.log(
+                    "protocol_characteristic_read",
+                    mapOf("source" to "a001_legacy_callback", "status" to status, "bytes" to value.size)
+                )
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    logProtocolPacket("a001_read", value, includeStatus = true)
+                }
+                enableStatusNotificationsBestEffort(gatt, characteristic)
+            }
             handleBatteryCharacteristicRead(
                 gatt,
                 characteristic,
-                characteristic.value ?: byteArrayOf(),
+                value,
                 status
             )
         }
@@ -1243,6 +1286,20 @@ class MainActivity : ComponentActivity() {
                     else "电量通知启用失败 (status=$status)，保留单次读数"
                 )
                 finishBatterySetupAndHandshake()
+            }
+
+            if (descriptor.uuid == CCCD_UUID &&
+                descriptor.characteristic.uuid == statusNotificationUuid
+            ) {
+                diagnosticLogger.log(
+                    "protocol_status_subscription",
+                    mapOf("status" to status, "enabled" to (status == BluetoothGatt.GATT_SUCCESS))
+                )
+                appendDebug(
+                    if (status == BluetoothGatt.GATT_SUCCESS) "协议探测：A001 状态通知已启用"
+                    else "协议探测：A001 状态通知启用失败 (status=$status)"
+                )
+                statusNotificationUuid = null
             }
 
             if (descriptor.uuid == CCCD_UUID && descriptor.characteristic.uuid == CHAR_UUID) {
@@ -1320,7 +1377,145 @@ class MainActivity : ComponentActivity() {
         activeBatteryReadUuid = null
         batteryNotificationUuid = null
         batterySetupCompleted = false
+        statusNotificationSetupAttempted = false
+        statusNotificationUuid = null
+        protocolAudioPacketCount = 0L
         setDevicePowerState(state)
+    }
+
+    private fun logGattCapabilities(gatt: BluetoothGatt) {
+        gatt.services.forEach { service ->
+            service.characteristics.forEach { characteristic ->
+                val properties = characteristicPropertyNames(characteristic.properties)
+                diagnosticLogger.log(
+                    "gatt_characteristic_capability",
+                    mapOf(
+                        "service_uuid" to service.uuid.toString(),
+                        "characteristic_uuid" to characteristic.uuid.toString(),
+                        "properties" to properties,
+                        "property_bits" to "0x${characteristic.properties.toString(16)}",
+                        "descriptors" to characteristic.descriptors.joinToString(",") { it.uuid.toString() }
+                    )
+                )
+                Log.d(TAG, "PROTO GATT ${service.uuid}/${characteristic.uuid} $properties")
+            }
+        }
+
+        val a004 = gatt.getService(SERVICE_UUID)
+            ?.getCharacteristic(BatteryTelemetry.NUNA_POWER_UUID)
+        val a004Role = when {
+            a004 == null -> "absent"
+            a004.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0 ->
+                "xiao_power_candidate"
+            a004.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 ->
+                "product_offline_audio_candidate"
+            else -> "unknown"
+        }
+        diagnosticLogger.log(
+            "protocol_a004_classification",
+            mapOf(
+                "role" to a004Role,
+                "properties" to a004?.let { characteristicPropertyNames(it.properties) }
+            )
+        )
+        Log.d(TAG, "PROTO A004 role=$a004Role properties=${a004?.let { characteristicPropertyNames(it.properties) }}")
+    }
+
+    private fun characteristicPropertyNames(properties: Int): String {
+        val names = mutableListOf<String>()
+        if (properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) names += "READ"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) names += "WRITE"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) names += "WRITE_NO_RESPONSE"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) names += "NOTIFY"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) names += "INDICATE"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_BROADCAST != 0) names += "BROADCAST"
+        if (properties and BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE != 0) names += "SIGNED_WRITE"
+        return names.joinToString("|").ifEmpty { "NONE" }
+    }
+
+    private fun logProtocolPacket(source: String, raw: ByteArray, includeStatus: Boolean = false) {
+        val envelope = NunaProtocolInspector.parseEnvelope(raw)
+        if (envelope == null) {
+            diagnosticLogger.log(
+                "protocol_envelope_invalid",
+                mapOf("source" to source, "raw_bytes" to raw.size, "prefix_hex" to raw.toBoundedHex())
+            )
+            Log.d(TAG, "PROTO $source invalid bytes=${raw.size} prefix=${raw.toBoundedHex()}")
+            return
+        }
+        Log.d(
+            TAG,
+            "PROTO $source type=0x${envelope.type.toString(16).padStart(2, '0')} " +
+                "data=${envelope.declaredDataLength} version=${envelope.version} " +
+                "checksum=${envelope.checksumClassification} trailing=${envelope.trailingBytes}"
+        )
+        diagnosticLogger.log(
+            "protocol_envelope",
+            NunaProtocolInspector.envelopeFields(envelope) +
+                mapOf("source" to source, "raw_bytes" to raw.size)
+        )
+        if (includeStatus) {
+            val status = NunaProtocolInspector.parseStatus(envelope)
+            Log.d(TAG, "PROTO $source status=${status.name} fields=${status.fields}")
+            diagnosticLogger.log(
+                "protocol_status_message",
+                status.fields + mapOf(
+                    "source" to source,
+                    "status_type" to status.name,
+                    "message_type" to "0x${envelope.type.toString(16).padStart(2, '0')}"
+                )
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableStatusNotificationsBestEffort(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic
+    ) {
+        if (statusNotificationSetupAttempted || gatt !== this.gatt) return
+        statusNotificationSetupAttempted = true
+
+        val supportsNotify = characteristic.properties and
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+        val supportsIndicate = characteristic.properties and
+            BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
+        val cccd = characteristic.getDescriptor(CCCD_UUID)
+        if ((!supportsNotify && !supportsIndicate) || cccd == null) {
+            diagnosticLogger.log(
+                "protocol_status_subscription",
+                mapOf("enabled" to false, "reason" to "unsupported_or_missing_cccd")
+            )
+            return
+        }
+        if (!gatt.setCharacteristicNotification(characteristic, true)) {
+            diagnosticLogger.log(
+                "protocol_status_subscription",
+                mapOf("enabled" to false, "reason" to "local_registration_rejected")
+            )
+            return
+        }
+
+        cccd.value = if (supportsNotify) {
+            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        } else {
+            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+        }
+        statusNotificationUuid = characteristic.uuid
+        if (!gatt.writeDescriptor(cccd)) {
+            statusNotificationUuid = null
+            gatt.setCharacteristicNotification(characteristic, false)
+            diagnosticLogger.log(
+                "protocol_status_subscription",
+                mapOf("enabled" to false, "reason" to "descriptor_write_rejected")
+            )
+        }
+    }
+
+    private fun ByteArray.toBoundedHex(limit: Int = 48): String {
+        val shown = take(limit).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+        return if (size > limit) "$shown …(+${size - limit}B)" else shown
     }
 
     private fun prepareBatteryCandidates(gatt: BluetoothGatt) {
@@ -1333,6 +1528,9 @@ class MainActivity : ComponentActivity() {
         // the standard Battery Service keeps original Nuna devices compatible.
         gatt.getService(SERVICE_UUID)
             ?.getCharacteristic(BatteryTelemetry.NUNA_POWER_UUID)
+            ?.takeIf {
+                it.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0
+            }
             ?.let(batteryReadCandidates::addLast)
         gatt.getService(BatteryTelemetry.STANDARD_SERVICE_UUID)
             ?.getCharacteristic(BatteryTelemetry.STANDARD_LEVEL_UUID)
@@ -1618,10 +1816,40 @@ class MainActivity : ComponentActivity() {
         val now = SystemClock.elapsedRealtime()
         val firstPacket = !hasReceivedAudioPacket
         totalPacketCount++
+        protocolAudioPacketCount++
         totalBytesCount += value.size
         lastAudioPacketElapsedMs = now
         lastAudioFrameId = extractAudioFrameId(value) ?: lastAudioFrameId
         hasReceivedAudioPacket = true
+
+        if (protocolAudioPacketCount <= 8L || protocolAudioPacketCount % 100L == 0L) {
+            val envelope = NunaProtocolInspector.parseEnvelope(value)
+            val audio = NunaProtocolInspector.parseAudio(value)
+            if (envelope != null && audio != null) {
+                Log.d(
+                    TAG,
+                    "PROTO A003 #$protocolAudioPacketCount frame=${audio.frameId} " +
+                        "frameSize=${audio.frameSize} chunk=${audio.chunkId}/${audio.totalChunks} " +
+                        "payload=${audio.payloadBytes} opusFrames=${audio.opusFramesInPayload} " +
+                        "ts=${audio.timestampMs} checksum=${envelope.checksumClassification}"
+                )
+                diagnosticLogger.log(
+                    "protocol_audio_packet",
+                    NunaProtocolInspector.envelopeFields(envelope) +
+                        NunaProtocolInspector.audioFields(audio) +
+                        mapOf("packet_index" to protocolAudioPacketCount, "raw_bytes" to value.size)
+                )
+            } else {
+                diagnosticLogger.log(
+                    "protocol_audio_packet_invalid",
+                    mapOf(
+                        "packet_index" to protocolAudioPacketCount,
+                        "raw_bytes" to value.size,
+                        "prefix_hex" to value.toBoundedHex()
+                    )
+                )
+            }
+        }
 
         if (firstPacket) {
             cancelFirstAudioTimeout()
