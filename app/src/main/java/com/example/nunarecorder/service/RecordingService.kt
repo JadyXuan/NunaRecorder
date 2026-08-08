@@ -48,6 +48,11 @@ class RecordingService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val TICK_PERIOD_MS = 1_000L
         private const val LOW_BATTERY_NOTIFICATION_ID = 1003
+        private const val OUTAGE_NOTIFICATION_ID = 1004
+        /** 提醒用的独立渠道：只有它允许出声 */
+        private const val ALERT_CHANNEL_ID = "nuna_alert_channel"
+        /** 链路持续中断多久就主动提醒佩戴者 */
+        private const val OUTAGE_ALERT_AFTER_MS = 5 * 60_000L
         /** 从高到低；每个阈值只提醒一次 */
         private val LOW_BATTERY_THRESHOLDS = listOf(20, 10, 5)
         /** 功耗采样周期 */
@@ -68,6 +73,9 @@ class RecordingService : Service() {
     private var lastBatteryWarning = Int.MAX_VALUE
     private val powerProbe by lazy { PowerProbe(this) }
     private var lastPowerSampleMs = 0L
+    /** 链路中断开始的时刻；0 = 没在中断 */
+    private var outageStartedAtMs = 0L
+    private var outageAlerted = false
     /** 当前会话所属的小时格起点；跨过它就换会话 */
     private var currentHourStart = 0L
     private var recordingDeviceName = ""
@@ -91,6 +99,7 @@ class RecordingService : Service() {
                 lastPowerSampleMs = now
                 powerProbe.sample(stats?.receivedPackets ?: 0L, stats?.totalBytes ?: 0L)
             }
+            checkSustainedOutage(stats)
             updateNotification()
             handler.postDelayed(this, TICK_PERIOD_MS)
         }
@@ -193,6 +202,8 @@ class RecordingService : Service() {
         }
         active = true
         lastBatteryWarning = Int.MAX_VALUE
+        outageStartedAtMs = 0L
+        outageAlerted = false
         powerProbe.reset()
         lastPowerSampleMs = android.os.SystemClock.elapsedRealtime()
         DiagnosticsLog.log(TAG, "开始录制 device=$deviceName addr=$deviceAddress")
@@ -397,6 +408,64 @@ class RecordingService : Service() {
     }
 
     /**
+     * 链路持续中断时主动提醒。
+     *
+     * 一整天佩戴，中途掉线而佩戴者没察觉 = 那天白采。常驻通知虽然写着状态，
+     * 但人不会一直盯着它。**能被发现的故障远没有安静的故障可怕**，所以持续中断
+     * 超过 [OUTAGE_ALERT_AFTER_MS] 就主动响一次。
+     *
+     * 只响一次，恢复后才重置：反复响会让人直接关掉通知，那就更糟了。
+     * 走独立的提醒渠道——采集状态那个渠道是刻意静音的（每分钟一次的 VAD 提示音
+     * 就是这么来的），但这一条值得打断。
+     */
+    private fun checkSustainedOutage(stats: com.example.nunarecorder.recording.LiveRecordingStats?) {
+        val now = System.currentTimeMillis()
+        val streaming = stateMachine.status.isStreaming &&
+            stats?.lastFrameAtMs != null &&
+            now - stats.lastFrameAtMs!! < 15_000L
+        if (streaming) {
+            if (outageAlerted) {
+                DiagnosticsLog.log(TAG, "链路已恢复，撤销中断提醒")
+                runCatching {
+                    (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                        .cancel(OUTAGE_NOTIFICATION_ID)
+                }
+            }
+            outageStartedAtMs = 0L
+            outageAlerted = false
+            return
+        }
+        if (outageStartedAtMs == 0L) {
+            outageStartedAtMs = now
+            return
+        }
+        val downMs = now - outageStartedAtMs
+        if (outageAlerted || downMs < OUTAGE_ALERT_AFTER_MS) return
+        outageAlerted = true
+        DiagnosticsLog.log(TAG, "链路已中断 ${downMs / 60000} 分钟，提醒佩戴者")
+        runCatching {
+            val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            mgr.notify(
+                OUTAGE_NOTIFICATION_ID,
+                androidx.core.app.NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_stat_nuna)
+                    .setContentTitle("已经 ${downMs / 60000} 分钟没有收到录音数据")
+                    .setContentText("请检查 Nuna 设备是否还戴着、有没有电。这段时间的音频没有被采到。")
+                    .setStyle(
+                        androidx.core.app.NotificationCompat.BigTextStyle().bigText(
+                            "已经 ${downMs / 60000} 分钟没有收到录音数据。" +
+                                "请检查设备是否还戴在身上、是否还有电、是否离手机太远。" +
+                                "采集仍在自动重连，这段时间的音频没有被采到。"
+                        )
+                    )
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        }
+    }
+
+    /**
      * 设备低电量提醒。佩戴者不会主动去看电量，而设备没电等于当天剩下的时间全丢。
      * 每个阈值只提醒一次，避免在阈值附近反复弹。
      */
@@ -409,7 +478,7 @@ class RecordingService : Service() {
             val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             mgr.notify(
                 LOW_BATTERY_NOTIFICATION_ID,
-                androidx.core.app.NotificationCompat.Builder(this, CHANNEL_ID)
+                androidx.core.app.NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
                     .setSmallIcon(R.drawable.ic_stat_nuna)
                     .setContentTitle("录音设备电量 $percent%")
                     .setContentText("请尽快给 Nuna 设备充电，否则采集会中断")
@@ -437,6 +506,12 @@ class RecordingService : Service() {
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Nuna 音频采集", NotificationManager.IMPORTANCE_LOW)
                 .apply { description = "录制状态与链路健康" }
+        )
+        // 独立的提醒渠道：常驻状态那个是刻意静音的，但"掉线五分钟"值得打断
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                ALERT_CHANNEL_ID, "Nuna 采集异常提醒", NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "链路长时间中断、设备低电量" }
         )
     }
 
