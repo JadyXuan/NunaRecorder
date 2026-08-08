@@ -50,6 +50,7 @@ import com.example.nunarecorder.ble.RecordingControlAction
 import com.example.nunarecorder.ble.BatteryTelemetry
 import com.example.nunarecorder.ble.DevicePowerState
 import com.example.nunarecorder.ble.NunaProtocolInspector
+import com.example.nunarecorder.ble.AudioCaptureBoundary
 import com.example.nunarecorder.connection.RecorderConnectionEvent
 import com.example.nunarecorder.connection.RecorderConnectionPhase
 import com.example.nunarecorder.data.RecordingEntry
@@ -100,8 +101,8 @@ class MainActivity : ComponentActivity() {
         private const val PRODUCT_AUDIO_MIN_ATT_MTU = 504
         private const val MTU_NEGOTIATION_TIMEOUT_MS = 2_000L
         private const val FIRST_AUDIO_TIMEOUT_MS = 8_000L
-        private const val STOP_CONFIRM_GRACE_MS = 600L
         private const val STOP_OVERALL_TIMEOUT_MS = 2_500L
+        private const val STOP_BOUNDARY_TIMEOUT_MS = 1_600L
         private const val MAX_EARLY_AUDIO_PACKETS = 32
     }
 
@@ -139,6 +140,8 @@ class MainActivity : ComponentActivity() {
     private var recordingStopDetail = "录制已停止，设备保持连接"
     private var pendingStartAfterStop = false
     private var recordingStartRecoveryAttempted = false
+    private val audioCaptureBoundary = AudioCaptureBoundary()
+    private var stopMayFinalizeAtBoundary = false
 
     // 可选电量能力：XIAO 的 A004 优先，标准 BAS 作为原 Nuna 回退。
     private val batteryReadCandidates = ArrayDeque<BluetoothGattCharacteristic>()
@@ -601,7 +604,7 @@ class MainActivity : ComponentActivity() {
                     if (deviceReportedRecording == false) {
                         beginStopTransportFinalize("设备已确认停止录音，GATT 保持连接")
                     } else {
-                        scheduleStopFinalizeGrace("停止命令已确认，GATT 保持连接")
+                        awaitStopBoundaryOrTimeout("停止命令已确认，GATT 保持连接")
                     }
                 }
             }
@@ -620,8 +623,8 @@ class MainActivity : ComponentActivity() {
                 val reason = "设备拒绝${if (event.action == RecordingControlAction.START) "开始" else "停止"}" +
                     "录音命令 (status=${event.status}, error=${event.errorCode ?: "未知"})"
                 if (event.action == RecordingControlAction.STOP) {
-                    appendDebug("$reason；按兼容模式关闭音频通知")
-                    beginStopTransportFinalize("停止反馈被拒绝，已关闭音频通道并保持连接")
+                    appendDebug("$reason；按兼容模式等待完整音频组后关闭通知")
+                    awaitStopBoundaryOrTimeout("停止反馈被拒绝，已关闭音频通道并保持连接")
                 } else if (hasReceivedAudioPacket) {
                     // Legacy/XIAO behavior: CCCD subscription itself may already have started audio.
                     appendDebug("$reason；已有音频流，按兼容模式继续")
@@ -641,8 +644,8 @@ class MainActivity : ComponentActivity() {
                     )
                 )
                 if (event.action == RecordingControlAction.STOP) {
-                    appendDebug("停止录音反馈超时；按兼容模式关闭音频通知")
-                    beginStopTransportFinalize("停止反馈超时，已关闭音频通道并保持连接")
+                    appendDebug("停止录音反馈超时；按兼容模式等待完整音频组后关闭通知")
+                    awaitStopBoundaryOrTimeout("停止反馈超时，已关闭音频通道并保持连接")
                 } else {
                     appendDebug("开始录音反馈超时；继续等待兼容设备的首个音频包")
                 }
@@ -718,6 +721,7 @@ class MainActivity : ComponentActivity() {
         recordingStopDetail = detail
         recordingStopFinalizeStarted = false
         pendingAudioDisableForStop = false
+        stopMayFinalizeAtBoundary = false
         recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
         cancelFirstAudioTimeout()
         handshakeClient.cancelPendingRecordingControl()
@@ -741,23 +745,50 @@ class MainActivity : ComponentActivity() {
             )
         )
         if (!queued) {
-            appendDebug("停止录音命令未入队；按兼容模式关闭 A003")
-            beginStopTransportFinalize("停止命令未入队，已关闭音频通道并保持连接")
+            appendDebug("停止录音命令未入队；按兼容模式等待完整音频组后关闭 A003")
+            awaitStopBoundaryOrTimeout("停止命令未入队，已关闭音频通道并保持连接")
             return
         }
 
         recordingStopTimeout = Runnable {
             recordingStopTimeout = null
-            beginStopTransportFinalize("停止确认超时，已关闭音频通道并保持连接")
+            awaitStopBoundaryOrTimeout("停止确认超时，已关闭音频通道并保持连接")
         }.also { diagnosticHandler.postDelayed(it, STOP_OVERALL_TIMEOUT_MS) }
     }
 
-    private fun scheduleStopFinalizeGrace(detail: String) {
+    private fun awaitStopBoundaryOrTimeout(detail: String) {
+        if (recordingStopFinalizeStarted ||
+            viewModel.connectionState.value.phase != RecorderConnectionPhase.STOPPING_RECORDING
+        ) return
+        recordingStopDetail = detail
         recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
+        recordingStopTimeout = null
+
+        // A stale device-side recording can be stopped before a local session is opened.
+        // There is no file boundary to preserve in that recovery path.
+        if (!sessionRecorder.isRecording) {
+            beginStopTransportFinalize(detail)
+            return
+        }
+
+        stopMayFinalizeAtBoundary = true
+        diagnosticLogger.log(
+            "recording_stop_waiting_for_audio_boundary",
+            mapOf(
+                "already_at_group_end" to audioCaptureBoundary.lastWrittenPacketEndedGroup,
+                "aligned" to audioCaptureBoundary.aligned,
+                "skipped_leading_packets" to audioCaptureBoundary.skippedLeadingPackets
+            )
+        )
+        if (audioCaptureBoundary.lastWrittenPacketEndedGroup) {
+            beginStopTransportFinalize("$detail（已在完整音频组边界封口）")
+            return
+        }
+
         recordingStopTimeout = Runnable {
             recordingStopTimeout = null
-            beginStopTransportFinalize(detail)
-        }.also { diagnosticHandler.postDelayed(it, STOP_CONFIRM_GRACE_MS) }
+            beginStopTransportFinalize("$detail（等待完整音频组超时）")
+        }.also { diagnosticHandler.postDelayed(it, STOP_BOUNDARY_TIMEOUT_MS) }
     }
 
     @SuppressLint("MissingPermission")
@@ -766,6 +797,7 @@ class MainActivity : ComponentActivity() {
             viewModel.connectionState.value.phase != RecorderConnectionPhase.STOPPING_RECORDING
         ) return
         recordingStopFinalizeStarted = true
+        stopMayFinalizeAtBoundary = false
         recordingStopDetail = detail
         recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
         recordingStopTimeout = null
@@ -805,6 +837,7 @@ class MainActivity : ComponentActivity() {
         if (viewModel.connectionState.value.phase != RecorderConnectionPhase.STOPPING_RECORDING) return
         pendingAudioDisableForStop = false
         recordingStopFinalizeStarted = false
+        stopMayFinalizeAtBoundary = false
         recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
         recordingStopTimeout = null
         val retry = pendingStartAfterStop
@@ -834,6 +867,9 @@ class MainActivity : ComponentActivity() {
         lastDiagnosticRssiRequestMs = 0L
         recordingStartCommandAttempted = false
         recordingControlStatus = "pending"
+        protocolAudioPacketCount = 0L
+        audioCaptureBoundary.reset()
+        stopMayFinalizeAtBoundary = false
         earlyAudioPackets.clear()
         cancelFirstAudioTimeout()
     }
@@ -1576,6 +1612,8 @@ class MainActivity : ComponentActivity() {
         recordingStopTimeout = null
         recordingStopFinalizeStarted = false
         pendingAudioDisableForStop = false
+        stopMayFinalizeAtBoundary = false
+        audioCaptureBoundary.reset()
         pendingStartAfterStop = false
         recordingStartRecoveryAttempted = false
         setDevicePowerState(state)
@@ -2034,6 +2072,8 @@ class MainActivity : ComponentActivity() {
     private fun processAudioNotification(value: ByteArray) {
         val now = SystemClock.elapsedRealtime()
         val firstPacket = !hasReceivedAudioPacket
+        val parsedAudio = NunaProtocolInspector.parseAudio(value)
+        val boundaryDecision = audioCaptureBoundary.onPacket(parsedAudio)
         totalPacketCount++
         protocolAudioPacketCount++
         totalBytesCount += value.size
@@ -2043,7 +2083,7 @@ class MainActivity : ComponentActivity() {
 
         if (protocolAudioPacketCount <= 8L || protocolAudioPacketCount % 100L == 0L) {
             val envelope = NunaProtocolInspector.parseEnvelope(value)
-            val audio = NunaProtocolInspector.parseAudio(value)
+            val audio = parsedAudio
             if (envelope != null && audio != null) {
                 Log.d(
                     TAG,
@@ -2090,7 +2130,31 @@ class MainActivity : ComponentActivity() {
         } else {
             audioStallMonitor.onPacket(now)?.let(::handleAudioStallEvent)
         }
-        writeToFile(value)
+
+        if (boundaryDecision.writePacket) {
+            writeToFile(value)
+        } else {
+            val audio = parsedAudio
+            appendDebug(
+                "跳过会话开头的不完整音频分块 " +
+                    "frame=${audio?.frameId} chunk=${audio?.chunkId}/${audio?.totalChunks}"
+            )
+            diagnosticLogger.log(
+                "audio_leading_chunk_skipped",
+                mapOf(
+                    "frame_id" to audio?.frameId,
+                    "chunk_id" to audio?.chunkId,
+                    "total_chunks" to audio?.totalChunks,
+                    "skipped_count" to audioCaptureBoundary.skippedLeadingPackets
+                )
+            )
+        }
+
+        if (stopMayFinalizeAtBoundary && boundaryDecision.groupEndAfterWrite &&
+            viewModel.connectionState.value.phase == RecorderConnectionPhase.STOPPING_RECORDING
+        ) {
+            beginStopTransportFinalize("$recordingStopDetail（已在完整音频组边界封口）")
+        }
     }
 
     private fun openFileForRecording(): Boolean {
