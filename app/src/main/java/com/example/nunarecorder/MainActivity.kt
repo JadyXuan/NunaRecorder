@@ -83,6 +83,8 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "NunaRecorder"
+        /** 单次扫描时长。必须有终点，见 startScan 里的注释 */
+        private const val SCAN_DURATION_MS = 20_000L
     }
 
     // 记录当前选中的设备 MAC 地址（来自列表点击，存于 ViewModel）
@@ -182,6 +184,16 @@ class MainActivity : ComponentActivity() {
         enrollmentStore.current()?.let { checkAppVersion(it) }
 
         requestBlePermissions()
+        // 上次被杀掉的会话会把 recording.active 永久留在 true——那个会话就再也进不了
+        // 批量上传，界面上也一直显示"录制中"，连传到服务端的 manifest 都在撒谎。
+        runCatching {
+            com.example.nunarecorder.session.StaleRecordingSweeper.sweep(
+                SessionPaths.listSessionDirs(),
+                RecordingController.stats.value?.sessionDir?.absolutePath
+            )
+        }.getOrNull()?.cleared?.takeIf { it.isNotEmpty() }?.let {
+            appendLog("已修复 ${it.size} 个上次没有正常收尾的会话，现在可以正常上传了")
+        }
         VadJobQueue.start(this)
         val resumed = VadJobQueue.resumeAllIncompleteSessions()
         if (resumed > 0) appendLog("自动续传 VAD: $resumed 个音频段待分析")
@@ -223,6 +235,17 @@ class MainActivity : ComponentActivity() {
             NunaRecorderTheme {
                 // 0 设备 1 录音 2 设置（Wearable 调试页已从导航移除，代码见 DEBUG_WEARABLE 注释块）
                 var selectedTab by remember { mutableStateOf(0) }
+                // 固件版本目前只在 manifest 里；READ_FIRMWARE_ON_CONNECT 关着时就是 null，
+                // 卡片会显示"未知"，不假装知道。只在打开设置页时才去读盘。
+                val deviceFirmware = remember(selectedTab) {
+                    if (selectedTab != 5) null
+                    else SessionPaths.listSessionDirs().asSequence()
+                        .mapNotNull {
+                            com.example.nunarecorder.session.SessionManifest
+                                .load(SessionPaths.manifestFile(it))?.deviceFirmware
+                        }
+                        .firstOrNull()
+                }
                 var segmentPlayback by remember { mutableStateOf<SegmentPlaybackState?>(null) }
 
                 DisposableEffect(Unit) {
@@ -342,6 +365,15 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onAutoVadChange = { enabled ->
                                     viewModel.setUserSettings(userSettings.copy(autoVadOnRecord = enabled))
+                                },
+                                deviceFirmware = deviceFirmware,
+                                onCopySystemInfo = { text ->
+                                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as android.content.ClipboardManager
+                                    cm.setPrimaryClip(
+                                        android.content.ClipData.newPlainText("system_info", text)
+                                    )
+                                    Toast.makeText(this@MainActivity, "已复制", Toast.LENGTH_SHORT).show()
                                 },
                                 onSave = {
                                     userSettingsStorage.save(userSettings)
@@ -537,9 +569,39 @@ class MainActivity : ComponentActivity() {
      * - 为 null：扫到什么都加到列表
      * - 为非空字符串：只要匹配该名称就停止扫描并连接
      */
+    private val scanThrottle = com.example.nunarecorder.ble.ScanThrottle()
+    private val scanStopHandler = android.os.Handler(Looper.getMainLooper())
+    private val scanAutoStop = Runnable {
+        if (!scanning) return@Runnable
+        val found = viewModel.deviceList.size
+        stopScan()
+        if (found == 0) {
+            appendLog(
+                "扫描结束，没有发现任何设备。可能是：设备不在广播（要放回充电板、" +
+                    "长按到白灯闪烁进入配对模式）、离得太远，或者系统把扫描限流了。" +
+                    "连续扫不到时，把蓝牙关掉再打开通常能恢复。",
+                LogLevel.INFO
+            )
+        } else {
+            appendLog("扫描结束，共发现 $found 台设备")
+        }
+    }
+
     private fun startScan(targetNameFilter: String?) {
         if (scanning) {
             appendLog("Scan already in progress, ignore.")
+            return
+        }
+
+        // Android 30 秒内最多允许 5 次扫描启动，超了就**静默**挡掉——
+        // startScan 照样返回、onScanFailed 多数机型也不回调，界面只会一直"扫描中"。
+        // 与其让用户对着扫不到东西的界面按第六次，不如在这里拦住并说清要等多久。
+        val decision = scanThrottle.tryStart(System.currentTimeMillis())
+        if (decision is com.example.nunarecorder.ble.ScanThrottle.Decision.Throttled) {
+            appendLog(
+                "扫描太频繁，系统会静默挡掉。请等 ${(decision.waitMs + 999) / 1000} 秒再扫。",
+                LogLevel.INFO
+            )
             return
         }
 
@@ -573,9 +635,14 @@ class MainActivity : ComponentActivity() {
         currentTargetNameFilter = targetNameFilter
         bluetoothLeScanner?.startScan(filters, settings, scanCallback)
         scanning = true
+        // 一定要有终点。LOW_LATENCY 扫描挂着不停既费电，又会把限流窗口一直占满，
+        // 而且 Android 8.1 起息屏时无过滤扫描根本不返回结果。
+        scanStopHandler.removeCallbacks(scanAutoStop)
+        scanStopHandler.postDelayed(scanAutoStop, SCAN_DURATION_MS)
 
         appendLog(
-            if (targetNameFilter == null) "扫描中…" else "扫描目标设备…"
+            if (targetNameFilter == null) "扫描中…（${SCAN_DURATION_MS / 1000} 秒后自动停止）"
+            else "扫描目标设备…"
         )
     }
 
@@ -596,6 +663,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        scanStopHandler.removeCallbacks(scanAutoStop)
         bluetoothLeScanner?.stopScan(scanCallback)
         scanning = false
         appendDebug("扫描已停止")
@@ -626,7 +694,12 @@ class MainActivity : ComponentActivity() {
 
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
-            appendLog("扫描失败 (code=$errorCode)")
+            scanning = false
+            scanStopHandler.removeCallbacks(scanAutoStop)
+            appendLog(
+                com.example.nunarecorder.ble.ScanThrottle.describeScanFailure(errorCode),
+                LogLevel.INFO
+            )
         }
     }
 
@@ -688,7 +761,12 @@ class MainActivity : ComponentActivity() {
             if (status?.status == "synced") return@mapNotNull null
             val manifest = com.example.nunarecorder.session.SessionManifest
                 .load(SessionPaths.manifestFile(dir)) ?: return@mapNotNull null
-            if (manifest.recordingActive) return@mapNotNull null   // 正在录的不动
+            // 只排除**此刻真正在录**的那一个。不能信 manifest 里的 recordingActive：
+            // 进程被杀过就再也不会被写回 false，那个会话会永远进不了批量上传
+            // （用户 2026-08-09 实测：最后那个必须手动传）。
+            if (dir.absolutePath == RecordingController.stats.value?.sessionDir?.absolutePath) {
+                return@mapNotNull null
+            }
             RecordingEntry.Session(dir = dir, manifest = manifest)
         }
         if (pending.isEmpty()) {
@@ -823,6 +901,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 不停扫描就退出 = 泄漏一个 scanner 注册。Android 对每个应用的注册数有上限，
+        // 攒满之后 startScan 就再也扫不到东西了，**只有杀掉进程才会释放**——
+        // 用户 2026-08-09 报的"一台都没有，重启后才看得到"就是这个。
+        stopScan()
+        scanStopHandler.removeCallbacks(scanAutoStop)
         segmentPlayer.stop()
         // DEBUG_WEARABLE_START
         wearableDebugService?.stopRecording()
