@@ -139,10 +139,14 @@ class NunaBleLink(
          * 它是诊断用的锦上添花，而采到数据是任务本身。设备固件版本换个方式也能拿到
          * （官方 App、或者以后单独一个不在采集期跑的探测包）。
          *
-         * 置回 true 之前必须先有真机对照数据，不要因为"看起来无害"就打开——
-         * 08-06 那次卡死三天的也是一次"看起来无害"的 GATT 操作。
+         * **2026-08-09 重新打开。** 对照数据已经证明它与掉数据无关：同一台手机、
+         * 同一晚、同一个 app 1.8，没更新固件的 04DF 占空比 99%，更新过固件的 018A 是 0%。
+         * 真正的原因是新固件要显式收 START、断开前要收 STOP（见 RecordingControlProtocol）。
+         *
+         * 协议文档里 A001 的 `0x05` 设备信息比标准 DIS 更准（带型号、硬件版本、
+         * 序列号），但那要新增一条控制命令；先用 DIS 把固件版本拿回来。
          */
-        private const val READ_FIRMWARE_ON_CONNECT = false
+        private const val READ_FIRMWARE_ON_CONNECT = true
 
         private val DEVICE_INFO_SERVICE_UUID: UUID =
             UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")

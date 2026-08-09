@@ -266,6 +266,22 @@ class MainActivity : ComponentActivity() {
                     ) {
                         when (selectedTab) {
                             0 -> MainScreen(
+                                firstRunStep = com.example.nunarecorder.util.FirstRunGuide.nextStep(
+                                    enrollment,
+                                    viewModel.pairedDevices,
+                                    com.example.nunarecorder.util.FirstRunGuide
+                                        .hasVoiceprint(this@MainActivity)
+                                ),
+                                onFirstRunAction = { step ->
+                                    selectedTab = when (step) {
+                                        com.example.nunarecorder.util.FirstRunGuide.Step.ENROLL -> 2
+                                        com.example.nunarecorder.util.FirstRunGuide.Step.VOICEPRINT -> 4
+                                        else -> 0
+                                    }
+                                    if (step == com.example.nunarecorder.util.FirstRunGuide.Step.PAIR_DEVICE) {
+                                        startScanForList()
+                                    }
+                                },
                                 logText = logText,
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,

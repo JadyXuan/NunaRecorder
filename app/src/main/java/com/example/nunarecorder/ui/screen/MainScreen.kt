@@ -65,6 +65,10 @@ fun MainScreen(
     pairedDevices: List<PairedDevice>,
     selectedDeviceAddress: String?,
     linkStatus: LinkStatus,
+    /** 第一次使用还差哪一步；READY 时不显示引导 */
+    firstRunStep: com.example.nunarecorder.util.FirstRunGuide.Step =
+        com.example.nunarecorder.util.FirstRunGuide.Step.READY,
+    onFirstRunAction: (com.example.nunarecorder.util.FirstRunGuide.Step) -> Unit = {},
     liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
@@ -158,6 +162,8 @@ fun MainScreen(
                 Text("停止采集", fontWeight = FontWeight.SemiBold)
             }
         }
+
+        FirstRunCard(step = firstRunStep, onAction = onFirstRunAction)
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
 
@@ -539,5 +545,44 @@ private fun StatusLine(label: String, value: String, emphasis: Boolean = false) 
             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
             modifier = Modifier.weight(1f)
         )
+    }
+}
+
+/**
+ * 第一次使用的引导卡。
+ *
+ * 参与者拿到的是一个装好但什么都没配的 App，而**漏掉的那一步不会当场报错**：
+ * 漏了入组就上传不了，漏了声纹就没有说话人参照——都要等回来才发现。
+ * 所以放在主页最显眼的位置，配齐了自动消失。
+ */
+@Composable
+private fun FirstRunCard(
+    step: com.example.nunarecorder.util.FirstRunGuide.Step,
+    onAction: (com.example.nunarecorder.util.FirstRunGuide.Step) -> Unit
+) {
+    val advice = com.example.nunarecorder.util.FirstRunGuide.adviceFor(step) ?: return
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Text(
+                advice.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                advice.body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+            )
+            Spacer(Modifier.height(8.dp))
+            ElevatedButton(onClick = { onAction(step) }) { Text(advice.action) }
+        }
     }
 }
