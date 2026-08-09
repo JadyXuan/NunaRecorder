@@ -91,6 +91,17 @@ class NunaBleLink(
         private const val SERVICE_DISCOVERY_TIMEOUT_MS = 10_000L
         /** A003 订阅后多久读第一次电量 */
         private const val BATTERY_FIRST_READ_DELAY_MS = 5_000L
+        /** 订阅后多久还没有音频就 STOP→START 复位一次 */
+        private const val RECORDING_RESTART_DELAY_MS = 8_000L
+        /** 两条 A002 控制命令之间的间隔，避开 GATT 的一次一个操作 */
+        private const val RECORDING_CONTROL_GAP_MS = 600L
+        /** 发完 STOP 到真正关闭 GATT 之间留的时间 */
+        private const val STOP_SETTLE_MS = 250L
+        /** 产品版 A003 通知约 501 字节，ATT MTU 要谈到接近 517 */
+        private const val PREFERRED_ATT_MTU = 517
+        /** 产品版音频包的建议下限，低于它只告警不阻断 */
+        private const val PRODUCT_AUDIO_MIN_ATT_MTU = 504
+        private const val MTU_TIMEOUT_MS = 2_000L
         /** 电量变化很慢，几分钟一次足够 */
         private const val BATTERY_POLL_PERIOD_MS = 5 * 60_000L
 
@@ -263,7 +274,11 @@ class NunaBleLink(
             handler.removeCallbacks(batteryPoll)
             batteryGatt = null
             unregisterAdapterReceiver()
-            teardownGatt()
+            // 先把 STOP 写出去，给协议栈一点时间，再真正关闭。
+            // 用户主动停止是**唯一**能干净收尾的时机，别浪费它——
+            // 这一步没做好，下一次采集就要靠充电板复位设备。
+            sendRecordingStopBestEffort()
+            handler.postDelayed({ teardownGatt() }, STOP_SETTLE_MS)
         }
     }
 
@@ -352,8 +367,30 @@ class NunaBleLink(
     }
 
     @SuppressLint("MissingPermission")
+    /** MTU 协商是否已经有结论（回调或超时），避免服务发现被发起两次 */
+    private var mtuSettled = false
+    private var negotiatedMtu = 23
+
+    @SuppressLint("MissingPermission")
+    private fun startServiceDiscovery(g: BluetoothGatt, gen: Int, reason: String) {
+        if (mtuSettled) return
+        mtuSettled = true
+        if (isStale(g) || !running.get()) return
+        val ok = runCatching { g.discoverServices() }.getOrDefault(false)
+        log(TAG, "发起服务发现（第 $gen 代，$reason，MTU=$negotiatedMtu）= $ok")
+        if (!ok) {
+            teardownGatt()
+            scheduleReconnect()
+        }
+    }
+
     private fun teardownGatt() {
         val g = gatt ?: return
+        // 断开前把 STOP 发出去。不发就断，产品版固件的状态机会卡在录音态，
+        // 下次重连订阅上了也不推流——我们此前每次 teardown 都在制造这个问题。
+        sendRecordingStopBestEffort()
+        handler.removeCallbacks(recordingRestart)
+        restartGatt = null
         gatt = null
         subscribed = false
         lastTeardownAtMs = System.currentTimeMillis()
@@ -414,14 +451,20 @@ class NunaBleLink(
                     // （14:08 那份日志）是能正常列出 8 个 service 的。
                     // 那个"连上 12 ms 就发现完且一个都没有"的现象另有其因——是旧实例的
                     // 回调，已经由 isStale 守卫解决，不需要用延迟去躲。
-                    val started = g.discoverServices()
-                    log(TAG, "已连接 $name（第 $gen 代），discoverServices = $started")
-                    listener.onGattConnected(name)
-                    if (!started) {
-                        teardownGatt()
-                        scheduleReconnect()
-                        return@post
+                    // 产品版 A003 通知约 501 字节，默认 23 的 ATT MTU 装不下。
+                    // 协议文档（Ruihan 实机验证）要求先协商到接近 517。
+                    // 回调不来就超时继续——MTU 谈不成也比卡在这里强。
+                    mtuSettled = false
+                    val mtuQueued = runCatching { g.requestMtu(PREFERRED_ATT_MTU) }.getOrDefault(false)
+                    log(TAG, "已连接 $name（第 $gen 代），requestMtu($PREFERRED_ATT_MTU) = $mtuQueued")
+                    if (!mtuQueued) {
+                        startServiceDiscovery(g, gen, "mtu_not_queued")
+                    } else {
+                        handler.postDelayed({
+                            if (!mtuSettled) startServiceDiscovery(g, gen, "mtu_timeout")
+                        }, MTU_TIMEOUT_MS)
                     }
+                    listener.onGattConnected(name)
                     handler.postDelayed({
                         if (isStale(g)) {
                             log(TAG, "第 $gen 代的发现超时检查被跳过：连接已被替换")
@@ -495,6 +538,18 @@ class NunaBleLink(
             }
         }
 
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            handler.post {
+                negotiatedMtu = mtu
+                log(TAG, "MTU 协商结果 $mtu（status=$status）")
+                if (mtu < PRODUCT_AUDIO_MIN_ATT_MTU) {
+                    // 只告警不阻断：老固件的包很小，MTU 谈不上去照样能采
+                    log(TAG, "MTU $mtu 低于产品版 501 字节音频包的建议值 $PRODUCT_AUDIO_MIN_ATT_MTU，仍继续")
+                }
+                startServiceDiscovery(g, connectionGeneration, "mtu_changed")
+            }
+        }
+
         override fun onDescriptorWrite(
             g: BluetoothGatt,
             descriptor: BluetoothGattDescriptor,
@@ -521,9 +576,14 @@ class NunaBleLink(
                         subscribedAtMs = System.currentTimeMillis()
                         receivedAnyData = false
                         lastDataAtMs = subscribedAtMs
+                        recordingRestartTried = false
+                        // 产品版固件必须显式发 START 才推流；老固件订阅就推，
+                        // 多发这一条也无害。见 RecordingControlProtocol。
+                        handshakeClient.requestRecordingControl(g, enabled = true)
                         // 音频起来了再管电量，且延迟几秒，彻底避开订阅阶段的操作槽
                         scheduleBatteryRead(g)
-                        log(TAG, "A003 已订阅，等待音频")
+                        scheduleRecordingRestart(g)
+                        log(TAG, "A003 已订阅，已发录音开始命令，等待音频")
                         listener.onAudioSubscribed()
                     }
                 }
@@ -568,6 +628,7 @@ class NunaBleLink(
                 RECORDING_CHAR_UUID -> {
                     if (!receivedAnyData) {
                         receivedAnyData = true
+                        handler.removeCallbacks(recordingRestart)
                         log(TAG, "收到第一帧音频（订阅后 ${(System.currentTimeMillis() - subscribedAtMs) / 1000} 秒）")
                     }
                     // 音频走热路径：不 post 到 handler，直接交给上层写文件。
@@ -692,6 +753,54 @@ class NunaBleLink(
      * 电量变化很慢，几分钟读一次完全够，不值得为它冒险动 CCCD。
      */
     @SuppressLint("MissingPermission")
+    /** 本次订阅是否已经试过一次 STOP→START 复位 */
+    private var recordingRestartTried = false
+    private var restartGatt: BluetoothGatt? = null
+
+    /**
+     * 订阅上了却收不到音频时，先 STOP 再 START 把设备状态机踢一下。
+     *
+     * Ruihan 2026-08-09 实机验证：产品版固件如果上次是直接断开 GATT 而没发 STOP，
+     * 状态机会卡住，下次重连订阅了也不推流；先发 STOP 再发 START 就出音频。
+     * 这正是我们看到的"已订阅但没有收到数据"，也是为什么必须放回充电板
+     * 进配对模式才能采到数据——那是在用别的方式复位设备。
+     *
+     * 只试一次。试不好就交给看门狗重连，别把 A002 变成命令风暴。
+     */
+    private val recordingRestart = Runnable {
+        val g = restartGatt ?: return@Runnable
+        if (!running.get() || !subscribed || receivedAnyData || isStale(g)) return@Runnable
+        recordingRestartTried = true
+        log(TAG, "订阅后 ${RECORDING_RESTART_DELAY_MS / 1000} 秒没有音频，尝试 STOP→START 复位设备状态机")
+        handshakeClient.requestRecordingControl(g, enabled = false)
+        // 两条命令都写 A002，必须错开：GATT 一次只允许一个未完成操作
+        handler.postDelayed({
+            if (running.get() && subscribed && !receivedAnyData && !isStale(g)) {
+                handshakeClient.requestRecordingControl(g, enabled = true)
+            }
+        }, RECORDING_CONTROL_GAP_MS)
+    }
+
+    private fun scheduleRecordingRestart(g: BluetoothGatt) {
+        restartGatt = g
+        handler.removeCallbacks(recordingRestart)
+        if (recordingRestartTried) return
+        handler.postDelayed(recordingRestart, RECORDING_RESTART_DELAY_MS)
+    }
+
+    /**
+     * 主动断开前把 STOP 发出去。
+     *
+     * **不发 STOP 就断开会让设备状态机卡住，下次重连收不到音频**——这是产品版固件
+     * 的行为，我们此前每次 teardown 都在制造这个问题。这里是 best-effort：
+     * 写入是 WRITE_NO_RESPONSE，发完给协议栈一点时间再真正关闭。
+     */
+    private fun sendRecordingStopBestEffort() {
+        val g = gatt ?: return
+        if (!subscribed) return
+        runCatching { handshakeClient.requestRecordingControl(g, enabled = false) }
+    }
+
     private fun scheduleBatteryRead(g: BluetoothGatt) {
         handler.removeCallbacks(batteryPoll)
         batteryGatt = g

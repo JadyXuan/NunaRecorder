@@ -262,6 +262,21 @@ class HandshakeClient(
 
     @OptIn(kotlin.ExperimentalStdlibApi::class)
     @SuppressLint("MissingPermission")
+    /**
+     * 产品版固件的录音开关。见 [RecordingControlProtocol] 里为什么必须发。
+     *
+     * 老固件订阅 A003 就会推流，命令发不出去也不影响它——所以这里失败只记日志，
+     * 不拆链路。
+     */
+    fun requestRecordingControl(gatt: BluetoothGatt, enabled: Boolean): Boolean {
+        val commandId = nextCommandId()
+        val data = RecordingControlProtocol.recordingCommandData(commandId, enabled)
+        val packet = MessagePacker.pack(MessageType.CONTROL_REQUEST, data)
+        val ok = writeToTransferChar(gatt, packet)
+        log("REC_CTRL: ${if (enabled) "START" else "STOP"} id=$commandId queued=$ok")
+        return ok
+    }
+
     private fun writeToTransferChar(gatt: BluetoothGatt, value: ByteArray): Boolean {
         val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
             Manifest.permission.BLUETOOTH_CONNECT
