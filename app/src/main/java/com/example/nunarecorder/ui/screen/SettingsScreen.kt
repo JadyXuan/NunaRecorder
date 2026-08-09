@@ -29,6 +29,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.data.UserSettings
+import com.example.nunarecorder.util.SystemInfo
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.remember
+import androidx.compose.material3.TextButton
 
 @Composable
 fun SettingsScreen(
@@ -36,6 +40,10 @@ fun SettingsScreen(
     onLogLevelChange: (LogLevel) -> Unit,
     onAutoVadChange: (Boolean) -> Unit,
     onSave: () -> Unit,
+    /** Nuna 设备固件版本；读不到就传 null */
+    deviceFirmware: String? = null,
+    /** 复制系统信息到剪贴板 */
+    onCopySystemInfo: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -130,6 +138,10 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(24.dp))
+        SettingsSectionLabel("系统信息")
+        Spacer(Modifier.height(8.dp))
+        SystemInfoCard(deviceFirmware = deviceFirmware, onCopy = onCopySystemInfo)
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -183,3 +195,49 @@ private fun SettingsSectionLabel(text: String) {
         fontWeight = FontWeight.SemiBold
     )
 }
+
+/**
+ * 排障时第一批要问的事实，直接摆出来，别让人手打。
+ * 出问题时用户只要按"复制"发过来，就省掉一轮"你装的是哪个版本"。
+ */
+@Composable
+private fun SystemInfoCard(deviceFirmware: String?, onCopy: (String) -> Unit) {
+    val context = LocalContext.current
+    val info = remember(deviceFirmware) { SystemInfo.read(context, deviceFirmware) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            InfoRow("App 版本", info.appVersion)
+            InfoRow("系统版本", info.androidVersion)
+            InfoRow("手机型号", info.phoneModel)
+            InfoRow(
+                "后台保活",
+                if (info.ignoringBatteryOptimizations) "已豁免电池优化"
+                else "未豁免——长时间采集可能被系统杀掉"
+            )
+            InfoRow("设备固件", info.deviceFirmware ?: "未知（连接后才读得到）")
+            Spacer(Modifier.height(6.dp))
+            TextButton(onClick = { onCopy(info.toShareText()) }) {
+                Text("复制这些信息")
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+            modifier = Modifier.width(76.dp)
+        )
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
