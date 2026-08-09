@@ -245,7 +245,7 @@ class SessionRecorder(
     var diagnosticsSnapshot: (() -> String)? = null
 
     @Synchronized
-    fun stop() {
+    fun stop(endReason: String = SessionManifest.END_USER_STOP) {
         val dir = sessionDir ?: return
         val now = clock()
         closeCurrentSegment(now)
@@ -262,6 +262,7 @@ class SessionRecorder(
         }
         manifest?.let { m ->
             m.endedAtMs = now
+            m.endReason = endReason
             m.recordingActive = false
             m.openSegmentIndex = null
             m.openSegmentBytes = 0L

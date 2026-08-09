@@ -67,6 +67,17 @@ data class SessionManifest(
      * 固件版本会决定一台设备能不能采到数据，而数据里原来看不出来是哪个版本采的。
      */
     var deviceFirmware: String? = null,
+    /**
+     * 会话是怎么结束的。null = 旧会话，没有这个字段。
+     *
+     * 2026-08-09 全天数据里有 6 个零长会话（整点轮转崩掉留下的），而 manifest 上
+     * **看不出那是崩溃还是一次正常的零长会话**——唯一能区分的是 `vad.status` 停在
+     * `pending`，那纯属碰巧。读数据的人不该靠碰巧的旁证去猜。
+     *
+     * 取值：[END_USER_STOP]（用户按了停止）、[END_ROLLOVER]（整点换会话）、
+     * [END_CRASH_RECOVERED]（上次没能正常收尾，下次启动时补的）。
+     */
+    var endReason: String? = null,
     /** 参与者主动删除的分段；与 [missingSegments] 是两回事，不能混 */
     var deletedSegments: List<SegmentDeletion> = emptyList()
 ) {
@@ -80,6 +91,7 @@ data class SessionManifest(
         put("segment_duration_ms", segmentDurationMs)
         put("legacy", legacy)
         appVersion?.let { put("app_version", it) }
+        endReason?.let { put("end_reason", it) }
         deviceFirmware?.let { put("device_firmware", it) }
         if (sourceOpus != null) put("source_opus", sourceOpus)
         put("audio", JSONObject().apply {
@@ -124,6 +136,12 @@ data class SessionManifest(
     }
 
     companion object {
+        const val END_USER_STOP = "user_stop"
+        const val END_ROLLOVER = "hourly_rollover"
+        const val END_CRASH_RECOVERED = "crash_recovered"
+        /** 服务被销毁（系统回收 / OEM 省电），不是用户按的停止 */
+        const val END_SERVICE_DESTROYED = "service_destroyed"
+
         fun load(file: File): SessionManifest? = try {
             val j = JSONObject(file.readText())
             val audio = j.getJSONObject("audio")
@@ -173,6 +191,7 @@ data class SessionManifest(
                 link = LinkHealth.fromJson(j.optJSONObject("link")),
                 missingSegments = missing,
                 appVersion = j.optString("app_version").takeIf { it.isNotEmpty() },
+                endReason = j.optString("end_reason").takeIf { it.isNotEmpty() },
                 deviceFirmware = j.optString("device_firmware").takeIf { it.isNotEmpty() },
                 deletedSegments = deleted
             )

@@ -36,6 +36,7 @@ object StaleRecordingSweeper {
             if (!m.recordingActive) continue
 
             m.recordingActive = false
+            m.endReason = SessionManifest.END_CRASH_RECOVERED
             m.openSegmentIndex = null
             m.openSegmentBytes = 0L
             // 没有正常收尾就没有 ended_at_ms。用最后一段的结束时间兜底，

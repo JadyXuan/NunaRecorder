@@ -65,6 +65,29 @@ class StaleRecordingSweeperTest {
     }
 
     @Test
+    fun `补收尾要标成 crash_recovered，别让人靠 vad 状态猜`() {
+        // 2026-08-09 全天数据里有 6 个零长会话（整点轮转崩掉留下的），
+        // manifest 上看不出那是崩溃还是正常的零长会话——唯一能区分的是
+        // vad.status 停在 pending，那纯属碰巧。
+        val dir = session("killed", active = true, segments = 1)
+        StaleRecordingSweeper.sweep(listOf(dir), activePath = null)
+        assertEquals(SessionManifest.END_CRASH_RECOVERED, reload(dir).endReason)
+    }
+
+    @Test
+    fun `end_reason 能写进 json 也能读回来`() {
+        val dir = session("done", active = false, ended = 1L)
+        val m = reload(dir)
+        m.endReason = SessionManifest.END_ROLLOVER
+        SessionManifestIO.write(dir, m)
+        assertEquals(SessionManifest.END_ROLLOVER, reload(dir).endReason)
+        assertEquals(
+            SessionManifest.END_ROLLOVER,
+            SessionManifest.load(SessionPaths.manifestFile(dir))!!.toJson().optString("end_reason")
+        )
+    }
+
+    @Test
     fun `此刻真正在录的那个不能碰`() {
         val live = session("live", active = true)
         val r = StaleRecordingSweeper.sweep(listOf(live), activePath = live.absolutePath)
