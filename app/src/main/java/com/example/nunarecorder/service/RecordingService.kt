@@ -75,6 +75,9 @@ class RecordingService : Service() {
     private var lastPowerSampleMs = 0L
     /** 链路中断开始的时刻；0 = 没在中断 */
     private var outageStartedAtMs = 0L
+    /** 声纹录制导致的会话暂停起点；0 = 没在暂停 */
+    @Volatile
+    private var voiceprintPauseStartedAtMs = 0L
     private var outageAlerted = false
     /** 当前会话所属的小时格起点；跨过它就换会话 */
     private var currentHourStart = 0L
@@ -345,11 +348,29 @@ class RecordingService : Service() {
         }
 
         override fun onAudioData(data: ByteArray) {
+            // 声纹录制期间**只喂声纹，不写会话**。
+            //
+            // 用的是同一台设备的同一条流，所以麦克风匹配自动成立（这正是把声纹做进
+            // App 的理由）；但那两段是入组材料，不该进当天的待标注数据——
+            // 朗读文本和"讲讲你的一天"混进标注池，既污染数据集，也等于把一段
+            // 明确为登记目的录的音拿去做别的用途。
+            if (VoiceprintSession.isCapturing) {
+                if (voiceprintPauseStartedAtMs == 0L) {
+                    voiceprintPauseStartedAtMs = System.currentTimeMillis()
+                }
+                VoiceprintSession.feed(data)
+                return
+            }
+            if (voiceprintPauseStartedAtMs != 0L) {
+                // 空档要写进 manifest，否则事后看只是"这一分钟没音频"，和掉线没区别
+                val from = voiceprintPauseStartedAtMs
+                voiceprintPauseStartedAtMs = 0L
+                handler.post {
+                    recorder?.noteIntentionalGap(from, System.currentTimeMillis(), "voiceprint_capture")
+                }
+            }
             // BLE 回调线程直写，不绕主线程
             recorder?.feed(data)
-            // 声纹录制期间同一份字节也喂给它：用的是同一台设备的同一个麦克风，
-            // 这正是把声纹做进 App 的理由——麦克风匹配自动成立。
-            VoiceprintSession.feed(data)
         }
 
         override fun onBatteryLevel(percent: Int) {

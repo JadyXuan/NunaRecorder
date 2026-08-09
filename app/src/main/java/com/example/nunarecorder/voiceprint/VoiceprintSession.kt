@@ -59,6 +59,19 @@ object VoiceprintSession {
     fun fileFor(context: Context, step: Step): File =
         File(context.filesDir, "enrollment/voiceprint_${step.name.lowercase()}.opus")
 
+    /**
+     * 声纹录制期间**正常采集必须暂停**。
+     *
+     * 用户 2026-08-09 质疑得对：两段声纹用的是同一条 BLE 音频流，如果同时喂给
+     * SessionRecorder，朗读文本和"讲讲你的一天"就会原样进入待标注数据集。
+     * 那两段是**入组材料**（属于参与者档案），不是当天的生活记录；
+     * 让它们混进标注池既污染数据集，又等于把一段明确为登记目的录的音
+     * 拿去做别的用途。
+     *
+     * 这个标记由 RecordingService 在音频分发处读：为 true 时只喂声纹，不写会话。
+     */
+    val isCapturing: Boolean get() = _state.value.active
+
     fun start(context: Context, step: Step) {
         capture?.discard()
         capture = VoiceprintCapture(fileFor(context, step))

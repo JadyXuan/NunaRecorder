@@ -45,6 +45,9 @@ fun VoiceprintScreen(
     onSkip: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // 界面上所有时长文案的唯一来源，避免和 VoiceprintQuality 里的常量漂开
+    val freeMinLabel = formatDuration(VoiceprintSession.minDurationFor(VoiceprintSession.Step.FREE))
+    val readMinLabel = formatDuration(VoiceprintSession.minDurationFor(VoiceprintSession.Step.READ))
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -54,7 +57,7 @@ fun VoiceprintScreen(
     ) {
         Text("录制声纹", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            "用你正在佩戴的 Nuna 设备录两段：一段朗读约 30 秒，一段自己讲至少 2 分钟" +
+            "用你正在佩戴的 Nuna 设备录两段：一段朗读约 $readMinLabel，一段自己讲至少 $freeMinLabel" +
             "（想多讲随时可以，不封顶）。之后系统会用它自动区分录音里" +
                 "哪些是你说的话，你不需要逐分钟去标注说话人。",
             style = MaterialTheme.typography.bodySmall,
@@ -94,11 +97,13 @@ fun VoiceprintScreen(
 
         StepBlock(
             index = 2,
-            title = "用自己的话讲讲你的一天（至少 1 分钟，想讲多久都行）",
+            // 时长一律从 MIN_FREE_MS 推导。写死的数字迟早和常量漂开——
+            // 2026-08-09 用户就发现界面写"至少 1 分钟"、实际要求 2 分钟。
+            title = "用自己的话讲讲你的一天（至少 $freeMinLabel，想讲多久都行）",
             done = state.freeDone,
             body = VoiceprintSession.FREE_PROMPT +
                 "\n\n（用自然聊天的语气，不要念稿——朗读和聊天的声学特征差别很大。" +
-                "讲满 1 分钟就可以停，但想多讲完全没问题。）",
+                "讲满 $freeMinLabel 就可以停，但想多讲完全没问题。）",
             active = state.active && state.step == VoiceprintSession.Step.FREE,
             elapsedMs = state.elapsedMs,
             minMs = VoiceprintSession.minDurationFor(VoiceprintSession.Step.FREE),
@@ -239,4 +244,12 @@ private fun StepBlock(
             }
         }
     }
+}
+
+
+/** 60 秒以下按秒说，以上按分钟说；整分不带小数 */
+private fun formatDuration(ms: Long): String {
+    val sec = ms / 1000
+    if (sec < 60) return "$sec 秒"
+    return if (sec % 60 == 0L) "${sec / 60} 分钟" else "%.1f 分钟".format(sec / 60.0)
 }

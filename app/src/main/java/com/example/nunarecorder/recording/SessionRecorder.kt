@@ -277,6 +277,20 @@ class SessionRecorder(
         onLog("录制已停止")
     }
 
+    /**
+     * 记一段**有意为之**的空档（目前只有录声纹）。
+     *
+     * 空档必须写进 manifest，否则事后看只是"这一分钟没有音频"，和掉线一模一样。
+     * reason 用 `voiceprint_capture` 而不是断连原因，读数据的人一眼能分清
+     * "我们主动停的"和"链路坏了"。
+     */
+    @Synchronized
+    fun noteIntentionalGap(startMs: Long, endMs: Long, reason: String) {
+        if (sessionDir == null) return
+        linkEvents.add(LinkGapEntry(startMs, endMs, reason, reconnectAttempts = 0))
+        flushManifestNow()
+    }
+
     private fun linkHealth(): LinkHealth {
         val d = assembler.diagnostics()
         val events = linkEvents.toMutableList()
