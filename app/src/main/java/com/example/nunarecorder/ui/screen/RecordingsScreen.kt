@@ -88,7 +88,14 @@ fun RecordingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    var entries by remember { mutableStateOf(listOf<RecordingEntry>()) }
+    // neverEqualPolicy 是必须的，不是保险起见。
+    // RecordingEntry.Session 是 data class(dir, manifest)，**syncStatus 不参与 equals**
+    // （它是构造时读的 body val）。所以上传完成后重新加载出来的列表与旧列表判定相等，
+    // 赋值成了空操作，界面根本不重组——用户 2026-08-09 两次报"全部上传完还是显示 10，
+    // 切换界面刷新后才正常"，切标签页会重建组件，所以看起来像"刷新一下就好了"。
+    var entries by remember {
+        mutableStateOf(listOf<RecordingEntry>(), policy = androidx.compose.runtime.neverEqualPolicy())
+    }
     var entryToDelete by remember { mutableStateOf<RecordingEntry?>(null) }
     var multiModalTarget by remember { mutableStateOf<RecordingEntry?>(null) }
     var multiModalAction by remember { mutableStateOf(MultiModalAction.SHARE) }
