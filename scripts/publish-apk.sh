@@ -8,6 +8,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLATFORM="$(cd "$ROOT/../EgoAudio-Data_Platform" && pwd)"
 APK="$ROOT/app/build/outputs/apk/device/debug/app-device-debug.apk"
+
+# 路径基准断言。2026-08-10：`~/Workspace/` 下冒出过一个 root 所有的
+# `EgoAudio-Mobile_Collector/app/build/outputs` 空目录——某处把子库基准写成了
+# `~/Workspace/` 而不是 `~/Workspace/EgoAudio_Data_Collection/`，
+# 而 `docker run -v /不存在的路径:/x` **不报错，Docker 会以 root 把它建出来**，
+# 宿主机普通用户还删不掉。这个脚本没有用 -v，但拼错基准的代价是静默的，
+# 所以宁可在这里炸掉，也不要默默去操作一个错的目录。
+[ "$(basename "$ROOT")" = "EgoAudio-Mobile_Collector" ] || {
+  echo "拒绝发布：ROOT 不是 EgoAudio-Mobile_Collector，实际是 $ROOT"; exit 1; }
+[ -d "$PLATFORM/runtime/apk" ] || {
+  echo "拒绝发布：$PLATFORM/runtime/apk 不存在。不要让任何命令去创建它——"
+  echo "  它应当由 Data Platform 部署时建好；这里缺失说明路径基准错了。"; exit 1; }
 PUBLIC="${EGOAUDIO_UPLOAD_URL:-https://nuna-audio-lab-data.cuhkaiot.com}"
 
 [ -f "$APK" ] || { echo "先构建参与者包：./gradlew assembleDeviceDebug"; exit 1; }
