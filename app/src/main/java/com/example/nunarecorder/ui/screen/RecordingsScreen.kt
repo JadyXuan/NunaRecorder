@@ -138,6 +138,10 @@ fun RecordingsScreen(
 
     val migrationState by MigrationCoordinator.state.collectAsState()
     val syncState by SessionSyncCoordinator.state.collectAsState()
+    // 上传状态一变就重载。上传只改 sync_status.json，既不动 manifest 也不动 entries，
+    // 没有这一条的话"待上传 / 可清理"要等用户切标签页才更新
+    // （用户 2026-08-09 实测："全部上传完，全部上传还是显示为 10"）。
+    LaunchedEffect(syncState?.phase, syncState?.targetKey) { reload() }
     var confirmCleanup by remember { mutableStateOf(false) }
     LaunchedEffect(migrationState) {
         when (migrationState?.phase) {

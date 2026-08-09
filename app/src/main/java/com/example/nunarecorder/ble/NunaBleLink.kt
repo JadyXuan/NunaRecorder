@@ -117,6 +117,22 @@ class NunaBleLink(
          * （1811 → 1813）解决的。也就是说**固件版本会决定一台设备能不能采到数据**，
          * 而数据里看不出来是哪个版本采的。
          */
+        /**
+         * **2026-08-09 关掉了固件读取。**
+         *
+         * 对照上传数据：app 1.8 每 60 秒的段收到 2880–2952 个包（设备帧 80–82 个），
+         * 1.13 只收到 1476–1800（设备帧 41–50），而 `sequence_lost=0` / `gaps=[]`——
+         * **不是丢包，是设备根本不发了**。1.8 → 1.13 之间我在 BLE 上只加了两样：
+         * 看门狗拆分（只影响何时拆链路，不影响设备推流）和这一次固件 read。
+         *
+         * 它是诊断用的锦上添花，而采到数据是任务本身。设备固件版本换个方式也能拿到
+         * （官方 App、或者以后单独一个不在采集期跑的探测包）。
+         *
+         * 置回 true 之前必须先有真机对照数据，不要因为"看起来无害"就打开——
+         * 08-06 那次卡死三天的也是一次"看起来无害"的 GATT 操作。
+         */
+        private const val READ_FIRMWARE_ON_CONNECT = false
+
         private val DEVICE_INFO_SERVICE_UUID: UUID =
             UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
         private val FIRMWARE_REVISION_UUID: UUID =
@@ -695,7 +711,7 @@ class NunaBleLink(
             if (g != null && !isStale(g) && subscribed) {
                 // 固件只读一次，且和电量**错开**：GATT 一次只允许一个未完成操作，
                 // 两个 read 挤在一起后发的会被丢弃（这正是 08-06 握手卡死的成因）。
-                if (!firmwareRead) {
+                if (!firmwareRead && READ_FIRMWARE_ON_CONNECT) {
                     val fw = g.getService(DEVICE_INFO_SERVICE_UUID)
                         ?.getCharacteristic(FIRMWARE_REVISION_UUID)
                     if (fw != null) {

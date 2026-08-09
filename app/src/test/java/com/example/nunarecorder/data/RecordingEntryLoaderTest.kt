@@ -2,6 +2,8 @@ package com.example.nunarecorder.data
 
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionManifestIO
+import com.example.nunarecorder.sync.SessionSyncStatus
+import com.example.nunarecorder.sync.SessionSyncStatusIO
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -116,6 +118,25 @@ class RecordingEntryLoaderTest {
         val list = loader.load()
         assertEquals(1, list.size)
         assertEquals("good", list[0].displayName)
+    }
+
+    @Test
+    fun `上传完成只改 sync_status，列表也必须跟着变`() {
+        // 用户 2026-08-09 实测："全部上传完，全部上传还是显示为 10，
+        // 同时清理已同步也是 10……切换界面刷新后才显示正常"。
+        // 成因是缓存键只看 manifest，而上传**不动 manifest**，只写 sync_status.json。
+        val dir = makeSession("uploaded", 1_700_000_000_000L, 1)
+        val loader = RecordingEntryLoader(sessionDirs = { listOf(dir) }, legacyFiles = { emptyList() })
+        assertEquals(null, (loader.load()[0] as RecordingEntry.Session).syncStatus)
+
+        SessionSyncStatusIO.write(
+            dir,
+            SessionSyncStatus(sessionId = "uploaded", status = "synced")
+        )
+
+        val after = loader.load()[0] as RecordingEntry.Session
+        assertEquals("synced", after.syncStatus?.status)
+        assertEquals("sync_status 变了必须重新构造条目", 2, loader.misses)
     }
 
     @Test

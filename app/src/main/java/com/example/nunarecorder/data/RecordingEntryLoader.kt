@@ -2,6 +2,7 @@ package com.example.nunarecorder.data
 
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.sync.SessionSyncStatus
 import java.io.File
 
 /**
@@ -28,7 +29,23 @@ class RecordingEntryLoader(
     private val legacyFiles: () -> List<File> = { SessionPaths.listLegacyOpusFiles() }
 ) {
 
-    private data class CacheKey(val lastModified: Long, val length: Long)
+    /**
+     * 缓存键必须同时覆盖 `manifest.json` **和** `labels/sync_status.json`。
+     *
+     * 2026-08-09 用户实测：「全部上传完，全部上传还是显示为 10，同时清理已同步也是 10，
+     * 每个 seg 一上来也没有显示已同步，切换界面刷新后才显示正常」。
+     *
+     * 成因是我引入的：[RecordingEntry.Session.syncStatus] 从 `get()` 改成构造时读一次
+     * （为了不在每帧读盘），但缓存键只看 manifest——而**上传完成只改
+     * `sync_status.json`，不动 manifest**，于是缓存一直命中，界面拿到的是上传前的状态。
+     * 切换标签页会重建列表，所以"刷新一下就好了"。
+     */
+    private data class CacheKey(
+        val manifestModified: Long,
+        val manifestLength: Long,
+        val syncModified: Long,
+        val syncLength: Long
+    )
 
     private val cache = HashMap<String, Pair<CacheKey, RecordingEntry.Session>>()
 
@@ -49,7 +66,8 @@ class RecordingEntryLoader(
             val path = dir.absolutePath
             alive.add(path)
             val mf = SessionPaths.manifestFile(dir)
-            val key = CacheKey(mf.lastModified(), mf.length())
+            val sf = SessionSyncStatus.syncFile(dir)
+            val key = CacheKey(mf.lastModified(), mf.length(), sf.lastModified(), sf.length())
             val cached = cache[path]
             if (cached != null && cached.first == key) {
                 hits++
