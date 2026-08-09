@@ -413,8 +413,12 @@ fun RecordingsScreen(
             Text("录音文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             // 未同步 / 已同步各有多少，决定两个批量操作是否可点
+            // 同 uploadAllPending：只排除此刻真正在录的那一个，不信 manifest 里的
+            // recordingActive——被杀过的会话那个标志永远是 true，会被静默漏掉。
             val pendingCount = entries.count {
-                it is RecordingEntry.Session && it.syncStatus?.status != "synced" && !it.isRecordingActive
+                it is RecordingEntry.Session &&
+                    it.syncStatus?.status != "synced" &&
+                    it.dir.absolutePath != activeRecordingPath
             }
             // 原来是 remember(entries) 里同步算：
             // ① 它遍历每个会话的全部文件求体积，几百个文件时会卡住主线程；
