@@ -51,6 +51,8 @@ class ContextDataService : Service() {
 
         const val ACTION_START = "com.example.nunarecorder.action.START_CONTEXT"
         const val ACTION_STOP  = "com.example.nunarecorder.action.STOP_CONTEXT"
+        /** 整点轮转：只换输出文件，不停服务、不动传感器注册 */
+        const val ACTION_SWITCH = "com.example.nunarecorder.action.SWITCH_CONTEXT"
         const val EXTRA_SIDECAR_PATH = "extra_sidecar_path"
 
         /** 新格式：写入会话目录下 context/context.jsonl */
@@ -61,6 +63,33 @@ class ContextDataService : Service() {
                 putExtra(EXTRA_SIDECAR_PATH, contextFile.absolutePath)
             }
             context.startForegroundService(intent)
+        }
+
+        /**
+         * 整点换会话时**只切输出文件**，绝不 stop 再 start。
+         *
+         * 2026-08-09 全天实测（T-2026-08-10-025）：`rolloverSession()` 原来是
+         * `stop()` 紧接 `start()`，两条命令投给同一个服务，于是
+         *
+         * - ACTION_STOP 的 `stopSelf()` 排在 ACTION_START **之后**才真正销毁服务，
+         *   `onDestroy()` 又调一次 `stopCapture()`，**把刚起来的采集掐掉**——
+         *   整点轮转出来的会话 `context.jsonl` 只有 2–7 条（meta 行加几个 IMU 采样）
+         *   然后再无数据。全天 813 段里 452 段（55.6%）完全没有 IMU/GPS/activity，
+         *   而 manifest 里 `modalities` 照样写着三个模态：静默失败。
+         * - 更糟的是 `startForegroundService()` 之后服务若被销毁、5 秒内没有
+         *   `startForeground()`，Android 会抛 ForegroundServiceDidNotStartInTime
+         *   把进程杀掉——17 个整点里 6 次崩掉采集就是它，偶尔能自愈是因为这是竞态。
+         *
+         * 换文件不碰传感器注册还有一个好处：GPS provider 不用每小时重新预热一次。
+         */
+        fun switchSession(context: Context, sessionDir: File) {
+            val contextFile = com.example.nunarecorder.session.SessionPaths.contextFile(sessionDir)
+            context.startService(
+                Intent(context, ContextDataService::class.java).apply {
+                    action = ACTION_SWITCH
+                    putExtra(EXTRA_SIDECAR_PATH, contextFile.absolutePath)
+                }
+            )
         }
 
         fun stop(context: Context) {
@@ -105,6 +134,19 @@ class ContextDataService : Service() {
                 }
                 startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
                 startCapture(File(path))
+            }
+            ACTION_SWITCH -> {
+                val path = intent.getStringExtra(EXTRA_SIDECAR_PATH)
+                if (path == null) {
+                    Log.w(TAG, "SWITCH 缺少目标路径，保持原样")
+                } else if (!collecting) {
+                    // 服务不知怎么已经停了：当成一次正常启动，别让新会话没有传感器数据
+                    Log.w(TAG, "SWITCH 时采集未在进行，按 START 处理")
+                    startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
+                    startCapture(File(path))
+                } else {
+                    switchOutput(File(path))
+                }
             }
             ACTION_STOP -> {
                 stopCapture()
@@ -210,6 +252,30 @@ class ContextDataService : Service() {
             Log.w(TAG, "Activity recognition unavailable (GMS or permission)")
             activityCollector = null
         }
+    }
+
+    /**
+     * 只换输出文件：旧文件 flush + close，新文件接着写，**传感器注册原样保留**。
+     *
+     * 加锁是必须的——IMU 回调在传感器线程上写 [output]，这里在主线程换它。
+     */
+    private fun switchOutput(sidecar: File) {
+        synchronized(lock) {
+            runCatching { output?.flush(); output?.close() }
+            output = try {
+                BufferedOutputStream(FileOutputStream(sidecar, true), 64 * 1024)
+            } catch (e: Exception) {
+                Log.e(TAG, "切换 context 输出失败: ${e.message}")
+                collecting = false
+                null
+            }
+            lastFlushMs = System.currentTimeMillis()
+        }
+        if (output == null) return
+        Log.d(TAG, "Context 输出已切到 ${sidecar.absolutePath}")
+        writeRecord(
+            """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"],"reason":"hourly_rollover"}"""
+        )
     }
 
     private fun stopCapture() {

@@ -53,6 +53,8 @@ class RecordingService : Service() {
         private const val ALERT_CHANNEL_ID = "nuna_alert_channel"
         /** 链路持续中断多久就主动提醒佩戴者 */
         private const val OUTAGE_ALERT_AFTER_MS = 5 * 60_000L
+        /** 自我拉起闹钟的重排周期 */
+        private const val WATCHDOG_ALARM_PERIOD_MS = 5 * 60_000L
         /** 从高到低；每个阈值只提醒一次 */
         private val LOW_BATTERY_THRESHOLDS = listOf(20, 10, 5)
         /** 功耗采样周期 */
@@ -75,6 +77,7 @@ class RecordingService : Service() {
     private var lastPowerSampleMs = 0L
     /** 链路中断开始的时刻；0 = 没在中断 */
     private var outageStartedAtMs = 0L
+    private var lastWatchdogArmMs = 0L
     /** 声纹录制导致的会话暂停起点；0 = 没在暂停 */
     @Volatile
     private var voiceprintPauseStartedAtMs = 0L
@@ -103,6 +106,7 @@ class RecordingService : Service() {
                 powerProbe.sample(stats?.receivedPackets ?: 0L, stats?.totalBytes ?: 0L)
             }
             checkSustainedOutage(stats)
+            armWatchdogAlarm()
             updateNotification()
             handler.postDelayed(this, TICK_PERIOD_MS)
         }
@@ -191,8 +195,49 @@ class RecordingService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    /**
+     * 周期性重排一次"把自己拉起来"的闹钟。
+     *
+     * 前台服务在 OEM 省电策略下照样会被杀，而 `START_STICKY` 不总是及时——
+     * 2026-08-09 全天实测里采集停掉之后**恢复完全靠用户看手机**，空档最长 32 分钟
+     * （T-2026-08-10-025）。这个负担不可能转移给 30 个外部参与者。
+     *
+     * 闹钟每 [WATCHDOG_ALARM_PERIOD_MS] 重排一次，永远指向"现在 + 2 倍周期"：
+     * 服务活着就不停往后推，永远不会触发；服务死了，最后一次排的闹钟到点就把它拉回来。
+     * `startRecording` 对重复 START 幂等，所以误触发无害。
+     *
+     * **`am force-stop` 之后这套不管用**——Android 会把应用置为 stopped 状态并取消
+     * 它的闹钟，设计上就不允许自我拉起。那种杀法只有用户手动打开 App 才能恢复。
+     * 现场真正会发生的是 OEM 低内存回收和划掉任务卡，这两种它都能兜。
+     */
+    private fun armWatchdogAlarm() {
+        if (!active) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastWatchdogArmMs < WATCHDOG_ALARM_PERIOD_MS) return
+        lastWatchdogArmMs = now
+        val restart = Intent(this, RecordingService::class.java).apply {
+            action = ACTION_START
+            putExtra(EXTRA_DEVICE_NAME, recordingDeviceName)
+            putExtra(EXTRA_DEVICE_ADDRESS, recordingDeviceAddress)
+        }
+        val pi = PendingIntent.getForegroundService(
+            this, 2, restart,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        runCatching {
+            (getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager)
+                .setExactAndAllowWhileIdle(
+                    android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    now + WATCHDOG_ALARM_PERIOD_MS * 2,
+                    pi
+                )
+        }
+    }
+
     override fun onDestroy() {
-        stopRecording()
+        // 不是用户按的停止。写成 user_stop 会把一次被杀记成正常收尾，
+        // 而 manifest 是要进服务端被当成事实读的。
+        stopRecording(com.example.nunarecorder.session.SessionManifest.END_SERVICE_DESTROYED)
         super.onDestroy()
     }
 
@@ -249,15 +294,18 @@ class RecordingService : Service() {
             TAG,
             "跨小时切换会话（采集日 ${CollectionClock.dayId(now)}），旧会话封口并可独立上传"
         )
-        old.stop()
-        ContextDataService.stop(this)
+        old.stop(com.example.nunarecorder.session.SessionManifest.END_ROLLOVER)
 
         currentHourStart = CollectionClock.hourStart(now)
         val dir = SessionPaths.newSessionDir(recordingDeviceName, recordingDeviceAddress)
         val rec = newRecorder(options)
         recorder = rec
         rec.start(dir, recordingDeviceName, recordingDeviceAddress, options)
-        ContextDataService.start(this, dir)
+        // **只切输出文件，不 stop 再 start。** 原来那样写是竞态：STOP 的 stopSelf()
+        // 会在 START 之后才销毁服务，onDestroy 再 stopCapture 一次，把刚起来的采集掐掉；
+        // 而 startForegroundService 之后服务被销毁、5 秒内没 startForeground，
+        // Android 会直接杀进程。详见 ContextDataService.switchSession 与 T-2026-08-10-025。
+        ContextDataService.switchSession(this, dir)
     }
 
     private fun newRecorder(options: RecordingOptions): SessionRecorder {
@@ -285,15 +333,17 @@ class RecordingService : Service() {
         return rec
     }
 
-    private fun stopRecording() {
+    private fun stopRecording(
+        endReason: String = com.example.nunarecorder.session.SessionManifest.END_USER_STOP
+    ) {
         if (!active) return
         active = false
-        DiagnosticsLog.log(TAG, "停止录制（用户主动）")
+        DiagnosticsLog.log(TAG, "停止录制（$endReason）")
 
         handler.removeCallbacks(ticker)
         link?.release()
         link = null
-        recorder?.stop()
+        recorder?.stop(endReason)
         recorder = null
         currentHourStart = 0L
         recordingOptions = null
