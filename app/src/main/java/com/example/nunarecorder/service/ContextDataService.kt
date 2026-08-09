@@ -239,7 +239,14 @@ class ContextDataService : Service() {
             Log.d(TAG, "GPS fix: ${location.provider} lat=${location.latitude} lon=${location.longitude} acc=${location.accuracy}m")
         }
         locationListener = listener
-        LocationUpdatesHelper.startUpdates(this, locationManager!!, listener)
+        val reg = LocationUpdatesHelper.startUpdatesDetailed(this, locationManager!!, listener)
+        // 把注册结果写进 context.jsonl。没有这一行，"这段没有 GPS" 和 "今天没出门"
+        // 在数据里长得一模一样——2026-08-09 全天 GPS 几乎为零就卡在这里查不下去。
+        writeRecord(reg.toJsonLine(System.currentTimeMillis()))
+        reg.problem()?.let {
+            Log.w(TAG, "GPS 不可用：$it")
+            com.example.nunarecorder.util.DiagnosticsLog.log(TAG, "GPS 不可用：$it")
+        }
     }
 
     private fun startActivity() {

@@ -29,6 +29,53 @@ object LocationUpdatesHelper {
         return fine || coarse
     }
 
+    fun hasFineLocation(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * 一次注册的结果，**必须被记录下来**。
+     *
+     * 2026-08-09 全天数据：有传感器的会话 IMU 各 13 万–27 万条，**GPS 全是 0**；
+     * 少数有 GPS 的会话里 `provider` 全是 `network`、精度 47 米，一个 `gps` 都没有。
+     *
+     * 成因是这个类原来把失败吞掉了：[hasLocationPermission] 只要 fine 或 coarse
+     * 任一为真就放行，而只授予「大致位置」时 `GPS_PROVIDER` 的注册会抛
+     * SecurityException，被 `runCatching` 接住、只打一行 warn——**数据里看不出
+     * 这一路是断的，只看得到"没有 GPS 行"**，和"今天没出门"长得一模一样。
+     *
+     * 同意书 §3 承诺「每 30 秒记录一次 GPS」，这不是锦上添花。
+     */
+    data class Registration(
+        val gpsRegistered: Boolean,
+        val networkRegistered: Boolean,
+        val hasFine: Boolean,
+        val gpsProviderEnabled: Boolean,
+        val failures: List<String>
+    ) {
+        val anyOk: Boolean get() = gpsRegistered || networkRegistered
+
+        /** 写进 context.jsonl，让数据自己说明为什么没有 GPS 行 */
+        fun toJsonLine(nowMs: Long): String =
+            """{"type":"gps_status","t_ms":$nowMs,"gps_registered":$gpsRegistered,""" +
+                """"network_registered":$networkRegistered,"has_fine_permission":$hasFine,""" +
+                """"gps_provider_enabled":$gpsProviderEnabled,""" +
+                """"failures":[${failures.joinToString(",") { "\"" + it.replace("\"", "'") + "\"" }}]}"""
+
+        /** 给用户看的一句话；null = 没问题 */
+        fun problem(): String? = when {
+            !anyOk -> "定位完全没能注册，整段采集不会有任何 GPS。"
+            !hasFine ->
+                "只授予了「大致位置」，卫星定位用不了，只能拿到 Wi-Fi/基站定位" +
+                    "（精度几十米，户外常常一个点都没有）。请到系统权限里改成「精确位置」。"
+            !gpsProviderEnabled ->
+                "系统里的 GPS 定位是关的（可能选了「省电模式/仅网络定位」）。" +
+                    "请到系统定位设置里改成「高精度」。"
+            else -> null
+        }
+    }
+
     /**
      * @return true 若至少成功注册一个 provider
      */
@@ -47,7 +94,26 @@ object LocationUpdatesHelper {
             Log.w(TAG, "startUpdates: no location permission")
             return false
         }
+        return registerProviders(locationManager, listener, minTimeMs, minDistanceM).anyOk
+    }
+
+    /** 同上，但把结果原样交回调用方去记录。新代码用这个。 */
+    fun startUpdatesDetailed(
+        context: Context,
+        locationManager: LocationManager,
+        listener: LocationListener,
+        minTimeMs: Long = 30_000L,
+        minDistanceM: Float = 0f
+    ): Registration {
+        val hasFine = hasFineLocation(context)
+        val gpsEnabled = runCatching {
+            locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        }.getOrDefault(false)
+        if (!hasLocationPermission(context)) {
+            return Registration(false, false, hasFine, gpsEnabled, listOf("no_location_permission"))
+        }
         return registerProviders(locationManager, listener, minTimeMs, minDistanceM)
+            .copy(hasFine = hasFine, gpsProviderEnabled = gpsEnabled)
     }
 
     fun stopUpdates(locationManager: LocationManager?, listener: LocationListener?) {
@@ -62,8 +128,10 @@ object LocationUpdatesHelper {
         listener: LocationListener,
         minTimeMs: Long,
         minDistanceM: Float
-    ): Boolean {
-        var anyOk = false
+    ): Registration {
+        var gpsOk = false
+        var netOk = false
+        val failures = mutableListOf<String>()
         runCatching {
             locationManager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
@@ -73,8 +141,11 @@ object LocationUpdatesHelper {
                 Looper.getMainLooper()
             )
             Log.d(TAG, "GPS_PROVIDER registered")
-            anyOk = true
-        }.onFailure { Log.w(TAG, "GPS_PROVIDER register failed", it) }
+            gpsOk = true
+        }.onFailure {
+            Log.w(TAG, "GPS_PROVIDER register failed", it)
+            failures.add("gps:${it.javaClass.simpleName}")
+        }
 
         runCatching {
             locationManager.requestLocationUpdates(
@@ -85,9 +156,12 @@ object LocationUpdatesHelper {
                 Looper.getMainLooper()
             )
             Log.d(TAG, "NETWORK_PROVIDER registered")
-            anyOk = true
-        }.onFailure { Log.w(TAG, "NETWORK_PROVIDER register failed", it) }
+            netOk = true
+        }.onFailure {
+            Log.w(TAG, "NETWORK_PROVIDER register failed", it)
+            failures.add("network:${it.javaClass.simpleName}")
+        }
 
-        return anyOk
+        return Registration(gpsOk, netOk, hasFine = false, gpsProviderEnabled = false, failures = failures)
     }
 }
