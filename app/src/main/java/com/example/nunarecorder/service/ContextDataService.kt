@@ -116,6 +116,8 @@ class ContextDataService : Service() {
     private var sensorListener: SensorEventListener? = null
     private var locationListener: LocationListener? = null
     private var activityCollector: ActivityRecognitionCollector? = null
+    /** 最近一次定位注册结论，整点轮转时补写进新会话 */
+    private var lastGpsRegistration: LocationUpdatesHelper.Registration? = null
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -240,6 +242,7 @@ class ContextDataService : Service() {
         }
         locationListener = listener
         val reg = LocationUpdatesHelper.startUpdatesDetailed(this, locationManager!!, listener)
+        lastGpsRegistration = reg
         // 把注册结果写进 context.jsonl。没有这一行，"这段没有 GPS" 和 "今天没出门"
         // 在数据里长得一模一样——2026-08-09 全天 GPS 几乎为零就卡在这里查不下去。
         writeRecord(reg.toJsonLine(System.currentTimeMillis()))
@@ -280,6 +283,11 @@ class ContextDataService : Service() {
         }
         if (output == null) return
         Log.d(TAG, "Context 输出已切到 ${sidecar.absolutePath}")
+        // 整点轮转不重新注册 provider（那正是 T-025 的修法），所以要把上一次的
+        // 注册结论补写进新文件。否则轮转出来的会话没有 gps_status 行——
+        // 2026-08-10 实测 15:00 和 16:00 两个会话就缺这一行，而它是唯一能分辨
+        // "这段没有 GPS" 和 "这段 GPS 那一路是断的" 的依据。
+        lastGpsRegistration?.let { writeRecord(it.toJsonLine(System.currentTimeMillis())) }
         writeRecord(
             """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"],"reason":"hourly_rollover"}"""
         )
