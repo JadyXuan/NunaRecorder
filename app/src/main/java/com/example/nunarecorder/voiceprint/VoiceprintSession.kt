@@ -22,6 +22,8 @@ object VoiceprintSession {
         val step: Step = Step.READ,
         val elapsedMs: Long = 0L,
         val lastResult: VoiceprintQuality.Result? = null,
+        /** lastResult 属于哪一段；界面要把结论显示在对应的卡片里，不是页面底部 */
+        val lastStep: Step? = null,
         val readDone: Boolean = false,
         val freeDone: Boolean = false
     ) {
@@ -75,7 +77,7 @@ object VoiceprintSession {
     fun start(context: Context, step: Step) {
         capture?.discard()
         capture = VoiceprintCapture(fileFor(context, step))
-        _state.value = _state.value.copy(active = true, step = step, elapsedMs = 0L, lastResult = null)
+        _state.value = _state.value.copy(active = true, step = step, elapsedMs = 0L, lastResult = null, lastStep = null)
         DiagnosticsLog.log("Voiceprint", "开始录制 ${step.name}")
     }
 
@@ -95,6 +97,7 @@ object VoiceprintSession {
         _state.value = s.copy(
             active = false,
             lastResult = result,
+            lastStep = s.step,
             readDone = if (s.step == Step.READ) result.ok else s.readDone,
             freeDone = if (s.step == Step.FREE) result.ok else s.freeDone
         )

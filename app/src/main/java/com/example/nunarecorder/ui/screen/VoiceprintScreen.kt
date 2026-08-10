@@ -50,6 +50,17 @@ fun VoiceprintScreen(
     // 界面上所有时长文案的唯一来源，避免和 VoiceprintQuality 里的常量漂开
     val freeMinLabel = formatDuration(VoiceprintSession.minDurationFor(VoiceprintSession.Step.FREE))
     val readMinLabel = formatDuration(VoiceprintSession.minDurationFor(VoiceprintSession.Step.READ))
+
+    // **录没录过只有一个事实来源：磁盘上的声纹文件。**
+    // 之前 `done` 取的是内存里的 state.readDone/freeDone，重启后是空的——
+    // 于是状态行说"已录 08-09 · 还没上传"，上传按钮却是灰的，两句话互相打架
+    // （用户 2026-08-10 原话："这不是自相矛盾吗"）。
+    // state 只在本次刚录完时比文件更快一点，所以用 or 兜一下，不用它当依据。
+    val readStatus = statuses.firstOrNull { it.step == VoiceprintSession.Step.READ }
+    val freeStatus = statuses.firstOrNull { it.step == VoiceprintSession.Step.FREE }
+    val readRecorded = readStatus?.recorded == true || state.readDone
+    val freeRecorded = freeStatus?.recorded == true || state.freeDone
+    val pendingUpload = listOfNotNull(readStatus, freeStatus).any { it.recorded && !it.uploaded }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -89,9 +100,9 @@ fun VoiceprintScreen(
         StepBlock(
             index = 1,
             title = "朗读下面这段文字",
-            done = state.readDone,
-            statusLine = statuses.firstOrNull { it.step == VoiceprintSession.Step.READ }
-                ?.let { describeStatus(it) },
+            done = readRecorded,
+            statusLine = readStatus?.let { describeStatus(it) },
+            quality = state.lastResult.takeIf { state.lastStep == VoiceprintSession.Step.READ },
             body = VoiceprintSession.READ_SCRIPT,
             active = state.active && state.step == VoiceprintSession.Step.READ,
             elapsedMs = state.elapsedMs,
@@ -106,9 +117,9 @@ fun VoiceprintScreen(
             // 时长一律从 MIN_FREE_MS 推导。写死的数字迟早和常量漂开——
             // 2026-08-09 用户就发现界面写"至少 1 分钟"、实际要求 2 分钟。
             title = "用自己的话讲讲你的一天（至少 $freeMinLabel，想讲多久都行）",
-            done = state.freeDone,
-            statusLine = statuses.firstOrNull { it.step == VoiceprintSession.Step.FREE }
-                ?.let { describeStatus(it) },
+            done = freeRecorded,
+            statusLine = freeStatus?.let { describeStatus(it) },
+            quality = state.lastResult.takeIf { state.lastStep == VoiceprintSession.Step.FREE },
             body = VoiceprintSession.FREE_PROMPT +
                 "\n\n（用自然聊天的语气，不要念稿——朗读和聊天的声学特征差别很大。" +
                 "讲满 $freeMinLabel 就可以停，但想多讲完全没问题。）",
@@ -120,29 +131,12 @@ fun VoiceprintScreen(
             onStop = onStop
         )
 
-        state.lastResult?.let { r ->
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (r.ok) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-                    else MaterialTheme.colorScheme.error.copy(alpha = 0.08f)
-                )
-            ) {
-                Text(
-                    r.advice,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = if (r.ok) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(14.dp)
-                )
-            }
-        }
-
         Button(
             onClick = onUpload,
-            enabled = state.allDone && !uploading,
+            // 有"录了但还没传"的就能传。原来要求两段都录完，于是重启后
+            // 状态行说"还没上传"、按钮却是灰的。只录了一段也该允许先把它传上去——
+            // 传上去的那一份就安全了，剩下一段回头再补。
+            enabled = pendingUpload && !uploading,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp),
@@ -151,8 +145,10 @@ fun VoiceprintScreen(
             Text(
                 when {
                     uploading -> "正在上传…"
-                    state.allDone -> "上传声纹"
-                    else -> "两段都录完才能上传"
+                    pendingUpload && !(readRecorded && freeRecorded) -> "上传已录的这一段"
+                    pendingUpload -> "上传声纹"
+                    readRecorded && freeRecorded -> "两段都已上传"
+                    else -> "先录一段再上传"
                 },
                 fontWeight = FontWeight.SemiBold
             )
@@ -161,8 +157,16 @@ fun VoiceprintScreen(
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         }
 
-        OutlinedButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
-            Text("暂时跳过（之后可以再来录）")
+        // 两段都录过之后这个按钮就没意义了——它是给"还没开始"的人的出口，
+        // 而录完的人需要的是"回主页"。用户 2026-08-10：「暂时跳过可能不需要再显示」。
+        if (!(readRecorded && freeRecorded)) {
+            OutlinedButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
+                Text("暂时跳过（之后可以再来录）")
+            }
+        } else {
+            OutlinedButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
+                Text("返回主页")
+            }
         }
         Text(
             "声纹是生物特征信息，单独保存、不进入任何导出，你退出研究时会一并删除。",
@@ -178,6 +182,8 @@ private fun StepBlock(
     title: String,
     /** 「已录 / 未录 / 已上传」那一行；null = 不显示 */
     statusLine: String? = null,
+    /** 本次刚录完这一段的质量结论；null = 这一段没有刚录过 */
+    quality: com.example.nunarecorder.voiceprint.VoiceprintQuality.Result? = null,
     body: String,
     done: Boolean,
     active: Boolean,
@@ -257,7 +263,18 @@ private fun StepBlock(
                     onClick = onStart,
                     enabled = enabled,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (done) "重录这一段" else "开始录制") }
+                ) { Text(if (done) "重新录制这一段" else "开始录制") }
+            }
+            // 质量结论跟着**它自己那一段**走。原来只在页面底部显示最近一次结果，
+            // 于是录完两段只看得到第 2 段合不合格（用户 2026-08-10 实测）。
+            quality?.let { r ->
+                Text(
+                    r.advice,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = if (r.ok) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error
+                )
             }
         }
     }

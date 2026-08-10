@@ -372,8 +372,16 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onUpload = { uploadVoiceprints() },
                                 onSkip = { selectedTab = 0 },
-                                statuses = com.example.nunarecorder.voiceprint.VoiceprintStatus
-                                    .readAll(this@MainActivity),
+                                // 只在真有可能变化时重读（刚录完、刚传完、切进这一页）。
+                                // 直接在组合里读盘，每次重组都会跑一遍——录音列表那次
+                                // 就是这么卡住的。
+                                statuses = remember(
+                                    voiceprint.lastResult, voiceprint.active,
+                                    vpMessage, selectedTab
+                                ) {
+                                    com.example.nunarecorder.voiceprint.VoiceprintStatus
+                                        .readAll(this@MainActivity)
+                                },
                                 modifier = Modifier.fillMaxSize()
                             )
                             5 -> SettingsScreen(
@@ -845,14 +853,30 @@ class MainActivity : ComponentActivity() {
                 VoiceprintSession.Step.FREE to VoiceprintUploader.Kind.FREE
             )
             var message = "声纹已全部上传"
+            var uploaded = 0
+            var skipped = 0
             for ((step, kind) in steps) {
                 val file = VoiceprintSession.fileFor(this@MainActivity, step)
+                val st = com.example.nunarecorder.voiceprint.VoiceprintStatus
+                    .read(this@MainActivity, step)
+                // 只传"录了且还没传"的。没录的那段如实跳过——原来会走到上传器里
+                // 撞上"声纹文件为空，请重录"，那句话对一个根本没录过的段是误导。
+                if (!st.recorded) { skipped++; continue }
+                if (st.uploaded) { uploaded++; continue }
                 val r = withContext(Dispatchers.IO) { uploader.upload(code, kind, file) }
                 appendLog("声纹 ${kind.wire}：${r.message}")
                 if (!r.ok) { message = r.message; break }
                 // 传成功才记；重启之后界面据此显示"已上传"，而不是一片空白
                 com.example.nunarecorder.voiceprint.VoiceprintStatus
                     .markUploaded(this@MainActivity, step)
+                uploaded++
+            }
+            if (message == "声纹已全部上传") {
+                message = when {
+                    uploaded == 0 -> "没有可上传的声纹"
+                    skipped > 0 -> "已上传 $uploaded 段；还有 $skipped 段没录，录完再传"
+                    else -> "两段声纹都已上传"
+                }
             }
             viewModel.voiceprintUploading.value = false
             viewModel.voiceprintMessage.value = message
