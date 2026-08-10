@@ -19,7 +19,9 @@ data class VadPrelabelSegment(
     val speechMs: Long,
     val analyzedAtMs: Long,
     val status: String,
-    val error: String? = null
+    val error: String? = null,
+    /** 语音区间；新增字段，旧文件读回来是空列表 */
+    val speechIntervals: List<SpeechIntervals.Interval> = emptyList()
 )
 
 /**
@@ -52,7 +54,13 @@ object VadPrelabelWriter {
                         speechMs = o.getLong("speech_ms"),
                         analyzedAtMs = o.getLong("analyzed_at_ms"),
                         status = o.getString("status"),
-                        error = o.optString("error").takeIf { it.isNotEmpty() }
+                        error = o.optString("error").takeIf { it.isNotEmpty() },
+                        speechIntervals = o.optJSONArray("speech_intervals")?.let { arr ->
+                            (0 until arr.length()).map { i ->
+                                val iv = arr.getJSONObject(i)
+                                SpeechIntervals.Interval(iv.getLong("start_ms"), iv.getLong("end_ms"))
+                            }
+                        } ?: emptyList()
                     )
                 )
             }
@@ -150,6 +158,19 @@ object VadPrelabelWriter {
         put("has_speech", hasSpeech)
         put("speech_ratio", speechRatio.toDouble())
         put("speech_ms", speechMs)
+        // **新增字段，既有字段一个没动。** 服务端 ASR 路由看的仍然是 has_speech
+        // （vad_source: segment），这一路只服务于参与者上传前的删除决策。
+        // 跨库契约见 AGENTS.md §3：只加不改。
+        if (speechIntervals.isNotEmpty()) {
+            put("speech_intervals", org.json.JSONArray().apply {
+                speechIntervals.forEach {
+                    put(org.json.JSONObject().apply {
+                        put("start_ms", it.startMs)
+                        put("end_ms", it.endMs)
+                    })
+                }
+            })
+        }
         put("analyzed_at_ms", analyzedAtMs)
         put("status", status)
         if (error != null) put("error", error)

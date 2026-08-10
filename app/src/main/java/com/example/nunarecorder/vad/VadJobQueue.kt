@@ -163,7 +163,8 @@ object VadJobQueue {
                     speechMs = result.speechMs,
                     analyzedAtMs = System.currentTimeMillis(),
                     status = result.status,
-                    error = result.error
+                    error = result.error,
+                    speechIntervals = result.speechIntervals
                 ),
                 sessionStartedAtMs = job.sessionStartedAtMs
             )

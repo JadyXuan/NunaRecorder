@@ -5,6 +5,7 @@ import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionManifestIO
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.writeTextAtomic
+import com.example.nunarecorder.vad.VadPrelabelWriter
 import org.json.JSONObject
 import java.io.File
 
@@ -57,6 +58,48 @@ object SegmentDeleter {
      *
      * 一次点击就丢掉一整天的采集，对参与者和研究者都太容易误操作。
      */
+    /**
+     * 删掉这个会话里**所有 VAD 判定有语音的段**。
+     *
+     * 用户 2026-08-10 明确要的兜底：「如果隐私优先、那段内容真的很敏感」，
+     * 代价是少一点数据和报酬，但隐私完全包住。**调用方必须先把这个代价说清楚**——
+     * 一个删掉一整天大半数据的按钮，不能只写"确定吗"。
+     *
+     * 判据用 `has_speech`，和服务端 ASR 路由同一个字段，所以"界面上说有语音的"
+     * 和"会被删掉的"永远是同一批，不会出现两套口径。
+     *
+     * VAD 还没跑完的段**不删**：`status != "ok"` 意味着我们并不知道它有没有语音，
+     * 拿"不知道"当"没有"会漏删，拿"不知道"当"有"会误删——两种都不能接受，
+     * 所以交回调用方去等 VAD 跑完。
+     */
+    fun deleteSpeechSegments(
+        sessionDir: File,
+        nowMs: Long = System.currentTimeMillis()
+    ): BulkResult {
+        val entries = VadPrelabelWriter.loadSegments(SessionPaths.vadPrelabelFile(sessionDir))
+        val targets = entries.filter { it.status == "ok" && it.hasSpeech }.map { it.index }
+        val unknown = entries.count { it.status != "ok" }
+        var deleted = 0
+        val failed = mutableListOf<Int>()
+        for (i in targets) {
+            if (deleteSegment(sessionDir, i, nowMs).ok) deleted++ else failed.add(i)
+        }
+        return BulkResult(deleted, failed, unknown)
+    }
+
+    data class BulkResult(
+        val deleted: Int,
+        val failed: List<Int>,
+        /** VAD 还没跑完、无法判断的段数；这些一个都没动 */
+        val unknown: Int
+    )
+
+    /** 有语音的段数与总段数，用于把删除代价说清楚 */
+    fun speechSegmentCount(sessionDir: File): Pair<Int, Int> {
+        val entries = VadPrelabelWriter.loadSegments(SessionPaths.vadPrelabelFile(sessionDir))
+        return entries.count { it.status == "ok" && it.hasSpeech } to entries.size
+    }
+
     fun canDeleteSession(sessionDir: File): Boolean {
         val manifest = SessionManifest.load(SessionPaths.manifestFile(sessionDir)) ?: return true
         return manifest.segments.isEmpty()

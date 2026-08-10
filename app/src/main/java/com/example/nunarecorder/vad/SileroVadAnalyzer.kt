@@ -85,6 +85,7 @@ class SileroVadAnalyzer private constructor(
             var speechWindows = 0
             var totalWindows = 0
             var offset = 0
+            val flags = ArrayList<Boolean>(pcm.size / WINDOW_SAMPLES + 1)
             while (offset < pcm.size) {
                 val remaining = pcm.size - offset
                 val window = FloatArray(WINDOW_SAMPLES)
@@ -97,7 +98,11 @@ class SileroVadAnalyzer private constructor(
                 }
                 val prob = runWindowV4(window)
                 totalWindows++
-                if (prob >= SPEECH_THRESHOLD) speechWindows++
+                val isSpeech = prob >= SPEECH_THRESHOLD
+                if (isSpeech) speechWindows++
+                // 每窗判定留着合并成区间。原来这里算完就丢，只剩一个比例——
+                // 而参与者要的是"第 12–29 秒有说话"，比例回答不了这个问题。
+                flags.add(isSpeech)
             }
             val ratio = if (totalWindows > 0) speechWindows.toFloat() / totalWindows else 0f
             val speechMs = (ratio * durationMs).toLong()
@@ -106,7 +111,11 @@ class SileroVadAnalyzer private constructor(
                 speechRatio = ratio,
                 speechMs = speechMs,
                 durationMs = durationMs,
-                status = "ok"
+                status = "ok",
+                speechIntervals = SpeechIntervals.fromWindows(
+                    flags,
+                    windowMs = WINDOW_SAMPLES * 1000L / SAMPLE_RATE
+                )
             )
         } catch (e: Exception) {
             Log.e(TAG, "VAD analyze failed", e)

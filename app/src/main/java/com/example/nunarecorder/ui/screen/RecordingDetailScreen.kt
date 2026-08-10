@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -36,6 +37,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -84,11 +89,13 @@ fun RecordingDetailScreen(
     onDeleteSegment: (segmentIndex: Int) -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
     var manifest by remember { mutableStateOf(session.manifest) }
     var vadData by remember { mutableStateOf<VadPrelabelData?>(null) }
     var rows by remember { mutableStateOf(listOf<SegmentDetailRow>()) }
     var resumeMessage by remember { mutableStateOf<String?>(null) }
     var segmentToDelete by remember { mutableStateOf<SegmentDetailRow?>(null) }
+    var confirmSpeechPurge by remember { mutableStateOf(false) }
 
     fun reload() {
         manifest = SessionManifest.load(SessionPaths.manifestFile(session.dir)) ?: session.manifest
@@ -157,6 +164,54 @@ fun RecordingDetailScreen(
     }
 
     val showingLive = isLiveRecording || manifest.recordingActive
+
+    // 隐私兜底：一次删掉所有有语音的段。
+    // 用户 2026-08-10 明确要的：「如果隐私优先、那段内容真的很敏感」，
+    // 代价是少一点数据和报酬，但隐私完全包住。**代价必须在按下之前说清楚**——
+    // 一个删掉大半天数据的按钮不能只写"确定吗"。
+    if (confirmSpeechPurge) {
+        val (speechCount, total) = remember(rows) {
+            com.example.nunarecorder.recording.SegmentDeleter.speechSegmentCount(session.dir)
+        }
+        val unknown = remember(rows) { rows.count { it.vad == null || it.vad.status != "ok" } }
+        AlertDialog(
+            onDismissRequest = { confirmSpeechPurge = false },
+            title = { Text("删除所有有说话的片段", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "将删除这个会话里 $speechCount 个检测到说话的片段（共 $total 段），" +
+                        "约 ${speechCount} 分钟音频。删除会被记入 manifest，**无法撤销**。\n\n" +
+                        "保留下来的是没有检测到说话的部分——环境声仍然有研究价值，" +
+                        "但语音内容会全部消失，这一段的报酬也会相应减少。\n\n" +
+                        (if (unknown > 0)
+                            "另有 $unknown 段还没分析完，这次不会动它们：" +
+                                "我们并不知道它们有没有语音，按「没有」处理会漏删。等分析完再来一次。"
+                        else ""),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmSpeechPurge = false
+                    scope.launch {
+                        val r = withContext(Dispatchers.IO) {
+                            com.example.nunarecorder.recording.SegmentDeleter
+                                .deleteSpeechSegments(session.dir)
+                        }
+                        resumeMessage = "已删除 ${r.deleted} 个有说话的片段" +
+                            (if (r.failed.isNotEmpty()) "，${r.failed.size} 个失败" else "") +
+                            (if (r.unknown > 0) "；${r.unknown} 段还没分析完，未处理" else "")
+                        reload()
+                    }
+                }) {
+                    Text("全部删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSpeechPurge = false }) { Text("取消") }
+            }
+        )
+    }
 
     // 本地删除粒度与数据粒度一致：一次一分钟。整会话删除在列表页被挡住，
     // 必须先在这里把片段删干净。
@@ -262,6 +317,23 @@ fun RecordingDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
+                // 隐私兜底入口。放在列表最上面：需要用它的时候人是慌的
+                // （"刚说完，意识到有话不能说"），不该让他往下翻。
+                item {
+                    val speechRows = rows.count { it.vad?.hasSpeech == true }
+                    if (speechRows > 0 && !showingLive) {
+                        OutlinedButton(
+                            onClick = { confirmSpeechPurge = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "删除所有有说话的片段（$speechRows 段）",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
                 items(rows, key = { it.index }) { row ->
                     val pb = playback
                     val isPlaying = pb?.segmentIndex == row.index
@@ -545,7 +617,16 @@ private fun SegmentVadCard(
                 if (vad != null && vad.status == "ok") {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "语音占比 ${(vad.speechRatio * 100).toInt()}% · 约 ${vad.speechMs / 1000}s 有声",
+                        // 占比回答不了"我该去听哪里"。用户 2026-08-10 的场景是
+                        // "刚说完，意识到有话不能说，立即去找 vad 有说话的部分，还好删"——
+                        // 那是个时间窗很短的召回任务，要的是区间不是比例。
+                        if (vad.speechIntervals.isNotEmpty()) {
+                            "说话在 " + com.example.nunarecorder.vad.SpeechIntervals
+                                .describe(vad.speechIntervals) +
+                                " · 共 ${vad.speechMs / 1000}s"
+                        } else {
+                            "语音占比 ${(vad.speechRatio * 100).toInt()}% · 约 ${vad.speechMs / 1000}s 有声"
+                        },
                         style = MaterialTheme.typography.bodySmall
                     )
                     LinearProgressIndicator(
