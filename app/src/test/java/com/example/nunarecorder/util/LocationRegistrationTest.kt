@@ -42,6 +42,20 @@ class LocationRegistrationTest {
     }
 
     @Test
+    fun `权限和系统都正常却只剩网络定位，要如实说并让用户反馈`() {
+        // 这是兜底描述，只在前两条排除之后才说——否则会把人引到错的地方去改设置
+        val p = reg(gps = false, fine = true, enabled = true).problem()!!
+        assertTrue(p.contains("权限和系统设置都正常"))
+        assertTrue("不该再让用户去改权限", !p.contains("精确位置"))
+    }
+
+    @Test
+    fun `融合定位注册上了就算通，哪怕裸 GPS provider 没注册`() {
+        // fused 是户外真正拿得到卫星定位的那一路
+        assertNull(reg(gps = false, net = false).copy(fusedRegistered = true).problem())
+    }
+
+    @Test
     fun `一切正常时不要制造噪音`() {
         assertNull(reg().problem())
     }

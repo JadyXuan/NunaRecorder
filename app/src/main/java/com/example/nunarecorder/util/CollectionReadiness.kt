@@ -112,6 +112,30 @@ object CollectionReadiness {
             }
         )
 
+        // 系统定位模式。权限给足了也没用——系统定位若设成「省电/仅网络定位」，
+        // GPS provider 整个是关的，只能拿到 Wi-Fi/基站定位。
+        // 2026-08-09 全天采到的 provider 清一色 network、精度 47 米，
+        // 而自检里**当时没有这一项**，于是出门前看不出这一路是断的。
+        // 同意书 §3 承诺「每 30 秒记录一次 GPS」，这不是可选项。
+        val gpsProviderOn = runCatching {
+            (context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager)
+                .isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+        }.getOrDefault(false)
+        if (fineLocation) {
+            items.add(
+                if (gpsProviderOn) {
+                    Item(Level.OK, "系统卫星定位已开启", "能拿到真实 GPS 轨迹")
+                } else {
+                    Item(
+                        Level.DEGRADED, "系统关闭了卫星定位",
+                        "只能拿到 Wi-Fi/基站定位（精度几十米），户外常常一个点都没有。" +
+                            "同意书里承诺的每 30 秒一个 GPS 点做不到。",
+                        "到系统「设置 → 位置」里把定位模式改成「高精度」"
+                    )
+                }
+            )
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             items.add(
                 if (granted(context, Manifest.permission.ACTIVITY_RECOGNITION)) {
