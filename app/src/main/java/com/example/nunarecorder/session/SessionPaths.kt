@@ -13,6 +13,9 @@ object SessionPaths {
     const val SEGMENT_DURATION_MS = 60_000L
     const val MANIFEST_FILE = "manifest.json"
     const val CONTEXT_FILE = "context/context.jsonl"
+    const val MMWAVE_FILE = "context/mmwave.jsonl"
+    const val MMWAVE_STATE_FILE = "context/mmwave_state.jsonl"
+    const val AUDIO_TIMELINE_FILE = "audio/timeline.jsonl"
     const val VAD_PRELABEL_FILE = "labels/vad_prelabel.json"
     const val AUDIO_DIR = "audio"
     const val SEGMENT_PREFIX = "seg_"
@@ -68,6 +71,12 @@ object SessionPaths {
     fun manifestFile(sessionDir: File): File = File(sessionDir, MANIFEST_FILE)
 
     fun contextFile(sessionDir: File): File = File(sessionDir, CONTEXT_FILE)
+
+    fun mmWaveFile(sessionDir: File): File = File(sessionDir, MMWAVE_FILE)
+
+    fun mmWaveStateFile(sessionDir: File): File = File(sessionDir, MMWAVE_STATE_FILE)
+
+    fun audioTimelineFile(sessionDir: File): File = File(sessionDir, AUDIO_TIMELINE_FILE)
 
     fun vadPrelabelFile(sessionDir: File): File = File(sessionDir, VAD_PRELABEL_FILE)
 

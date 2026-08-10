@@ -42,11 +42,34 @@ sealed interface RecordingControlEvent {
     ) : RecordingControlEvent
 }
 
+enum class RadarControlAction {
+    ENABLE,
+    DISABLE
+}
+
+sealed interface RadarControlEvent {
+    data class Accepted(
+        val commandId: Int,
+        val action: RadarControlAction
+    ) : RadarControlEvent
+    data class Rejected(
+        val commandId: Int,
+        val action: RadarControlAction,
+        val status: Int,
+        val errorCode: Int?
+    ) : RadarControlEvent
+    data class TimedOut(
+        val commandId: Int,
+        val action: RadarControlAction
+    ) : RadarControlEvent
+}
+
 class HandshakeClient(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onEvent: (HandshakeEvent) -> Unit = {},
-    private val onRecordingControlEvent: (RecordingControlEvent) -> Unit = {}
+    private val onRecordingControlEvent: (RecordingControlEvent) -> Unit = {},
+    private val onRadarControlEvent: (RadarControlEvent) -> Unit = {}
 ) {
 
     companion object {
@@ -58,10 +81,13 @@ class HandshakeClient(
     private var pendingSetTimeCommandId: Int? = null
     private var pendingRecordingCommandId: Int? = null
     private var pendingRecordingAction: RecordingControlAction? = null
+    private var pendingRadarCommandId: Int? = null
+    private var pendingRadarAction: RadarControlAction? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var handshakeGeneration = 0
     private var timeoutRunnable: Runnable? = null
     private var recordingTimeoutRunnable: Runnable? = null
+    private var radarTimeoutRunnable: Runnable? = null
 
     private fun nextCommandId(): Int {
         nextCommandId = (nextCommandId + 1) and 0xFFFF
@@ -75,6 +101,7 @@ class HandshakeClient(
         verificationCodeSent = null
         pendingSetTimeCommandId = null
         cancelPendingRecordingControl()
+        cancelPendingRadarControl()
         onEvent(HandshakeEvent.Started)
         log("HS: startHandshake() called")
 
@@ -122,6 +149,44 @@ class HandshakeClient(
     fun requestRecordingStop(gatt: BluetoothGatt): Boolean =
         requestRecordingControl(gatt, RecordingControlAction.STOP)
 
+    fun requestRadarEnable(gatt: BluetoothGatt): Boolean =
+        requestRadarControl(gatt, RadarControlAction.ENABLE)
+
+    fun requestRadarDisable(gatt: BluetoothGatt): Boolean =
+        requestRadarControl(gatt, RadarControlAction.DISABLE)
+
+    private fun requestRadarControl(
+        gatt: BluetoothGatt,
+        action: RadarControlAction
+    ): Boolean {
+        cancelPendingRadarControl()
+        val commandId = nextCommandId()
+        val enabled = action == RadarControlAction.ENABLE
+        val data = RecordingControlProtocol.radarCommandData(commandId, enabled)
+        val packet = MessagePacker.pack(MessageType.CONTROL_REQUEST, data)
+        pendingRadarCommandId = commandId
+        pendingRadarAction = action
+        log("RADAR_CTRL: send $action commandId=$commandId packet=${packet.toHex()}")
+
+        if (!writeToTransferChar(gatt, packet)) {
+            pendingRadarCommandId = null
+            pendingRadarAction = null
+            log("RADAR_CTRL: $action write was not queued")
+            return false
+        }
+
+        radarTimeoutRunnable = Runnable {
+            if (pendingRadarCommandId == commandId) {
+                pendingRadarCommandId = null
+                pendingRadarAction = null
+                radarTimeoutRunnable = null
+                log("RADAR_CTRL: $action response timeout commandId=$commandId")
+                onRadarControlEvent(RadarControlEvent.TimedOut(commandId, action))
+            }
+        }.also { handler.postDelayed(it, 4_000L) }
+        return true
+    }
+
     private fun requestRecordingControl(
         gatt: BluetoothGatt,
         action: RecordingControlAction
@@ -162,6 +227,23 @@ class HandshakeClient(
         recordingTimeoutRunnable = null
         pendingRecordingCommandId = null
         pendingRecordingAction = null
+    }
+
+    fun cancelPendingRadarControl() {
+        radarTimeoutRunnable?.let(handler::removeCallbacks)
+        radarTimeoutRunnable = null
+        pendingRadarCommandId = null
+        pendingRadarAction = null
+    }
+
+    /**
+     * A001 radar status can arrive a few milliseconds before the matching A002 feedback.
+     * Stop the timeout once state is authoritative, but retain the command id so the later
+     * success response is still classified and logged correctly.
+     */
+    fun markPendingRadarStateConfirmed() {
+        radarTimeoutRunnable?.let(handler::removeCallbacks)
+        radarTimeoutRunnable = null
     }
 
     fun onNotification(
@@ -250,6 +332,27 @@ class HandshakeClient(
             } else {
                 onRecordingControlEvent(
                     RecordingControlEvent.Rejected(
+                        commandId = requestId,
+                        action = action,
+                        status = statusCode,
+                        errorCode = response.errorCode
+                    )
+                )
+            }
+            return
+        }
+
+        if (requestId == pendingRadarCommandId) {
+            val action = pendingRadarAction ?: RadarControlAction.ENABLE
+            pendingRadarCommandId = null
+            pendingRadarAction = null
+            radarTimeoutRunnable?.let(handler::removeCallbacks)
+            radarTimeoutRunnable = null
+            if (statusCode == 0) {
+                onRadarControlEvent(RadarControlEvent.Accepted(requestId, action))
+            } else {
+                onRadarControlEvent(
+                    RadarControlEvent.Rejected(
                         commandId = requestId,
                         action = action,
                         status = statusCode,
@@ -403,6 +506,7 @@ class HandshakeClient(
         pendingSetTimeCommandId = null
         cancelTimeout()
         cancelPendingRecordingControl()
+        cancelPendingRadarControl()
         onEvent(HandshakeEvent.Failed(reason))
     }
 

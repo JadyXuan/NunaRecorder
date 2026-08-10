@@ -46,7 +46,9 @@ import com.example.nunarecorder.audio.SegmentPlaybackState
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.session.AudioSegmentEntry
 import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.session.MmWaveSummary
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.session.resolveMmWaveStatus
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.theme.NunaSuccess
 import com.example.nunarecorder.vad.VadJobQueue
@@ -181,6 +183,7 @@ fun RecordingDetailScreen(
 
         SummaryCard(
             manifest = manifest,
+            sessionDir = session.dir,
             vadData = vadData,
             hasContext = session.hasContext,
             vadComplete = VadResumeHelper.isVadComplete(session.dir),
@@ -252,6 +255,7 @@ fun RecordingDetailScreen(
 @Composable
 private fun SummaryCard(
     manifest: SessionManifest,
+    sessionDir: java.io.File,
     vadData: VadPrelabelData?,
     hasContext: Boolean,
     vadComplete: Boolean,
@@ -266,6 +270,7 @@ private fun SummaryCard(
     val total = vadData?.summary?.totalSegments ?: manifest.segments.size
     val analyzed = vadData?.summary?.analyzedSegments ?: 0
     val pendingCount = (total - analyzed).coerceAtLeast(0)
+    val mmWave = manifest.resolveMmWaveStatus(sessionDir)
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -299,7 +304,41 @@ private fun SummaryCard(
                 "$total 段（约 ${manifest.segmentDurationMs / 1000}s/段）"
             }
             InfoLine("音频", segLabel)
-            InfoLine("上下文", if (hasContext) "GPS + IMU + 活动 (${SessionPaths.CONTEXT_FILE})" else "无")
+            val contextLabel = manifest.contextModalities
+                .filterNot { it == "mmwave" }
+                .joinToString(" + ") { modality ->
+                    when (modality) {
+                        "gps" -> "GPS"
+                        "imu" -> "IMU"
+                        "activity" -> "活动"
+                        else -> modality
+                    }
+                }
+            InfoLine(
+                "上下文",
+                if (hasContext) "$contextLabel (${SessionPaths.CONTEXT_FILE})" else "无"
+            )
+            InfoLine(
+                "毫米波",
+                when {
+                    mmWave.hasData -> buildString {
+                        append("已采集")
+                        mmWave.packetCount?.let { append(" $it 包") }
+                        append(" · ${formatBytes(mmWave.fileBytes)} · 可导出 JSONL")
+                    }
+                    !mmWave.enabled -> "未启用"
+                    mmWave.status == MmWaveSummary.STATUS_FINALIZE_TIMEOUT ->
+                        "封口异常 · 请检查 ${SessionPaths.MMWAVE_FILE}"
+                    isLiveRecording -> "已启用 · 等待设备 0x08 数据"
+                    else -> "已启用但未收到 0x08 数据 · 无文件可导出"
+                }
+            )
+            if (mmWave.malformedPackets > 0L || mmWave.droppedPackets > 0L) {
+                InfoLine(
+                    "毫米波诊断",
+                    "格式错误 ${mmWave.malformedPackets} · 队列丢弃 ${mmWave.droppedPackets}"
+                )
+            }
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
             Text("VAD (Silero)", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
             InfoLine("状态", vadStatusText(vadStatus, vadComplete))

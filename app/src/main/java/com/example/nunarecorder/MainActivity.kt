@@ -47,6 +47,8 @@ import com.example.nunarecorder.ble.HandshakeClient
 import com.example.nunarecorder.ble.HandshakeEvent
 import com.example.nunarecorder.ble.RecordingControlEvent
 import com.example.nunarecorder.ble.RecordingControlAction
+import com.example.nunarecorder.ble.RadarControlAction
+import com.example.nunarecorder.ble.RadarControlEvent
 import com.example.nunarecorder.ble.BatteryTelemetry
 import com.example.nunarecorder.ble.DevicePowerState
 import com.example.nunarecorder.ble.NunaProtocolInspector
@@ -57,6 +59,7 @@ import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.recording.RecordingOptions
+import com.example.nunarecorder.recording.MmWaveCaptureResult
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.recording.SessionRecorder
 import com.example.nunarecorder.session.SessionPaths
@@ -134,6 +137,10 @@ class MainActivity : ComponentActivity() {
     private var recordingControlStatus = "idle"
     private val earlyAudioPackets = ArrayDeque<ByteArray>()
     private var deviceReportedRecording: Boolean? = null
+    private var deviceReportedRadarEnabled: Boolean? = null
+    private var radarStartCommandAttempted = false
+    private var radarPreparationPending = false
+    private val radarOwnership = com.example.nunarecorder.ble.RadarControlOwnership()
     private var recordingStopTimeout: Runnable? = null
     private var recordingStopFinalizeStarted = false
     private var pendingAudioDisableForStop = false
@@ -275,7 +282,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             },
-            onRecordingControlEvent = ::handleRecordingControlEvent
+            onRecordingControlEvent = ::handleRecordingControlEvent,
+            onRadarControlEvent = ::handleRadarControlEvent
         )
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -425,6 +433,11 @@ class MainActivity : ComponentActivity() {
                                     val sec = secStr.toIntOrNull()?.coerceIn(10, 600)
                                         ?: userSettings.segmentDurationSec
                                     viewModel.setUserSettings(userSettings.copy(segmentDurationSec = sec))
+                                },
+                                onMmWaveCaptureChange = { enabled ->
+                                    viewModel.setUserSettings(
+                                        userSettings.copy(mmWaveCaptureEnabled = enabled)
+                                    )
                                 },
                                 onLifelogEnabledChange = { enabled ->
                                     viewModel.setUserSettings(userSettings.copy(lifelogEnabled = enabled))
@@ -602,7 +615,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     appendDebug("设备已接受停止录音命令 (cmdId=${event.commandId})")
                     if (deviceReportedRecording == false) {
-                        beginStopTransportFinalize("设备已确认停止录音，GATT 保持连接")
+                        awaitStopBoundaryOrTimeout("设备已确认停止录音，GATT 保持连接")
                     } else {
                         awaitStopBoundaryOrTimeout("停止命令已确认，GATT 保持连接")
                     }
@@ -653,6 +666,57 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun handleRadarControlEvent(event: RadarControlEvent) {
+        when (event) {
+            is RadarControlEvent.Accepted -> {
+                val enabled = event.action == RadarControlAction.ENABLE
+                deviceReportedRadarEnabled = enabled
+                if (enabled) radarOwnership.onEnableConfirmed()
+                else radarOwnership.onDisableConfirmed()
+                diagnosticLogger.log(
+                    "radar_control_accepted",
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase()
+                    )
+                )
+                appendDebug(
+                    "设备已接受${if (enabled) "开启" else "关闭"}毫米波雷达命令 " +
+                        "(cmdId=${event.commandId})"
+                )
+                if (enabled) completeRadarPreparation("控制反馈成功")
+            }
+            is RadarControlEvent.Rejected -> {
+                diagnosticLogger.log(
+                    "radar_control_rejected",
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase(),
+                        "status" to event.status,
+                        "error_code" to event.errorCode
+                    )
+                )
+                val detail = "设备拒绝${if (event.action == RadarControlAction.ENABLE) "开启" else "关闭"}" +
+                    "毫米波雷达 (status=${event.status}, error=${event.errorCode ?: "未知"})"
+                appendLog(detail)
+                if (event.action == RadarControlAction.ENABLE) completeRadarPreparation(detail)
+            }
+            is RadarControlEvent.TimedOut -> {
+                diagnosticLogger.log(
+                    "radar_control_timeout",
+                    mapOf(
+                        "command_id" to event.commandId,
+                        "action" to event.action.name.lowercase()
+                    )
+                )
+                val detail = "${if (event.action == RadarControlAction.ENABLE) "开启" else "关闭"}" +
+                    "毫米波雷达反馈超时"
+                appendDebug("$detail；保留音频兼容流程")
+                if (event.action == RadarControlAction.ENABLE) completeRadarPreparation(detail)
+            }
+        }
+    }
+
     private fun scheduleFirstAudioTimeout() {
         firstAudioTimeout?.let(diagnosticHandler::removeCallbacks)
         firstAudioTimeout = Runnable {
@@ -691,6 +755,8 @@ class MainActivity : ComponentActivity() {
         if (viewModel.connectionState.value.phase != RecorderConnectionPhase.STARTING_RECORDING) return
         cancelFirstAudioTimeout()
         handshakeClient.cancelPendingRecordingControl()
+        handshakeClient.cancelPendingRadarControl()
+        radarPreparationPending = false
         earlyAudioPackets.clear()
         stopRecordingDiagnostics("startup_failed")
         recording = false
@@ -700,6 +766,7 @@ class MainActivity : ComponentActivity() {
         disableAudioNotificationsBestEffort()
         transitionConnection(RecorderConnectionEvent.RecordingStartFailed(reason))
         appendLog("录制启动失败：$reason")
+        requestRadarDisableIfNeeded()
     }
 
     private fun recoverFailedRecordingStart(reason: String) {
@@ -828,7 +895,16 @@ class MainActivity : ComponentActivity() {
     private fun closeLocalRecordingForStop() {
         stopRecordingDiagnostics("recording_stop_completed")
         recording = false
-        if (sessionRecorder.isRecording) sessionRecorder.stop()
+        if (sessionRecorder.isRecording) {
+            deviceReportedRadarEnabled?.let { enabled ->
+                sessionRecorder.recordMmWaveState(
+                    enabled = enabled,
+                    requestedByApp = radarOwnership.requestedByApp,
+                    source = "session_stop_snapshot"
+                )
+            }
+            sessionRecorder.stop()
+        }
         viewModel.setActiveRecordingPath(null)
         com.example.nunarecorder.service.ContextDataService.stop(this)
     }
@@ -854,6 +930,8 @@ class MainActivity : ComponentActivity() {
         )
         if (retry && gatt != null) {
             diagnosticHandler.postDelayed({ startRecordingOnly(isAutomaticRetry = true) }, 350L)
+        } else {
+            requestRadarDisableIfNeeded()
         }
     }
 
@@ -866,6 +944,8 @@ class MainActivity : ComponentActivity() {
         lastDiagnosticStatsMs = 0L
         lastDiagnosticRssiRequestMs = 0L
         recordingStartCommandAttempted = false
+        radarStartCommandAttempted = false
+        radarPreparationPending = false
         recordingControlStatus = "pending"
         protocolAudioPacketCount = 0L
         audioCaptureBoundary.reset()
@@ -993,6 +1073,40 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        if (viewModel.userSettings.value.mmWaveCaptureEnabled &&
+            deviceReportedRadarEnabled == null &&
+            !radarStartCommandAttempted
+        ) {
+            radarStartCommandAttempted = true
+            diagnosticLogger.log(
+                "radar_control_skipped",
+                mapOf("reason" to "a001_radar_status_unavailable")
+            )
+            appendDebug("设备未报告 A001 0x13 雷达能力；不主动控制，继续兼容音频流程")
+        }
+
+        if (viewModel.userSettings.value.mmWaveCaptureEnabled &&
+            deviceReportedRadarEnabled == false &&
+            !radarStartCommandAttempted
+        ) {
+            radarStartCommandAttempted = true
+            val activeGatt = gatt
+            if (activeGatt != null) {
+                radarPreparationPending = true
+                val queued = handshakeClient.requestRadarEnable(activeGatt)
+                diagnosticLogger.log(
+                    "radar_control_requested",
+                    mapOf("action" to "enable", "queued" to queued)
+                )
+                if (queued) {
+                    appendLog("正在开启毫米波雷达…")
+                    return
+                }
+                radarPreparationPending = false
+                appendDebug("毫米波雷达开启命令未入队；继续音频兼容流程")
+            }
+        }
+
         val g = gatt ?: return
         val service = g.getService(SERVICE_UUID)
         if (service == null) {
@@ -1014,6 +1128,38 @@ class MainActivity : ComponentActivity() {
         }
         appendDebug("启用 A003 音频通知…")
         enableNotifications(g, characteristic)
+    }
+
+    private fun completeRadarPreparation(detail: String) {
+        if (!radarPreparationPending) return
+        radarPreparationPending = false
+        handshakeClient.markPendingRadarStateConfirmed()
+        diagnosticLogger.log(
+            "radar_preparation_completed",
+            mapOf(
+                "detail" to detail,
+                "reported_enabled" to deviceReportedRadarEnabled,
+                "requested_by_app" to radarOwnership.requestedByApp
+            )
+        )
+        if (viewModel.connectionState.value.phase == RecorderConnectionPhase.STARTING_RECORDING) {
+            diagnosticHandler.postDelayed({ continueRecordingStartAfterStatusCheck() }, 120L)
+        }
+    }
+
+    private fun requestRadarDisableIfNeeded() {
+        if (!radarOwnership.requestedByApp) return
+        val activeGatt = gatt ?: return
+        val queued = handshakeClient.requestRadarDisable(activeGatt)
+        diagnosticLogger.log(
+            "radar_control_requested",
+            mapOf("action" to "disable", "queued" to queued)
+        )
+        if (queued) {
+            appendDebug("正在关闭本次录制开启的毫米波雷达…")
+        } else {
+            appendDebug("毫米波雷达关闭命令未入队")
+        }
     }
 
     private fun updateLiveRecordingStatsUi() {
@@ -1608,6 +1754,11 @@ class MainActivity : ComponentActivity() {
         statusNotificationUuid = null
         protocolAudioPacketCount = 0L
         deviceReportedRecording = null
+        deviceReportedRadarEnabled = null
+        radarStartCommandAttempted = false
+        radarPreparationPending = false
+        radarOwnership.reset()
+        if (::handshakeClient.isInitialized) handshakeClient.cancelPendingRadarControl()
         recordingStopTimeout?.let(diagnosticHandler::removeCallbacks)
         recordingStopTimeout = null
         recordingStopFinalizeStarted = false
@@ -1707,6 +1858,48 @@ class MainActivity : ComponentActivity() {
 
     private fun handleStatusNotification(raw: ByteArray) {
         val envelope = NunaProtocolInspector.parseEnvelope(raw) ?: return
+        if (envelope.type == 0x08 && sessionRecorder.isRecording) {
+            when (val result = sessionRecorder.feedMmWave(raw)) {
+                MmWaveCaptureResult.Malformed -> diagnosticLogger.log(
+                    "mmwave_packet_malformed",
+                    mapOf("raw_bytes" to raw.size)
+                )
+                is MmWaveCaptureResult.WriteFailed -> diagnosticLogger.log(
+                    "mmwave_write_failed",
+                    mapOf("reason" to result.reason, "raw_bytes" to raw.size)
+                )
+                MmWaveCaptureResult.Dropped -> diagnosticLogger.log(
+                    "mmwave_packet_dropped",
+                    mapOf("reason" to "writer_queue_full", "raw_bytes" to raw.size)
+                )
+                else -> Unit
+            }
+        }
+        if (envelope.type == 0x13 && envelope.data.isNotEmpty()) {
+            val radarEnabled = (envelope.data[0].toInt() and 0xFF) == 1
+            deviceReportedRadarEnabled = radarEnabled
+            radarOwnership.onDeviceActiveState(radarEnabled)
+            if (sessionRecorder.isRecording) {
+                sessionRecorder.recordMmWaveState(
+                    enabled = radarEnabled,
+                    requestedByApp = radarOwnership.requestedByApp,
+                    source = "a001_0x13"
+                )
+            }
+            diagnosticLogger.log(
+                "device_radar_status",
+                mapOf(
+                    "enabled" to radarEnabled,
+                    "preparation_pending" to radarPreparationPending,
+                    "app_phase" to viewModel.connectionState.value.phase.name
+                )
+            )
+            appendDebug("设备毫米波雷达状态：${if (radarEnabled) "已开启" else "已关闭"}")
+            if (radarEnabled && radarPreparationPending) {
+                radarOwnership.onEnableConfirmed()
+                completeRadarPreparation("A001 0x13 已确认开启")
+            }
+        }
         if (envelope.type != 0x11 || envelope.data.isEmpty()) return
         val reportedRecording = (envelope.data[0].toInt() and 0xFF) == 1
         deviceReportedRecording = reportedRecording
@@ -1720,7 +1913,7 @@ class MainActivity : ComponentActivity() {
         if (!reportedRecording &&
             viewModel.connectionState.value.phase == RecorderConnectionPhase.STOPPING_RECORDING
         ) {
-            beginStopTransportFinalize("设备已确认停止录音，GATT 保持连接")
+            awaitStopBoundaryOrTimeout("设备已确认停止录音，GATT 保持连接")
         }
     }
 
@@ -1997,6 +2190,7 @@ class MainActivity : ComponentActivity() {
         try {
             cancelFirstAudioTimeout()
             handshakeClient.cancelPendingRecordingControl()
+            handshakeClient.cancelPendingRadarControl()
             earlyAudioPackets.clear()
             resetGattInitialization()
             val g = gatt ?: run {
@@ -2162,15 +2356,29 @@ class MainActivity : ComponentActivity() {
             val addr = gatt?.device?.address ?: viewModel.selectedDeviceAddress.value
             val options = RecordingOptions.from(viewModel.userSettings.value)
             sessionRecorder.start(currentDeviceName, addr, options)
+            if (options.mmWaveCaptureEnabled) {
+                deviceReportedRadarEnabled?.let { enabled ->
+                    sessionRecorder.recordMmWaveState(
+                        enabled = enabled,
+                        requestedByApp = radarOwnership.requestedByApp,
+                        source = "session_start_snapshot"
+                    )
+                }
+            }
             val dir = sessionRecorder.activeSessionDir
             if (dir != null) {
-                com.example.nunarecorder.service.ContextDataService.start(this, dir)
+                com.example.nunarecorder.service.ContextDataService.start(
+                    this,
+                    dir,
+                    includeMmWave = options.mmWaveCaptureEnabled
+                )
                 viewModel.setActiveRecordingPath(dir.absolutePath)
                 updateLiveRecordingStatsUi()
                 val mode = buildString {
                     if (options.segmentEnabled) append("切片 ${options.segmentDurationMs / 1000}s")
                     else append("整段")
                     append(if (options.autoVadOnRecord) " · 自动VAD" else " · 无VAD")
+                    if (options.mmWaveCaptureEnabled) append(" · 毫米波")
                 }
                 appendLog("会话 ${dir.name} ($mode)")
                 true
@@ -2281,9 +2489,15 @@ class MainActivity : ComponentActivity() {
                 val list = mutableListOf<File>()
                 list.add(SessionPaths.manifestFile(entry.dir))
                 entry.manifest.segments.forEach { list.add(File(entry.dir, it.file)) }
+                val audioTimeline = SessionPaths.audioTimelineFile(entry.dir)
+                if (audioTimeline.exists()) list.add(audioTimeline)
                 if (withContext) {
                     val ctx = SessionPaths.contextFile(entry.dir)
                     if (ctx.exists()) list.add(ctx)
+                    val mmWave = SessionPaths.mmWaveFile(entry.dir)
+                    if (mmWave.exists()) list.add(mmWave)
+                    val mmWaveState = SessionPaths.mmWaveStateFile(entry.dir)
+                    if (mmWaveState.exists()) list.add(mmWaveState)
                 }
                 if (withVad) {
                     val vad = SessionPaths.vadPrelabelFile(entry.dir)

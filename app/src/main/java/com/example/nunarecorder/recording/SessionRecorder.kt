@@ -2,15 +2,23 @@ package com.example.nunarecorder.recording
 
 import android.os.SystemClock
 import com.example.nunarecorder.ble.BleAudioReassembler
+import com.example.nunarecorder.ble.NunaProtocolInspector
 import com.example.nunarecorder.session.AudioSegmentEntry
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionManifestIO
+import com.example.nunarecorder.session.SessionModalities
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.session.MmWaveSummary
 import com.example.nunarecorder.session.VadSummary
 import com.example.nunarecorder.vad.VadJob
 import com.example.nunarecorder.vad.VadJobQueue
 import com.example.nunarecorder.vad.VadPrelabelWriter
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 data class LiveRecordingStats(
     val sessionDir: File,
@@ -40,6 +48,7 @@ class SessionRecorder(
     private var currentSegmentStartMs = 0L
     private var currentSegmentTimeSlot = 0L
     private var currentSegmentIntegrityIssue: String? = null
+    private var currentSegmentTimelineIssueLogged = false
     private var sessionStartMs = 0L
     private var sessionStartMonotonicMs = 0L
     private var options: RecordingOptions = RecordingOptions(
@@ -48,6 +57,15 @@ class SessionRecorder(
         autoVadOnRecord = true
     )
     private var lastManifestFlushMs = 0L
+    private val mmWaveWriter = MmWaveSessionWriter(wallClockMs)
+    private val audioTimelineWriter = AudioTimelineWriter()
+    private val mmWaveExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "nuna-mmwave-writer").apply { isDaemon = true }
+    }
+    private val pendingMmWaveWrites = AtomicInteger(0)
+    private val droppedMmWavePackets = AtomicLong(0L)
+    private val mmWaveWriteFailureLogged = AtomicBoolean(false)
+    @Volatile private var mmWaveAccepting = false
 
     val activeSessionDir: File? get() = sessionDir
 
@@ -90,9 +108,18 @@ class SessionRecorder(
             vad = VadSummary(
                 status = if (options.autoVadOnRecord) "pending" else "disabled"
             ),
+            contextModalities = SessionModalities.forRecording(options.mmWaveCaptureEnabled),
+            mmWave = MmWaveSummary.initial(options.mmWaveCaptureEnabled),
             recordingActive = true
         )
         SessionManifestIO.write(dir, manifest!!)
+        droppedMmWavePackets.set(0L)
+        mmWaveWriteFailureLogged.set(false)
+        mmWaveAccepting = options.mmWaveCaptureEnabled
+        if (mmWaveAccepting) {
+            mmWaveExecutor.execute { mmWaveWriter.start(dir, sessionStartMs) }
+        }
+        audioTimelineWriter.start(dir)
         if (options.autoVadOnRecord) {
             VadPrelabelWriter.markRunning(dir, 0, sessionStartMs)
         }
@@ -109,25 +136,160 @@ class SessionRecorder(
         if (options.segmentEnabled) {
             maybeRotateSegment()
         }
+        val sessionOffsetMs = currentSessionOffsetMs()
+        val receivedAtMs = sessionStartMs + sessionOffsetMs
+        NunaProtocolInspector.parseAudio(data)?.let { packet ->
+            audioTimelineWriter.recordPacket(
+                packet = packet,
+                receivedAtMs = receivedAtMs,
+                sessionOffsetMs = sessionOffsetMs,
+                segmentIndex = currentSegmentIndex,
+                segmentStartMs = currentSegmentStartMs
+            )
+        }
         val activeReassembler = reassembler
         activeReassembler?.feed(data)
         val newIntegrityIssue = activeReassembler?.consumeNewIntegrityIssue()
+        if (newIntegrityIssue != null) {
+            currentSegmentTimelineIssueLogged = true
+            audioTimelineWriter.recordIntegrityEvent(
+                reason = newIntegrityIssue,
+                receivedAtMs = receivedAtMs,
+                sessionOffsetMs = sessionOffsetMs,
+                segmentIndex = currentSegmentIndex,
+                phase = "stream"
+            )
+        }
         maybeFlushManifest()
         return newIntegrityIssue
     }
 
+    fun feedMmWave(raw: ByteArray): MmWaveCaptureResult {
+        if (!mmWaveAccepting || sessionDir == null) return MmWaveCaptureResult.Inactive
+        val sessionOffsetMs = currentSessionOffsetMs()
+        val receivedAtMs = sessionStartMs + sessionOffsetMs
+        val envelope = NunaProtocolInspector.parseEnvelope(raw)
+            ?: return MmWaveCaptureResult.NotSensorData
+        if (envelope.type != 0x08) return MmWaveCaptureResult.NotSensorData
+        if (envelope.data.size < 9) {
+            if (pendingMmWaveWrites.incrementAndGet() > MAX_PENDING_MMWAVE_PACKETS) {
+                pendingMmWaveWrites.decrementAndGet()
+                droppedMmWavePackets.incrementAndGet()
+                return MmWaveCaptureResult.Dropped
+            }
+            mmWaveExecutor.execute {
+                try {
+                    mmWaveWriter.feed(raw.copyOf(), receivedAtMs, sessionOffsetMs)
+                } finally {
+                    pendingMmWaveWrites.decrementAndGet()
+                }
+            }
+            return MmWaveCaptureResult.Malformed
+        }
+        if (pendingMmWaveWrites.incrementAndGet() > MAX_PENDING_MMWAVE_PACKETS) {
+            pendingMmWaveWrites.decrementAndGet()
+            droppedMmWavePackets.incrementAndGet()
+            return MmWaveCaptureResult.Dropped
+        }
+        val packetCopy = raw.copyOf()
+        mmWaveExecutor.execute {
+            try {
+                val result = mmWaveWriter.feed(packetCopy, receivedAtMs, sessionOffsetMs)
+                if (result is MmWaveCaptureResult.WriteFailed &&
+                    mmWaveWriteFailureLogged.compareAndSet(false, true)
+                ) {
+                    onLog("毫米波数据写入失败：${result.reason}")
+                }
+            } finally {
+                pendingMmWaveWrites.decrementAndGet()
+            }
+        }
+        return MmWaveCaptureResult.Queued
+    }
+
+    fun recordMmWaveState(enabled: Boolean, requestedByApp: Boolean, source: String) {
+        if (!mmWaveAccepting || sessionDir == null) return
+        val sessionOffsetMs = currentSessionOffsetMs()
+        val receivedAtMs = sessionStartMs + sessionOffsetMs
+        mmWaveExecutor.execute {
+            mmWaveWriter.recordState(
+                enabled = enabled,
+                requestedByApp = requestedByApp,
+                receivedAtMs = receivedAtMs,
+                sessionOffsetMs = sessionOffsetMs,
+                source = source
+            )
+        }
+    }
+
     fun stop() {
         val dir = sessionDir ?: return
+        mmWaveAccepting = false
+        var mmWaveFinalizeTimedOut = false
+        val mmWaveStats = runCatching {
+            mmWaveExecutor.submit<MmWaveCaptureStats> { mmWaveWriter.stop() }
+                .get(3, TimeUnit.SECONDS)
+        }.getOrElse {
+            mmWaveFinalizeTimedOut = true
+            onLog("毫米波数据封口超时，后台仍将尝试完成写盘")
+            MmWaveCaptureStats(0L, 0L, 0L, null, 0L, null)
+        }
+        val droppedMmWave = droppedMmWavePackets.getAndSet(0L)
         closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
-        manifest?.endedAtMs = wallClockMs()
+        audioTimelineWriter.stop()
+        manifest?.endedAtMs = sessionStartMs + currentSessionOffsetMs()
         manifest?.recordingActive = false
         manifest?.openSegmentIndex = null
         manifest?.openSegmentBytes = 0L
+        manifest?.mmWave = when {
+            !options.mmWaveCaptureEnabled -> MmWaveSummary.initial(false)
+            mmWaveFinalizeTimedOut -> MmWaveSummary(
+                enabled = true,
+                status = MmWaveSummary.STATUS_FINALIZE_TIMEOUT,
+                droppedPackets = droppedMmWave
+            )
+            else -> MmWaveSummary(
+                enabled = true,
+                status = if (mmWaveStats.packetCount > 0L) {
+                    MmWaveSummary.STATUS_CAPTURED
+                } else {
+                    MmWaveSummary.STATUS_NO_DATA
+                },
+                packetCount = mmWaveStats.packetCount,
+                payloadBytes = mmWaveStats.payloadBytes,
+                fileBytes = mmWaveStats.file?.takeIf { it.exists() }?.length(),
+                malformedPackets = mmWaveStats.malformedPackets,
+                droppedPackets = droppedMmWave,
+                stateEventCount = mmWaveStats.stateEventCount,
+                stateFileBytes = mmWaveStats.stateFile?.takeIf { it.exists() }?.length()
+            )
+        }
         manifest?.let { SessionManifestIO.write(dir, it) }
         reassembler = null
         sessionDir = null
         manifest = null
+        if (options.mmWaveCaptureEnabled && mmWaveStats.packetCount == 0L &&
+            mmWaveStats.malformedPackets == 0L && droppedMmWave == 0L &&
+            !mmWaveFinalizeTimedOut
+        ) {
+            onLog("毫米波采集已启用，但本次未收到有效数据；无毫米波文件可导出")
+        } else if (mmWaveStats.packetCount > 0L || mmWaveStats.malformedPackets > 0L ||
+            droppedMmWave > 0L
+        ) {
+            onLog(
+                "毫米波数据已保存 · ${mmWaveStats.packetCount} 包 · " +
+                    "${mmWaveStats.payloadBytes} B" +
+                    (if (mmWaveStats.malformedPackets > 0L) {
+                        " · ${mmWaveStats.malformedPackets} 个格式错误"
+                    } else "") +
+                    (if (droppedMmWave > 0L) " · $droppedMmWave 个队列溢出" else "")
+            )
+        }
         onLog("录制已停止")
+    }
+
+    companion object {
+        private const val MAX_PENDING_MMWAVE_PACKETS = 256
     }
 
     private fun maybeRotateSegment() {
@@ -158,6 +320,7 @@ class SessionRecorder(
         val file = File(dir, rel)
         currentSegmentFile = file
         currentSegmentIntegrityIssue = null
+        currentSegmentTimelineIssueLogged = false
         reassembler?.close()
         reassembler = BleAudioReassembler(file) { onLog(it) }
         flushManifestNow()
@@ -167,6 +330,17 @@ class SessionRecorder(
         val dir = sessionDir ?: return
         val file = currentSegmentFile ?: return
         currentSegmentIntegrityIssue = reassembler?.close()
+        if (currentSegmentIntegrityIssue != null && !currentSegmentTimelineIssueLogged) {
+            val sessionOffsetMs = currentSessionOffsetMs()
+            audioTimelineWriter.recordIntegrityEvent(
+                reason = requireNotNull(currentSegmentIntegrityIssue),
+                receivedAtMs = sessionStartMs + sessionOffsetMs,
+                sessionOffsetMs = sessionOffsetMs,
+                segmentIndex = currentSegmentIndex,
+                phase = "segment_close"
+            )
+            currentSegmentTimelineIssueLogged = true
+        }
         reassembler = null
         currentSegmentFile = null
         if (!file.exists() || file.length() == 0L) {
@@ -235,4 +409,7 @@ class SessionRecorder(
         bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
         else -> "$bytes B"
     }
+
+    private fun currentSessionOffsetMs(): Long =
+        (monotonicClockMs() - sessionStartMonotonicMs).coerceAtLeast(0L)
 }

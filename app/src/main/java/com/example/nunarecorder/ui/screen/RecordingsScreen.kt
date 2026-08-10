@@ -51,6 +51,7 @@ import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionManifest
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.session.resolveMmWaveStatus
 import com.example.nunarecorder.ui.components.RecordingItem
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import java.io.File
@@ -257,7 +258,9 @@ fun RecordingsScreen(
             is RecordingEntry.LegacyOpus -> false
         }
         val isSession = entry is RecordingEntry.Session
-        val actionLabel = if (multiModalAction == MultiModalAction.SHARE) "分享" else "上传"
+        val mmWave = (entry as? RecordingEntry.Session)
+            ?.let { it.manifest.resolveMmWaveStatus(it.dir) }
+        val actionLabel = if (multiModalAction == MultiModalAction.SHARE) "导出" else "上传"
 
         AlertDialog(
             onDismissRequest = { multiModalTarget = null },
@@ -278,7 +281,31 @@ fun RecordingsScreen(
                             enabled = true,
                             onChecked = { includeContextData = it },
                             icon = { Icon(Icons.Outlined.Info, null, Modifier.size(18.dp)) },
-                            label = "上下文 (GPS + IMU + 活动)"
+                            label = buildString {
+                                append("上下文 (GPS + IMU + 活动")
+                                if (mmWave?.enabled == true) append(" + 毫米波")
+                                append(")")
+                            }
+                        )
+                    }
+                    mmWave?.let { status ->
+                        Text(
+                            when {
+                                status.hasData -> buildString {
+                                    append("毫米波：已采集")
+                                    status.packetCount?.let { append(" $it 包") }
+                                    append(" · ${formatExportSize(status.fileBytes)}；勾选上下文即可导出 ${SessionPaths.MMWAVE_FILE}")
+                                }
+                                !status.enabled -> "毫米波：本会话未启用采集"
+                                else -> "毫米波：已启用但没有收到数据，因此没有毫米波文件可导出"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (status.hasData) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                            },
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                         )
                     }
                     if (hasVad) {
@@ -449,6 +476,12 @@ fun RecordingsScreen(
             }
         }
     }
+}
+
+private fun formatExportSize(bytes: Long): String = when {
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable

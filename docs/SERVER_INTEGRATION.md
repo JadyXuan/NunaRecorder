@@ -86,7 +86,11 @@ Idempotency-Key: <session-id>:<segment-index>:<sha256>
 2. `POST /thingx/api/v1/session/sync/file`
 3. `POST /thingx/api/v1/session/sync/commit`
 
-这套协议可以同时上传 `manifest.json`、Opus 切片、context JSONL 和 VAD 标签，并通过 SHA-256 与最终 commit 确认完整性。完整请求/响应结构见 [SESSION_SYNC_PROTOCOL.md](SESSION_SYNC_PROTOCOL.md#2-同步流程推荐服务端实现)。
+这套协议可以同时上传 `manifest.json`、Opus 切片、`audio/timeline.jsonl`、context JSONL、
+`context/mmwave.jsonl`、`context/mmwave_state.jsonl` 和 VAD 标签，并通过 SHA-256 与最终
+commit 确认完整性。毫米波休眠期间不会生成伪造样本；服务端必须按每行
+`session_offset_ms` 保留无观测窗口，不能按包序号压缩时间。完整请求/响应结构见
+[SESSION_SYNC_PROTOCOL.md](SESSION_SYNC_PROTOCOL.md#2-同步流程推荐服务端实现)。
 
 如果 `init` 返回 `404`，App 会回退到第 3 节的旧接口。若服务端实现了 `init`，则应同时实现 `file` 和 `commit`，并满足：
 
@@ -210,6 +214,7 @@ Idempotency-Key: <session-id>:<segment-index>:<sha256>
 
 - 自动音频上传默认关闭；开启后默认仅使用非计费网络（通常是 Wi-Fi），并要求电量不低。
 - 每轮自动上传最多处理 12 个已封口且完整性通过的 Opus 切片；正在写入或有 BLE 丢帧的切片不会上传。
+- 最小自动上传接口只传 Opus；需要音频/毫米波统一时间线时，服务端和用户应使用 v1 完整会话同步。
 - 后台标注轮询默认关闭；开启后约每 15 分钟请求一次 pending 接口。
 - 网络失败和 `5xx` 可能触发 WorkManager 退避重试，因此服务端接口必须幂等。
 - 手动上传会在 UI 显示成功或失败；未配置有效 Base URL/用户 ID 时，App 在本地直接拒绝，不发起网络请求。

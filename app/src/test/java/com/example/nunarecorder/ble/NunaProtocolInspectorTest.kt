@@ -84,4 +84,25 @@ class NunaProtocolInspectorTest {
         assertTrue(status.fields["payload_bytes"] == 58)
         assertNull(NunaProtocolInspector.parseEnvelope(raw.copyOf(raw.size - 1)))
     }
+
+    @Test
+    fun parsesOpaqueMmWaveSensorPacketLosslessly() {
+        val sensorPayload = byteArrayOf(0x10, 0x20, 0x30, 0x40)
+        val data = byteArrayOf(
+            0x01,
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01
+        ) + sensorPayload
+        val raw = byteArrayOf(
+            0xAA.toByte(), 0x08, data.size.toByte(), 0x00, 0x01, 0x34, 0x12
+        ) + data
+
+        val packet = requireNotNull(NunaProtocolInspector.parseSensor(raw))
+
+        assertEquals(1, packet.sensorType)
+        assertEquals(0x0102030405060708L, packet.timestampMs)
+        assertTrue(sensorPayload.contentEquals(packet.payload))
+        assertTrue(raw.contentEquals(packet.rawPacket))
+        assertEquals("legacy_fixed_1234", packet.checksumClassification)
+        assertNull(NunaProtocolInspector.parseSensor(raw.copyOf(raw.size - 1)))
+    }
 }

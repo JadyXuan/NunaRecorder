@@ -27,7 +27,12 @@ object SessionSyncInventory {
             )
         }
         add(SessionPaths.MANIFEST_FILE, "application/json")
-        if (includeContext) add(SessionPaths.CONTEXT_FILE, "application/x-ndjson")
+        add(SessionPaths.AUDIO_TIMELINE_FILE, "application/x-ndjson")
+        if (includeContext) {
+            add(SessionPaths.CONTEXT_FILE, "application/x-ndjson")
+            add(SessionPaths.MMWAVE_FILE, "application/x-ndjson")
+            add(SessionPaths.MMWAVE_STATE_FILE, "application/x-ndjson")
+        }
         if (includeVad) add(SessionPaths.VAD_PRELABEL_FILE, "application/json")
         manifest.segments.forEach { add(it.file, "audio/opus") }
         return list

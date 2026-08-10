@@ -17,6 +17,8 @@ data class UserSettings(
     val segmentEnabled: Boolean = true,
     /** 切片时长（秒），仅 segmentEnabled=true 时生效 */
     val segmentDurationSec: Int = 60,
+    /** 是否在录音会话中保存 Nuna A001 0x08 毫米波原始数据。 */
+    val mmWaveCaptureEnabled: Boolean = false,
     /** 是否从 lifelog 服务拉取活动时间轴与主动标注问题 */
     val lifelogEnabled: Boolean = false,
     /** 是否允许 WorkManager 在后台轮询待标注事件 */

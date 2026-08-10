@@ -31,6 +31,28 @@ class RecordingControlProtocolTest {
     }
 
     @Test
+    fun radarCommandsUseOfficialOpcodeAndBooleanPayload() {
+        assertArrayEquals(
+            byteArrayOf(0x34, 0x12, 0x05, 0x01),
+            RecordingControlProtocol.radarCommandData(0x1234, enabled = true)
+        )
+        assertArrayEquals(
+            byteArrayOf(0x35, 0x12, 0x05, 0x00),
+            RecordingControlProtocol.radarCommandData(0x1235, enabled = false)
+        )
+        assertArrayEquals(
+            byteArrayOf(
+                0xAA.toByte(), 0x06, 0x04, 0x00, 0x01, 0x34, 0x12,
+                0x34, 0x12, 0x05, 0x01
+            ),
+            MessagePacker.pack(
+                MessageType.CONTROL_REQUEST,
+                RecordingControlProtocol.radarCommandData(0x1234, enabled = true)
+            )
+        )
+    }
+
+    @Test
     fun parsesProductFourByteControlResponse() {
         val response = RecordingControlProtocol.parseControlResponse(
             byteArrayOf(0x34, 0x12, 0x01, 0x04)

@@ -21,7 +21,10 @@ import androidx.core.app.NotificationCompat
 import com.example.nunarecorder.MainActivity
 import com.example.nunarecorder.R
 import com.example.nunarecorder.context.ActivityRecognitionCollector
+import com.example.nunarecorder.session.SessionModalities
 import com.example.nunarecorder.util.LocationUpdatesHelper
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
@@ -43,13 +46,15 @@ class ContextDataService : Service() {
         const val ACTION_START = "com.example.nunarecorder.action.START_CONTEXT"
         const val ACTION_STOP  = "com.example.nunarecorder.action.STOP_CONTEXT"
         const val EXTRA_SIDECAR_PATH = "extra_sidecar_path"
+        const val EXTRA_INCLUDE_MMWAVE = "extra_include_mmwave"
 
         /** 新格式：写入会话目录下 context/context.jsonl */
-        fun start(context: Context, sessionDir: File) {
+        fun start(context: Context, sessionDir: File, includeMmWave: Boolean = false) {
             val contextFile = com.example.nunarecorder.session.SessionPaths.contextFile(sessionDir)
             val intent = Intent(context, ContextDataService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_SIDECAR_PATH, contextFile.absolutePath)
+                putExtra(EXTRA_INCLUDE_MMWAVE, includeMmWave)
             }
             context.startForegroundService(intent)
         }
@@ -88,8 +93,14 @@ class ContextDataService : Service() {
                 val path = intent.getStringExtra(EXTRA_SIDECAR_PATH) ?: run {
                     stopSelf(); return START_NOT_STICKY
                 }
-                startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
-                startCapture(File(path))
+                val includeMmWave = intent.getBooleanExtra(EXTRA_INCLUDE_MMWAVE, false)
+                val notificationText = if (includeMmWave) {
+                    "正在采集 GPS、IMU、身体活动与毫米波数据..."
+                } else {
+                    "正在采集 GPS、IMU 与身体活动..."
+                }
+                startForeground(NOTIFICATION_ID, buildNotification(notificationText))
+                startCapture(File(path), includeMmWave)
             }
             ACTION_STOP -> {
                 stopCapture()
@@ -107,16 +118,22 @@ class ContextDataService : Service() {
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    private fun startCapture(sidecar: File) {
+    private fun startCapture(sidecar: File, includeMmWave: Boolean) {
         stopCapture()
         try {
             output = FileOutputStream(sidecar, true) // append，允许 Activity 已写入的 meta 行保留
             collecting = true
             Log.d(TAG, "Context capture started: ${sidecar.absolutePath}")
 
-            writeRecord(
-                """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"]}"""
-            )
+            writeRecord(JSONObject().apply {
+                put("type", "meta")
+                put("started_at_ms", System.currentTimeMillis())
+                put("context_file", sidecar.name)
+                put("modalities", JSONArray(SessionModalities.forRecording(includeMmWave)))
+                if (includeMmWave) {
+                    put("mmwave_file", com.example.nunarecorder.session.SessionPaths.MMWAVE_FILE)
+                }
+            }.toString())
             startImu()
             startGps()
             startActivity()

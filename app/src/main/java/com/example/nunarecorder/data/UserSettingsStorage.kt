@@ -51,6 +51,7 @@ class UserSettingsStorage(context: Context) {
                 autoVadOnRecord = obj.optBoolean("autoVadOnRecord", true),
                 segmentEnabled = obj.optBoolean("segmentEnabled", true),
                 segmentDurationSec = obj.optInt("segmentDurationSec", 60).coerceIn(10, 600),
+                mmWaveCaptureEnabled = obj.optBoolean("mmWaveCaptureEnabled", false),
                 lifelogEnabled = obj.optBoolean("lifelogEnabled", false),
                 annotationPollingEnabled = obj.optBoolean("annotationPollingEnabled", false),
                 autoUploadEnabled = obj.optBoolean("autoUploadEnabled", false),
@@ -71,6 +72,7 @@ class UserSettingsStorage(context: Context) {
             put("autoVadOnRecord", settings.autoVadOnRecord)
             put("segmentEnabled", settings.segmentEnabled)
             put("segmentDurationSec", settings.segmentDurationSec)
+            put("mmWaveCaptureEnabled", settings.mmWaveCaptureEnabled)
             put("lifelogEnabled", settings.lifelogEnabled)
             put("annotationPollingEnabled", settings.annotationPollingEnabled)
             put("autoUploadEnabled", settings.autoUploadEnabled)

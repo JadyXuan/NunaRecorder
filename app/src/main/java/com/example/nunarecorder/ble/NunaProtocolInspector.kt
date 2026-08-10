@@ -47,6 +47,16 @@ object NunaProtocolInspector {
         val payloadMatchesFrameSize: Boolean
     )
 
+    data class SensorPacket(
+        val sensorType: Int,
+        val timestampMs: Long,
+        val payload: ByteArray,
+        val protocolVersion: Int,
+        val checksum: Int,
+        val checksumClassification: String,
+        val rawPacket: ByteArray
+    )
+
     fun parseEnvelope(raw: ByteArray): Envelope? {
         if (raw.size < ENVELOPE_BYTES || u8(raw[0]) != ProtoConfig.Message.HEADER) return null
         val length = u16(raw, 2)
@@ -112,6 +122,25 @@ object NunaProtocolInspector {
             payloadBytes = payloadBytes,
             opusFramesInPayload = frames,
             payloadMatchesFrameSize = payloadBytes == frameSize
+        )
+    }
+
+    /**
+     * Parse the protocol's generic sensor envelope (type 0x08). The v1.4.4 draft only
+     * defines sensor type, timestamp and opaque payload, so callers must retain the
+     * payload without assigning undocumented meanings to its bytes.
+     */
+    fun parseSensor(raw: ByteArray): SensorPacket? {
+        val envelope = parseEnvelope(raw) ?: return null
+        if (envelope.type != 0x08 || envelope.data.size < 9) return null
+        return SensorPacket(
+            sensorType = u8(envelope.data[0]),
+            timestampMs = i64(envelope.data, 1),
+            payload = envelope.data.copyOfRange(9, envelope.data.size),
+            protocolVersion = envelope.version,
+            checksum = envelope.checksum,
+            checksumClassification = envelope.checksumClassification,
+            rawPacket = raw.copyOf()
         )
     }
 

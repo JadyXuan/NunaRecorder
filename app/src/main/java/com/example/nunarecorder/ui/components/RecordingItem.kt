@@ -37,6 +37,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nunarecorder.data.RecordingEntry
+import com.example.nunarecorder.session.MmWaveSummary
+import com.example.nunarecorder.session.resolveMmWaveStatus
 import com.example.nunarecorder.sync.SessionSyncStatus
 import com.example.nunarecorder.ui.theme.NunaSuccess
 import java.text.SimpleDateFormat
@@ -62,6 +64,8 @@ fun RecordingItem(
     liveSegmentCount: Int? = null,
     modifier: Modifier = Modifier
 ) {
+    val mmWaveStatus = (entry as? RecordingEntry.Session)
+        ?.let { it.manifest.resolveMmWaveStatus(it.dir) }
     val subtitle = when (entry) {
         is RecordingEntry.Session -> {
             val m = entry.manifest
@@ -138,6 +142,31 @@ fun RecordingItem(
                         color = if (isLiveRecording) NunaSuccess
                         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                     )
+                    if (entry is RecordingEntry.Session) {
+                        val status = requireNotNull(mmWaveStatus)
+                        val statusText = when {
+                            status.hasData -> buildString {
+                                append("毫米波：已采集")
+                                status.packetCount?.let { append(" $it 包") }
+                                append(" · ${formatSize(status.fileBytes)} · 可导出")
+                            }
+                            !status.enabled -> "毫米波：未启用"
+                            status.status == MmWaveSummary.STATUS_FINALIZE_TIMEOUT ->
+                                "毫米波：写盘封口异常，请检查会话文件"
+                            isLiveRecording -> "毫米波：已启用，等待设备数据"
+                            else -> "毫米波：已启用，但未收到数据"
+                        }
+                        Text(
+                            statusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = when {
+                                status.hasData -> NunaSuccess
+                                status.enabled -> MaterialTheme.colorScheme.tertiary
+                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            }
+                        )
+                    }
                     Text(
                         "点击复制路径",
                         style = MaterialTheme.typography.labelSmall,
@@ -156,6 +185,10 @@ fun RecordingItem(
                     }
                 ) {
                     ModalBadge("上下文", NunaSuccess)
+                    Spacer(Modifier.width(4.dp))
+                }
+                if (mmWaveStatus?.hasData == true) {
+                    ModalBadge("毫米波", MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(4.dp))
                 }
                 when {

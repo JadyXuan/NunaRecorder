@@ -18,8 +18,18 @@ class UserSettingsTest {
         assertFalse(settings.lifelogEnabled)
         assertFalse(settings.annotationPollingEnabled)
         assertFalse(settings.autoUploadEnabled)
+        assertFalse(settings.mmWaveCaptureEnabled)
         assertFalse(settings.hasValidServerUrl())
         assertEquals("请先在设置中填写服务器 Base URL", settings.serverConfigurationError())
+    }
+
+    @Test
+    fun recordingOptionsCarryTheMmWaveOptIn() {
+        val options = com.example.nunarecorder.recording.RecordingOptions.from(
+            UserSettings(mmWaveCaptureEnabled = true)
+        )
+
+        assertTrue(options.mmWaveCaptureEnabled)
     }
 
     @Test

@@ -23,6 +23,33 @@ data class VadSummary(
     val totalSegments: Int = 0
 )
 
+data class MmWaveSummary(
+    val enabled: Boolean = false,
+    val status: String = STATUS_DISABLED,
+    val file: String = SessionPaths.MMWAVE_FILE,
+    val packetCount: Long? = null,
+    val payloadBytes: Long? = null,
+    val fileBytes: Long? = null,
+    val malformedPackets: Long = 0L,
+    val droppedPackets: Long = 0L,
+    val stateFile: String = SessionPaths.MMWAVE_STATE_FILE,
+    val stateEventCount: Long = 0L,
+    val stateFileBytes: Long? = null
+) {
+    companion object {
+        const val STATUS_DISABLED = "disabled"
+        const val STATUS_WAITING = "waiting"
+        const val STATUS_CAPTURED = "captured"
+        const val STATUS_NO_DATA = "no_data"
+        const val STATUS_FINALIZE_TIMEOUT = "finalize_timeout"
+
+        fun initial(enabled: Boolean): MmWaveSummary = MmWaveSummary(
+            enabled = enabled,
+            status = if (enabled) STATUS_WAITING else STATUS_DISABLED
+        )
+    }
+}
+
 /**
  * 会话 `manifest.json`（format_version = 1）。
  *
@@ -40,6 +67,10 @@ data class SessionManifest(
     var vad: VadSummary = VadSummary(),
     val legacy: Boolean = false,
     val sourceOpus: String? = null,
+    val contextModalities: List<String> = SessionModalities.forRecording(false),
+    var mmWave: MmWaveSummary = MmWaveSummary.initial(
+        SessionModalities.MMWAVE in contextModalities
+    ),
     /** 录制进行中（用于 UI 实时展示） */
     var recordingActive: Boolean = false,
     var openSegmentIndex: Int? = null,
@@ -61,6 +92,7 @@ data class SessionManifest(
             put("channels", 1)
             put("frame_duration_ms", 20)
             put("frame_size_bytes", 80)
+            put("timeline_file", SessionPaths.AUDIO_TIMELINE_FILE)
             put("segments", JSONArray().apply {
                 segments.forEach { s ->
                     put(JSONObject().apply {
@@ -80,6 +112,24 @@ data class SessionManifest(
         })
         put("context", JSONObject().apply {
             put("file", SessionPaths.CONTEXT_FILE)
+            put("modalities", JSONArray(contextModalities))
+            if (SessionModalities.MMWAVE in contextModalities) {
+                put("mmwave_file", SessionPaths.MMWAVE_FILE)
+                put("mmwave_state_file", SessionPaths.MMWAVE_STATE_FILE)
+            }
+            put("mmwave", JSONObject().apply {
+                put("enabled", mmWave.enabled)
+                put("status", mmWave.status)
+                put("file", mmWave.file)
+                mmWave.packetCount?.let { put("packet_count", it) }
+                mmWave.payloadBytes?.let { put("payload_bytes", it) }
+                mmWave.fileBytes?.let { put("file_bytes", it) }
+                put("malformed_packets", mmWave.malformedPackets)
+                put("dropped_packets", mmWave.droppedPackets)
+                put("state_file", mmWave.stateFile)
+                put("state_event_count", mmWave.stateEventCount)
+                mmWave.stateFileBytes?.let { put("state_file_bytes", it) }
+            })
         })
         put("vad", JSONObject().apply {
             put("prelabel_file", vad.prelabelFile)
@@ -120,6 +170,44 @@ data class SessionManifest(
             }
             val vadJ = j.optJSONObject("vad")
             val recJ = j.optJSONObject("recording")
+            val contextJ = j.optJSONObject("context")
+            val modalitiesJ = contextJ?.optJSONArray("modalities")
+            val contextModalities = if (modalitiesJ == null) {
+                SessionModalities.forRecording(false)
+            } else {
+                buildList {
+                    for (i in 0 until modalitiesJ.length()) {
+                        modalitiesJ.optString(i).takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }.ifEmpty { SessionModalities.forRecording(false) }
+            }
+            val mmWaveJ = contextJ?.optJSONObject("mmwave")
+            val mmWaveEnabled = mmWaveJ?.optBoolean("enabled")
+                ?: (SessionModalities.MMWAVE in contextModalities)
+            val mmWaveFile = File(file.parentFile, SessionPaths.MMWAVE_FILE)
+            val inferredMmWaveStatus = when {
+                !mmWaveEnabled -> MmWaveSummary.STATUS_DISABLED
+                mmWaveFile.exists() && mmWaveFile.length() > 0L -> MmWaveSummary.STATUS_CAPTURED
+                recJ?.optBoolean("active") == true -> MmWaveSummary.STATUS_WAITING
+                else -> MmWaveSummary.STATUS_NO_DATA
+            }
+            val mmWaveSummary = MmWaveSummary(
+                enabled = mmWaveEnabled,
+                status = mmWaveJ?.optString("status")?.takeIf { it.isNotBlank() }
+                    ?: inferredMmWaveStatus,
+                file = mmWaveJ?.optString("file")?.takeIf { it.isNotBlank() }
+                    ?: SessionPaths.MMWAVE_FILE,
+                packetCount = mmWaveJ?.optLongOrNull("packet_count"),
+                payloadBytes = mmWaveJ?.optLongOrNull("payload_bytes"),
+                fileBytes = mmWaveJ?.optLongOrNull("file_bytes")
+                    ?: mmWaveFile.takeIf { it.exists() }?.length(),
+                malformedPackets = mmWaveJ?.optLong("malformed_packets", 0L) ?: 0L,
+                droppedPackets = mmWaveJ?.optLong("dropped_packets", 0L) ?: 0L,
+                stateFile = mmWaveJ?.optString("state_file")?.takeIf { it.isNotBlank() }
+                    ?: SessionPaths.MMWAVE_STATE_FILE,
+                stateEventCount = mmWaveJ?.optLong("state_event_count", 0L) ?: 0L,
+                stateFileBytes = mmWaveJ?.optLongOrNull("state_file_bytes")
+            )
             SessionManifest(
                 formatVersion = j.optInt("format_version", 1),
                 sessionId = j.getString("session_id"),
@@ -137,6 +225,8 @@ data class SessionManifest(
                 ),
                 legacy = j.optBoolean("legacy", false),
                 sourceOpus = j.optString("source_opus").takeIf { it.isNotEmpty() },
+                contextModalities = contextModalities,
+                mmWave = mmWaveSummary,
                 recordingActive = recJ?.optBoolean("active") == true,
                 openSegmentIndex = recJ?.optInt("open_segment_index", -1)?.takeIf { it >= 0 },
                 openSegmentBytes = recJ?.optLong("open_segment_bytes") ?: 0L
@@ -146,6 +236,9 @@ data class SessionManifest(
         }
     }
 }
+
+private fun JSONObject.optLongOrNull(name: String): Long? =
+    if (has(name) && !isNull(name)) optLong(name) else null
 
 object SessionManifestIO {
     fun write(sessionDir: File, manifest: SessionManifest) {

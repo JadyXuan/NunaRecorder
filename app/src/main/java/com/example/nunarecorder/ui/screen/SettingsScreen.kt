@@ -42,6 +42,7 @@ fun SettingsScreen(
     onAutoVadChange: (Boolean) -> Unit,
     onSegmentEnabledChange: (Boolean) -> Unit,
     onSegmentDurationChange: (String) -> Unit,
+    onMmWaveCaptureChange: (Boolean) -> Unit,
     onLifelogEnabledChange: (Boolean) -> Unit,
     onAnnotationPollingChange: (Boolean) -> Unit,
     onAutoUploadChange: (Boolean) -> Unit,
@@ -122,6 +123,13 @@ fun SettingsScreen(
                 shape = RoundedCornerShape(10.dp)
             )
         }
+        Spacer(Modifier.height(8.dp))
+        SettingsCheckboxRow(
+            checked = userSettings.mmWaveCaptureEnabled,
+            onChecked = onMmWaveCaptureChange,
+            label = "采集毫米波雷达原始数据（实验）",
+            subtitle = "录音前通过 A002 0x06/0x05 尝试开启雷达，保存 A001 0x08；失败不影响音频，停止后自动关闭"
+        )
 
         Spacer(Modifier.height(20.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))

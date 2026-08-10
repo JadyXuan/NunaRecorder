@@ -15,12 +15,24 @@ object RecordingControlProtocol {
     const val STOP: Int = 0x00
 
     fun recordingCommandData(commandId: Int, enabled: Boolean): ByteArray {
+        return booleanCommandData(commandId, ControlCommand.SWITCH_RECORD, enabled)
+    }
+
+    fun radarCommandData(commandId: Int, enabled: Boolean): ByteArray {
+        return booleanCommandData(commandId, ControlCommand.SWITCH_MILE_WAVE, enabled)
+    }
+
+    private fun booleanCommandData(
+        commandId: Int,
+        command: ControlCommand,
+        enabled: Boolean
+    ): ByteArray {
         require(commandId in 0..0xFFFF)
         return ByteBuffer.allocate(4)
             .order(ByteOrder.LITTLE_ENDIAN)
             .apply {
                 putShort(commandId.toShort())
-                put(ControlCommand.SWITCH_RECORD.value.toByte())
+                put(command.value.toByte())
                 put(if (enabled) START.toByte() else STOP.toByte())
             }
             .array()
