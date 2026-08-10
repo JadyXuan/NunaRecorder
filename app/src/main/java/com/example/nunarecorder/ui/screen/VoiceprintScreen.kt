@@ -43,6 +43,8 @@ fun VoiceprintScreen(
     onStop: () -> Unit,
     onUpload: () -> Unit,
     onSkip: () -> Unit,
+    /** 每一段录没录过、什么时候录的、传没传上去 */
+    statuses: List<com.example.nunarecorder.voiceprint.VoiceprintStatus.StepStatus> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     // 界面上所有时长文案的唯一来源，避免和 VoiceprintQuality 里的常量漂开
@@ -57,6 +59,8 @@ fun VoiceprintScreen(
     ) {
         Text("录制声纹", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
+            "这两段只用来在录音里认出哪一句是你自己说的，**不会进入需要你标注的日常录音**——" +
+            "录制期间日常采集会自动暂停，录完自动继续。\n\n" +
             "用你正在佩戴的 Nuna 设备录两段：一段朗读约 $readMinLabel，一段自己讲至少 $freeMinLabel" +
             "（想多讲随时可以，不封顶）。之后系统会用它自动区分录音里" +
                 "哪些是你说的话，你不需要逐分钟去标注说话人。",
@@ -86,6 +90,8 @@ fun VoiceprintScreen(
             index = 1,
             title = "朗读下面这段文字",
             done = state.readDone,
+            statusLine = statuses.firstOrNull { it.step == VoiceprintSession.Step.READ }
+                ?.let { describeStatus(it) },
             body = VoiceprintSession.READ_SCRIPT,
             active = state.active && state.step == VoiceprintSession.Step.READ,
             elapsedMs = state.elapsedMs,
@@ -101,6 +107,8 @@ fun VoiceprintScreen(
             // 2026-08-09 用户就发现界面写"至少 1 分钟"、实际要求 2 分钟。
             title = "用自己的话讲讲你的一天（至少 $freeMinLabel，想讲多久都行）",
             done = state.freeDone,
+            statusLine = statuses.firstOrNull { it.step == VoiceprintSession.Step.FREE }
+                ?.let { describeStatus(it) },
             body = VoiceprintSession.FREE_PROMPT +
                 "\n\n（用自然聊天的语气，不要念稿——朗读和聊天的声学特征差别很大。" +
                 "讲满 $freeMinLabel 就可以停，但想多讲完全没问题。）",
@@ -168,6 +176,8 @@ fun VoiceprintScreen(
 private fun StepBlock(
     index: Int,
     title: String,
+    /** 「已录 / 未录 / 已上传」那一行；null = 不显示 */
+    statusLine: String? = null,
     body: String,
     done: Boolean,
     active: Boolean,
@@ -187,6 +197,13 @@ private fun StepBlock(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            statusLine?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
                     "$index. $title",
@@ -252,4 +269,23 @@ private fun formatDuration(ms: Long): String {
     val sec = ms / 1000
     if (sec < 60) return "$sec 秒"
     return if (sec % 60 == 0L) "${sec / 60} 分钟" else "%.1f 分钟".format(sec / 60.0)
+}
+
+
+/**
+ * 「录没录过、什么时候录的、传上去了吗」——这一行是这次改动的全部意义。
+ *
+ * 用户 2026-08-09：「录完了，也传完了，退出软件好像也不见了」。数据其实没丢，
+ * 丢的是本地状态；但对参与者来说"传完了、重启就没了"只有一个读法：没传上去。
+ * 然后他会重录一遍，或者来问我们。
+ */
+private fun describeStatus(
+    st: com.example.nunarecorder.voiceprint.VoiceprintStatus.StepStatus
+): String {
+    if (!st.recorded) return "还没有录过"
+    val when_ = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(st.recordedAtMs!!))
+    val len = formatDuration(st.durationMs)
+    return if (st.uploaded) "已录 $when_ · $len · 已上传"
+    else "已录 $when_ · $len · **还没上传**"
 }

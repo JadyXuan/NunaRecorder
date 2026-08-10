@@ -372,6 +372,8 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onUpload = { uploadVoiceprints() },
                                 onSkip = { selectedTab = 0 },
+                                statuses = com.example.nunarecorder.voiceprint.VoiceprintStatus
+                                    .readAll(this@MainActivity),
                                 modifier = Modifier.fillMaxSize()
                             )
                             5 -> SettingsScreen(
@@ -848,6 +850,9 @@ class MainActivity : ComponentActivity() {
                 val r = withContext(Dispatchers.IO) { uploader.upload(code, kind, file) }
                 appendLog("声纹 ${kind.wire}：${r.message}")
                 if (!r.ok) { message = r.message; break }
+                // 传成功才记；重启之后界面据此显示"已上传"，而不是一片空白
+                com.example.nunarecorder.voiceprint.VoiceprintStatus
+                    .markUploaded(this@MainActivity, step)
             }
             viewModel.voiceprintUploading.value = false
             viewModel.voiceprintMessage.value = message
