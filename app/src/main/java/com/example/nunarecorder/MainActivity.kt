@@ -227,7 +227,12 @@ class MainActivity : ComponentActivity() {
             val linkStatus by RecordingController.link.collectAsState()
             val recorderStats by RecordingController.stats.collectAsState()
             val liveRecordingStats = recorderStats?.let { LiveRecordingUiStats.from(it) }
+            // 链路已经不在会话中时，stats 里残留的路径不能再算"正在录"。
+            // 否则那个会话会被永久排除在"待上传"之外——用户 2026-08-10 实测
+            // "明明有一个待上传，全部上传却显示 0，手动上传后清理已同步又 +1"。
+            // 服务被杀时 stopRecording 走不到 publishStats(null)，残留就是这么来的。
             val activeRecordingPath = liveRecordingStats?.sessionPath
+                ?.takeIf { linkStatus.isSessionActive }
             // Activity 可以被回收而服务还在采集。重建后 ViewModel 里的选择是空的，
             // 界面会显示"请先选择设备"——而此刻它其实正在采那台设备。以服务的状态兜底。
             val selectedDeviceAddress = pickedDeviceAddress ?: linkStatus.deviceAddress

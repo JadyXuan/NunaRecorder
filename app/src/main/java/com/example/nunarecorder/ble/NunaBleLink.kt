@@ -93,6 +93,10 @@ class NunaBleLink(
         private const val BATTERY_FIRST_READ_DELAY_MS = 5_000L
         /** 订阅后多久还没有音频就 STOP→START 复位一次 */
         private const val RECORDING_RESTART_DELAY_MS = 8_000L
+        /** 复位最多试几次；再多就是在给 A002 制造命令风暴 */
+        private const val RECORDING_RESTART_MAX = 3
+        /** 两次复位之间的间隔 */
+        private const val RECORDING_RESTART_RETRY_MS = 20_000L
         /** 两条 A002 控制命令之间的间隔，避开 GATT 的一次一个操作 */
         private const val RECORDING_CONTROL_GAP_MS = 600L
         /** 发完 STOP 到真正关闭 GATT 之间留的时间 */
@@ -286,9 +290,20 @@ class NunaBleLink(
         }
     }
 
+    /**
+     * 停止并回收线程。
+     *
+     * **退出必须排在 teardown 之后。** 原来是 `stop()` 紧接 `handler.post { quitSafely() }`：
+     * `stop()` 用 `postDelayed(teardownGatt, STOP_SETTLE_MS)` 先发 STOP 再关 GATT，
+     * 而 **`quitSafely()` 会丢弃尚未到点的延时消息**——于是 `teardownGatt()` 从来没跑过，
+     * GATT 一直连着。设备在已连接状态下不广播，所以停止采集之后"附近的设备"里
+     * 再也扫不到它，只有杀掉进程才释放（用户 2026-08-10 实测："必须重启 app"）。
+     *
+     * 这是我 v1.16 加 STOP 命令时引入的回归。
+     */
     fun release() {
         stop()
-        handler.post { thread.quitSafely() }
+        handler.postDelayed({ thread.quitSafely() }, STOP_SETTLE_MS + 150L)
     }
 
     // ── 连接 ───────────────────────────────────────────────────────────────
@@ -580,7 +595,7 @@ class NunaBleLink(
                         subscribedAtMs = System.currentTimeMillis()
                         receivedAnyData = false
                         lastDataAtMs = subscribedAtMs
-                        recordingRestartTried = false
+                        recordingRestartCount = 0
                         // 产品版固件必须显式发 START 才推流；老固件订阅就推，
                         // 多发这一条也无害。见 RecordingControlProtocol。
                         handshakeClient.requestRecordingControl(g, enabled = true)
@@ -757,8 +772,8 @@ class NunaBleLink(
      * 电量变化很慢，几分钟读一次完全够，不值得为它冒险动 CCCD。
      */
     @SuppressLint("MissingPermission")
-    /** 本次订阅是否已经试过一次 STOP→START 复位 */
-    private var recordingRestartTried = false
+    /** 本次订阅已经试过几次 STOP→START 复位 */
+    private var recordingRestartCount = 0
     private var restartGatt: BluetoothGatt? = null
 
     /**
@@ -771,16 +786,24 @@ class NunaBleLink(
      *
      * 只试一次。试不好就交给看门狗重连，别把 A002 变成命令风暴。
      */
-    private val recordingRestart = Runnable {
+    private val recordingRestart: Runnable = Runnable {
         val g = restartGatt ?: return@Runnable
         if (!running.get() || !subscribed || receivedAnyData || isStale(g)) return@Runnable
-        recordingRestartTried = true
-        log(TAG, "订阅后 ${RECORDING_RESTART_DELAY_MS / 1000} 秒没有音频，尝试 STOP→START 复位设备状态机")
+        recordingRestartCount++
+        log(TAG, "订阅后仍无音频，第 $recordingRestartCount 次 STOP→START 复位设备状态机")
         handshakeClient.requestRecordingControl(g, enabled = false)
         // 两条命令都写 A002，必须错开：GATT 一次只允许一个未完成操作
         handler.postDelayed({
             if (running.get() && subscribed && !receivedAnyData && !isStale(g)) {
                 handshakeClient.requestRecordingControl(g, enabled = true)
+                // 一次不够。2026-08-10 户外实测反复出现 no_first_audio_for_16xs：
+                // 复位只试一次，不成就干等看门狗到 150 秒再拆链路重连，
+                // 而重连之后又是同样的一次。多试几次比多重连几轮便宜得多。
+                if (recordingRestartCount < RECORDING_RESTART_MAX) {
+                    handler.postDelayed(recordingRestart, RECORDING_RESTART_RETRY_MS)
+                } else {
+                    log(TAG, "STOP→START 已试 $recordingRestartCount 次仍无音频，交给看门狗")
+                }
             }
         }, RECORDING_CONTROL_GAP_MS)
     }
@@ -788,7 +811,7 @@ class NunaBleLink(
     private fun scheduleRecordingRestart(g: BluetoothGatt) {
         restartGatt = g
         handler.removeCallbacks(recordingRestart)
-        if (recordingRestartTried) return
+        if (recordingRestartCount >= RECORDING_RESTART_MAX) return
         handler.postDelayed(recordingRestart, RECORDING_RESTART_DELAY_MS)
     }
 

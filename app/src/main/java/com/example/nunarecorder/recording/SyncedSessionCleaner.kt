@@ -26,8 +26,12 @@ object SyncedSessionCleaner {
      * 而失效的表现是**边录边把正在写的会话删掉**。这是数据损坏路径，
      * 不能靠巧合，要显式拦。
      */
-    private fun activeDir(): String? =
-        com.example.nunarecorder.recording.RecordingController.stats.value?.sessionDir?.absolutePath
+    private fun activeDir(): String? {
+        // 只有链路确实还在会话中，stats 里的路径才算"正在录"。服务被杀时
+        // stopRecording 走不到 publishStats(null)，残留的路径会一直排除掉那个会话。
+        if (!RecordingController.link.value.isSessionActive) return null
+        return RecordingController.stats.value?.sessionDir?.absolutePath
+    }
 
     /** 判据：不是正在录的那个，整体 synced，且每个文件都单独确认过 */
     private fun isDeletable(dir: File, activePath: String? = activeDir()): Boolean {
