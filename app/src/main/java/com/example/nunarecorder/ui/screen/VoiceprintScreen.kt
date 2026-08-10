@@ -216,7 +216,10 @@ private fun StepBlock(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold
                 )
-                if (done) {
+                // 只有在没有状态行时才显示这个角标。状态行说的是同一件事而且更全
+                // （"已录 08-10 14:23 · 2 分 5 秒 · 已上传"），两条同色的话
+                // 界面上就是"多显示一个蓝色的已完成"——用户 2026-08-10 实测。
+                if (done && statusLine == null) {
                     Text(
                         "已完成",
                         style = MaterialTheme.typography.labelSmall,

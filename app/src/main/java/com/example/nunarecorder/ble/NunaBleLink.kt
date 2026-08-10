@@ -346,6 +346,7 @@ class NunaBleLink(
         receivedAnyData = false
         statusSubscribed = false
         lastRadarEnabled = null
+        authoritativeFirmware = false
         profileDumped = false
         servicesDiscovered = false
         // **一律 autoConnect=false。**
@@ -901,11 +902,12 @@ class NunaBleLink(
                     }
                 }
                 0x05 -> {
-                    // 设备信息里的固件版本才是权威的。标准 DIS 的 0x2A26 在实测中
-                    // 返回 1.0.0，那是个通用串，不是 3.14.5.1813。
+                    // A001 设备信息里的固件版本才是权威的。标准 DIS 的 0x2A26
+                    // 实测返回 1.0.0，是个通用串，不是 3.14.5.1813。
                     val fw = NunaProtocolInspector.parseStatus(env).fields["firmware"] as? String
                     if (!fw.isNullOrBlank()) {
-                        log(TAG, "设备信息固件版本 $fw")
+                        log(TAG, "设备信息固件版本 $fw（权威来源）")
+                        authoritativeFirmware = true
                         listener.onFirmwareRevision(fw)
                     }
                 }
@@ -960,8 +962,18 @@ class NunaBleLink(
         }
     }
 
+    /**
+     * 是否已经从 A001 `0x05` 拿到权威固件版本。
+     *
+     * 2026-08-10 实测：两个会话一个记成 `3.14.5.1813`（A001），一个记成 `1.0.0`（DIS），
+     * **取决于谁后到**。同一台设备在数据里出现两个版本号，比没有版本号更糟——
+     * 它会让人以为设备真的换过固件。所以权威来源到手之后就不再接受 DIS 的值。
+     */
+    private var authoritativeFirmware = false
+
     private fun reportFirmware(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
         if (characteristic.uuid != FIRMWARE_REVISION_UUID || value.isEmpty()) return
+        if (authoritativeFirmware) return
         val version = String(value, Charsets.UTF_8).trim().trim('\u0000')
         if (version.isEmpty()) return
         log(TAG, "设备固件版本 $version")
