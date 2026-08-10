@@ -7,7 +7,9 @@ import com.example.nunarecorder.session.LinkGapEntry
 import com.example.nunarecorder.session.LinkHealth
 import com.example.nunarecorder.session.SegmentFrameAccumulator
 import com.example.nunarecorder.session.SegmentFrameStats
+import com.example.nunarecorder.session.MmWaveSummary
 import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.session.SessionModalities
 import com.example.nunarecorder.session.SessionManifestIO
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.session.VadSummary
@@ -141,6 +143,7 @@ class SessionRecorder(
         sessionStartMs = clock()
         this.sessionDir = sessionDir
         assembler.reset()
+        runCatching { mmWave.start(sessionDir, sessionStartMs) }
         linkEvents.clear()
         missingSegments.clear()
         openGapStartMs = null
@@ -159,7 +162,11 @@ class SessionRecorder(
                 status = if (options.autoVadOnRecord) "pending" else "disabled"
             ),
             recordingActive = true,
-            appVersion = appVersion
+            appVersion = appVersion,
+            // 毫米波由设备固件自己开关，App 不请求也会收到；所以模态里直接声明它，
+            // 收不到就在 stop 时落成 no_data，而不是假装没这个模态。
+            contextModalities = SessionModalities.forRecording(true),
+            mmWave = MmWaveSummary.initial(true)
         )
         SessionManifestIO.write(sessionDir, manifest!!)
         openSegment(0)
@@ -211,8 +218,44 @@ class SessionRecorder(
         flushManifestNow()
     }
 
-    /** 设备固件版本；连上之后才读得到，所以是后置写入而不是构造参数。 */
+    /** 毫米波写入器；数据和开关时间线都归它 */
+    private val mmWave = MmWaveSessionWriter()
+
+    /**
+     * 毫米波原始包。**任何异常都不得影响音频**——这一路是附加模态，
+     * 写不进去最多少一个模态，而音频是任务本身。
+     */
+    fun feedSensorPacket(raw: ByteArray) {
+        if (sessionDir == null) return
+        runCatching { mmWave.feed(raw) }
+    }
+
+    /**
+     * 毫米波开关。固件自己 30s 开 / 30s 关，开关瞬间会短暂干扰几帧音频，
+     * 所以除了写进 mmwave_state.jsonl，还要在 link.events 里留一条——
+     * **主动扰动必须和链路故障分开记**，否则事后看只是"这几帧没了"。
+     */
     @Synchronized
+    fun onRadarState(enabled: Boolean) {
+        val dir = sessionDir ?: return
+        val now = clock()
+        runCatching {
+            mmWave.recordState(
+                enabled = enabled,
+                requestedByApp = false,
+                receivedAtMs = now,
+                sessionOffsetMs = (now - (manifest?.startedAtMs ?: now)).coerceAtLeast(0L),
+                source = "device_0x13"
+            )
+        }
+        if (!enabled) {
+            // 只在关闭时记一条：开启瞬间的扰动和关闭瞬间是同一类，
+            // 但两条会把 events 撑成一天几百条。关闭点足以定位那一对边界。
+            linkEvents.add(LinkGapEntry(now, now, "mmwave_toggle", reconnectAttempts = 0))
+        }
+    }
+
+    /** 设备固件版本；连上之后才读得到，所以是后置写入而不是构造参数。 */
     fun setDeviceFirmware(version: String) {
         val m = manifest ?: return
         if (m.deviceFirmware == version) return
@@ -247,6 +290,7 @@ class SessionRecorder(
     @Synchronized
     fun stop(endReason: String = SessionManifest.END_USER_STOP) {
         val dir = sessionDir ?: return
+        val mmStats = runCatching { mmWave.stop() }.getOrNull()
         val now = clock()
         closeCurrentSegment(now)
         openGapStartMs?.let {
@@ -263,6 +307,18 @@ class SessionRecorder(
         manifest?.let { m ->
             m.endedAtMs = now
             m.endReason = endReason
+            mmStats?.let { st ->
+                m.mmWave = m.mmWave.copy(
+                    status = if (st.packetCount > 0) MmWaveSummary.STATUS_CAPTURED
+                    else MmWaveSummary.STATUS_NO_DATA,
+                    packetCount = st.packetCount,
+                    payloadBytes = st.payloadBytes,
+                    fileBytes = SessionPaths.mmWaveFile(dir).length().takeIf { it > 0L },
+                    malformedPackets = st.malformedPackets,
+                    stateEventCount = st.stateEventCount,
+                    stateFileBytes = SessionPaths.mmWaveStateFile(dir).length().takeIf { it > 0L }
+                )
+            }
             m.recordingActive = false
             m.openSegmentIndex = null
             m.openSegmentBytes = 0L

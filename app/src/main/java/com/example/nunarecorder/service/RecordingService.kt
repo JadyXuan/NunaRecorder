@@ -423,6 +423,15 @@ class RecordingService : Service() {
             recorder?.feed(data)
         }
 
+        override fun onSensorPacket(raw: ByteArray) {
+            // BLE 线程直写，和音频同一条路径：毫米波包频率高，绕主线程只会添堵
+            recorder?.feedSensorPacket(raw)
+        }
+
+        override fun onRadarState(enabled: Boolean) {
+            handler.post { recorder?.onRadarState(enabled) }
+        }
+
         override fun onBatteryLevel(percent: Int) {
             handler.post {
                 publish(stateMachine.onBatteryLevel(percent))

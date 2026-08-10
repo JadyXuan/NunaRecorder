@@ -14,6 +14,13 @@ object SessionPaths {
     const val MANIFEST_FILE = "manifest.json"
     const val CONTEXT_FILE = "context/context.jsonl"
     const val VAD_PRELABEL_FILE = "labels/vad_prelabel.json"
+
+    /** 毫米波原始包（Ruihan beta.9）。固件自己 30s 开 / 30s 关，不是连续的 */
+    const val MMWAVE_FILE = "context/mmwave.jsonl"
+    /** 毫米波开关时间线；开关瞬间会短暂干扰几帧音频，切片对齐要用它纠正 */
+    const val MMWAVE_STATE_FILE = "context/mmwave_state.jsonl"
+    /** 音频时间线，供跨模态切片对齐 */
+    const val AUDIO_TIMELINE_FILE = "audio/timeline.jsonl"
     /** 诊断日志随会话一起上传；`labels/` 是服务端允许的顶层目录之一 */
     const val DIAGNOSTICS_LOG_FILE = "labels/diagnostics.log"
     const val AUDIO_DIR = "audio"
@@ -89,6 +96,12 @@ object SessionPaths {
     fun contextFile(sessionDir: File): File = File(sessionDir, CONTEXT_FILE)
 
     fun vadPrelabelFile(sessionDir: File): File = File(sessionDir, VAD_PRELABEL_FILE)
+
+    fun mmWaveFile(sessionDir: File): File = File(sessionDir, MMWAVE_FILE)
+
+    fun mmWaveStateFile(sessionDir: File): File = File(sessionDir, MMWAVE_STATE_FILE)
+
+    fun audioTimelineFile(sessionDir: File): File = File(sessionDir, AUDIO_TIMELINE_FILE)
 
     fun audioDir(sessionDir: File): File = File(sessionDir, AUDIO_DIR)
 

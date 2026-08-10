@@ -73,8 +73,14 @@ class NunaBleLink(
         /** 设备电量 0–100；来自标准 BLE 电池服务 */
         fun onBatteryLevel(percent: Int)
 
-        /** 设备固件版本，例如 `3.14.5.1813`；来自标准 Device Information Service */
+        /** 设备固件版本，例如 `3.14.5.1813` */
         fun onFirmwareRevision(version: String)
+
+        /** A001 上的毫米波原始包（envelope type 0x08），原样交给写入器 */
+        fun onSensorPacket(raw: ByteArray) {}
+
+        /** 毫米波开关状态变化（A001 0x13）。固件自己 30s 开 / 30s 关 */
+        fun onRadarState(enabled: Boolean) {}
 
         /** 无法自行恢复（缺权限、找不到服务），需要人工介入 */
         fun onFatal(reason: String)
@@ -97,6 +103,8 @@ class NunaBleLink(
         private const val RECORDING_RESTART_MAX = 3
         /** 两次复位之间的间隔 */
         private const val RECORDING_RESTART_RETRY_MS = 20_000L
+        /** 首帧音频之后多久订阅 A001 遥测；与电量/固件读错开 */
+        private const val STATUS_SUBSCRIBE_DELAY_MS = 3_000L
         /** 两条 A002 控制命令之间的间隔，避开 GATT 的一次一个操作 */
         private const val RECORDING_CONTROL_GAP_MS = 600L
         /** 发完 STOP 到真正关闭 GATT 之间留的时间 */
@@ -336,6 +344,8 @@ class NunaBleLink(
         lastDataAtMs = 0L
         subscribedAtMs = 0L
         receivedAnyData = false
+        statusSubscribed = false
+        lastRadarEnabled = null
         profileDumped = false
         servicesDiscovered = false
         // **一律 autoConnect=false。**
@@ -644,10 +654,18 @@ class NunaBleLink(
                     if (running.get()) handshakeClient.onNotification(g, characteristic)
                 }
                 BATTERY_LEVEL_UUID -> handler.post { reportBattery(characteristic, value) }
+                // A001 遥测：毫米波原始包、雷达开关、设备信息。**直接在 BLE 线程处理**，
+                // 不绕主线程——毫米波包频率高，绕一圈只会给主线程添堵。
+                STATUS_CHAR_UUID -> dispatchStatusNotification(value)
                 RECORDING_CHAR_UUID -> {
                     if (!receivedAnyData) {
                         receivedAnyData = true
                         handler.removeCallbacks(recordingRestart)
+                        // **音频起来之后**才订阅 A001 遥测（毫米波 0x08、雷达开关 0x13、
+                        // 设备信息 0x05 都走这一路）。绝不插进握手链路：
+                        // 2026-08-06 卡死三天就是一次多余的 CCCD 写入挤掉了 A002 握手。
+                        // 这里失败最多丢遥测，音频已经在流了。
+                        scheduleStatusSubscribe(g)
                         log(TAG, "收到第一帧音频（订阅后 ${(System.currentTimeMillis() - subscribedAtMs) / 1000} 秒）")
                     }
                     // 音频走热路径：不 post 到 handler，直接交给上层写文件。
@@ -827,6 +845,75 @@ class NunaBleLink(
         if (!subscribed) return
         runCatching { handshakeClient.requestRecordingControl(g, enabled = false) }
     }
+
+    private var statusSubscribed = false
+
+    /**
+     * 订阅 A001 状态通知。毫米波原始包、雷达开关、设备信息全走这一条。
+     *
+     * 延后 [STATUS_SUBSCRIBE_DELAY_MS] 再发，和电量/固件读错开——
+     * GATT 一次只允许一个未完成操作，挤在一起后发的会被静默丢弃。
+     */
+    @SuppressLint("MissingPermission")
+    private fun scheduleStatusSubscribe(g: BluetoothGatt) {
+        if (statusSubscribed) return
+        handler.postDelayed({
+            if (!running.get() || isStale(g) || statusSubscribed) return@postDelayed
+            val ch = g.getService(SERVICE_UUID)?.getCharacteristic(STATUS_CHAR_UUID)
+            if (ch == null) {
+                log(TAG, "没有 A001 特征，毫米波与设备信息不可用")
+                return@postDelayed
+            }
+            statusSubscribed = true
+            runCatching {
+                g.setCharacteristicNotification(ch, true)
+                val cccd = ch.getDescriptor(CCCD_UUID)
+                if (cccd == null) {
+                    log(TAG, "A001 没有 CCCD，遥测不可用（不影响音频）")
+                    return@runCatching
+                }
+                @Suppress("DEPRECATION")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION") g.writeDescriptor(cccd)
+                }
+                log(TAG, "已请求订阅 A001 遥测（毫米波 / 雷达开关 / 设备信息）")
+            }.onFailure { log(TAG, "订阅 A001 失败：${it.javaClass.simpleName}（不影响音频）") }
+        }, STATUS_SUBSCRIBE_DELAY_MS)
+    }
+
+    /**
+     * A001 通知的分发。**任何异常都不能冒泡到音频路径**，所以整体包在 runCatching 里。
+     */
+    private fun dispatchStatusNotification(value: ByteArray) {
+        runCatching {
+            val env = NunaProtocolInspector.parseEnvelope(value) ?: return@runCatching
+            when (env.type) {
+                0x08 -> listener.onSensorPacket(value)
+                0x13 -> {
+                    val enabled = env.data.firstOrNull()?.toInt() == 1
+                    if (enabled != lastRadarEnabled) {
+                        lastRadarEnabled = enabled
+                        log(TAG, "毫米波${if (enabled) "开启" else "关闭"}")
+                        listener.onRadarState(enabled)
+                    }
+                }
+                0x05 -> {
+                    // 设备信息里的固件版本才是权威的。标准 DIS 的 0x2A26 在实测中
+                    // 返回 1.0.0，那是个通用串，不是 3.14.5.1813。
+                    val fw = NunaProtocolInspector.parseStatus(env).fields["firmware"] as? String
+                    if (!fw.isNullOrBlank()) {
+                        log(TAG, "设备信息固件版本 $fw")
+                        listener.onFirmwareRevision(fw)
+                    }
+                }
+            }
+        }
+    }
+
+    private var lastRadarEnabled: Boolean? = null
 
     private fun scheduleBatteryRead(g: BluetoothGatt) {
         handler.removeCallbacks(batteryPoll)

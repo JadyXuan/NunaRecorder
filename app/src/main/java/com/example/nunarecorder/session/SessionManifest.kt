@@ -25,6 +25,40 @@ data class VadSummary(
 )
 
 /**
+ * 毫米波采集摘要。移植自上游 `signed-test/mmwave-timeline-beta9`（Ruihan 真机验证）。
+ *
+ * Nuna 固件自己控制毫米波 **30 秒开 / 30 秒关**（省电），不是连续的；
+ * 开关瞬间还会短暂干扰几帧音频。所以除了数据本身，开关时间线
+ * （[SessionPaths.MMWAVE_STATE_FILE]）也必须记，否则事后做跨模态切片对齐时
+ * 那几帧缺失会被当成掉线。
+ */
+data class MmWaveSummary(
+    val enabled: Boolean = false,
+    val status: String = STATUS_DISABLED,
+    val file: String = SessionPaths.MMWAVE_FILE,
+    val packetCount: Long? = null,
+    val payloadBytes: Long? = null,
+    val fileBytes: Long? = null,
+    val malformedPackets: Long = 0L,
+    val droppedPackets: Long = 0L,
+    val stateFile: String = SessionPaths.MMWAVE_STATE_FILE,
+    val stateEventCount: Long = 0L,
+    val stateFileBytes: Long? = null
+) {
+    companion object {
+        const val STATUS_DISABLED = "disabled"
+        const val STATUS_WAITING = "waiting"
+        const val STATUS_CAPTURED = "captured"
+        const val STATUS_NO_DATA = "no_data"
+
+        fun initial(enabled: Boolean): MmWaveSummary = MmWaveSummary(
+            enabled = enabled,
+            status = if (enabled) STATUS_WAITING else STATUS_DISABLED
+        )
+    }
+}
+
+/**
  * 会话 `manifest.json`（format_version = 1）。
  *
  * Schema: [docs/SESSION_SYNC_PROTOCOL.md] (section 1.1).
@@ -78,6 +112,10 @@ data class SessionManifest(
      * [END_CRASH_RECOVERED]（上次没能正常收尾，下次启动时补的）。
      */
     var endReason: String? = null,
+    /** 本次会话启用的上下文模态；**新增字段**，旧会话读回来是默认三模态 */
+    var contextModalities: List<String> = SessionModalities.forRecording(false),
+    /** 毫米波摘要；**新增字段**，不发也不影响服务端 */
+    var mmWave: MmWaveSummary = MmWaveSummary.initial(false),
     /** 参与者主动删除的分段；与 [missingSegments] 是两回事，不能混 */
     var deletedSegments: List<SegmentDeletion> = emptyList()
 ) {
@@ -119,6 +157,25 @@ data class SessionManifest(
         put("link", link.toJson())
         put("context", JSONObject().apply {
             put("file", SessionPaths.CONTEXT_FILE)
+            // 只加不改：既有的 "file" 原样保留，读旧 manifest 的服务端不受影响
+            put("modalities", JSONArray(contextModalities))
+            if (SessionModalities.MMWAVE in contextModalities) {
+                put("mmwave_file", SessionPaths.MMWAVE_FILE)
+                put("mmwave_state_file", SessionPaths.MMWAVE_STATE_FILE)
+            }
+        })
+        put("mmwave", JSONObject().apply {
+            put("enabled", mmWave.enabled)
+            put("status", mmWave.status)
+            put("file", mmWave.file)
+            mmWave.packetCount?.let { put("packet_count", it) }
+            mmWave.payloadBytes?.let { put("payload_bytes", it) }
+            mmWave.fileBytes?.let { put("file_bytes", it) }
+            put("malformed_packets", mmWave.malformedPackets)
+            put("dropped_packets", mmWave.droppedPackets)
+            put("state_file", mmWave.stateFile)
+            put("state_event_count", mmWave.stateEventCount)
+            mmWave.stateFileBytes?.let { put("state_file_bytes", it) }
         })
         put("vad", JSONObject().apply {
             put("prelabel_file", vad.prelabelFile)
@@ -192,6 +249,28 @@ data class SessionManifest(
                 missingSegments = missing,
                 appVersion = j.optString("app_version").takeIf { it.isNotEmpty() },
                 endReason = j.optString("end_reason").takeIf { it.isNotEmpty() },
+                contextModalities = j.optJSONObject("context")?.optJSONArray("modalities")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull { i ->
+                            arr.optString(i).takeIf { it.isNotBlank() }
+                        }
+                    }?.ifEmpty { null } ?: SessionModalities.forRecording(false),
+                mmWave = j.optJSONObject("mmwave")?.let { mw ->
+                    MmWaveSummary(
+                        enabled = mw.optBoolean("enabled"),
+                        status = mw.optString("status", MmWaveSummary.STATUS_DISABLED),
+                        file = mw.optString("file", SessionPaths.MMWAVE_FILE),
+                        packetCount = mw.optLong("packet_count").takeIf { mw.has("packet_count") },
+                        payloadBytes = mw.optLong("payload_bytes").takeIf { mw.has("payload_bytes") },
+                        fileBytes = mw.optLong("file_bytes").takeIf { mw.has("file_bytes") },
+                        malformedPackets = mw.optLong("malformed_packets"),
+                        droppedPackets = mw.optLong("dropped_packets"),
+                        stateFile = mw.optString("state_file", SessionPaths.MMWAVE_STATE_FILE),
+                        stateEventCount = mw.optLong("state_event_count"),
+                        stateFileBytes = mw.optLong("state_file_bytes")
+                            .takeIf { mw.has("state_file_bytes") }
+                    )
+                } ?: MmWaveSummary.initial(false),
                 deviceFirmware = j.optString("device_firmware").takeIf { it.isNotEmpty() },
                 deletedSegments = deleted
             )
