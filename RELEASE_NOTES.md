@@ -14,6 +14,7 @@
 - `context/mmwave.jsonl` 每包包含 BLE 回调时间、单调时钟会话偏移、设备时间戳、原始 payload 和完整包。
 - 新增 `audio/timeline.jsonl`，保存每个实际写入流程的 A003 Frame/Chunk、设备时间戳、包内 Opus 帧数和会话偏移。
 - BLE 帧号不连续、分块未收齐或长度异常会写入 `audio_integrity_event`，服务端可定位低置信度区间。
+- 60 秒切片只在产品版下一组 `chunk=0` 前轮转；停止时未收齐的最后一组会安全裁剪并写 `audio_boundary_event`，不会误伤此前完整音频。
 - 会话偏移基于 Android 单调时钟；系统时间校准不会导致音频和毫米波时间轴倒退或跳跃。
 - 完整 v1 会话同步、分享和导出会包含相应时间线文件；旧版自动上传接口仍只发送完整的 Opus 切片。
 

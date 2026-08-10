@@ -86,7 +86,7 @@ class SessionRecorderTest {
             val manifest = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
             assertEquals(1, manifest.segments.size)
             assertEquals(0, manifest.segments.single().index)
-            assertEquals(120_000L, manifest.segments.single().startMs)
+            assertEquals(130_000L, manifest.segments.single().startMs)
             assertEquals(80L, manifest.segments.single().bytes)
             assertEquals(80L, sessionDir.resolve("audio/seg_000.opus").length())
         } finally {
@@ -171,6 +171,85 @@ class SessionRecorderTest {
     }
 
     @Test
+    fun productSegmentRotationWaitsForNextCompleteGroupBoundary() {
+        val root = Files.createTempDirectory("nuna-product-rotation-test").toFile()
+        var monotonicClockMs = 5_000L
+        val sessionDir = root.resolve("session")
+        val recorder = SessionRecorder(
+            onLog = {},
+            wallClockMs = { 1_000L },
+            monotonicClockMs = { monotonicClockMs },
+            sessionDirFactory = { _, _, _ -> sessionDir }
+        )
+
+        try {
+            recorder.start(
+                deviceName = "Product Nuna",
+                deviceAddress = null,
+                recordingOptions = RecordingOptions(
+                    segmentEnabled = true,
+                    segmentDurationMs = 60_000L,
+                    autoVadOnRecord = false
+                )
+            )
+            repeat(2) { recorder.feed(productNunaNotification(frameId = 10, chunkId = it)) }
+            monotonicClockMs += 60_010L
+            for (chunkId in 2 until 6) {
+                recorder.feed(productNunaNotification(frameId = 10, chunkId = chunkId))
+            }
+            repeat(6) { recorder.feed(productNunaNotification(frameId = 11, chunkId = it)) }
+            recorder.stop()
+
+            val segments = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!.segments
+            assertEquals(2, segments.size)
+            assertTrue(segments.all { it.integrityOk })
+            assertEquals(2_880L, segments[0].bytes)
+            assertEquals(2_880L, segments[1].bytes)
+            assertEquals(60_010L, segments[1].startMs)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun intentionalStopTrimsIncompleteProductTailWithoutRejectingSegment() {
+        val root = Files.createTempDirectory("nuna-product-stop-tail-test").toFile()
+        val sessionDir = root.resolve("session")
+        val recorder = SessionRecorder(
+            onLog = {},
+            wallClockMs = { 1_000L },
+            monotonicClockMs = { 5_000L },
+            sessionDirFactory = { _, _, _ -> sessionDir }
+        )
+
+        try {
+            recorder.start(
+                deviceName = "Product Nuna",
+                deviceAddress = null,
+                recordingOptions = RecordingOptions(
+                    segmentEnabled = true,
+                    segmentDurationMs = 60_000L,
+                    autoVadOnRecord = false
+                )
+            )
+            repeat(6) { recorder.feed(productNunaNotification(frameId = 20, chunkId = it)) }
+            repeat(2) { recorder.feed(productNunaNotification(frameId = 21, chunkId = it)) }
+            recorder.stop()
+
+            val segment = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!.segments.single()
+            assertTrue(segment.integrityOk)
+            assertEquals(2_880L, segment.bytes)
+            val events = SessionPaths.audioTimelineFile(sessionDir).readLines().map(::JSONObject)
+            assertTrue(events.any {
+                it.optString("type") == "audio_boundary_event" &&
+                    it.optString("event") == "trimmed_incomplete_tail"
+            })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun normalRotationKeepsSavedSegmentIndexesContiguous() {
         val root = Files.createTempDirectory("nuna-recorder-test").toFile()
         var monotonicClockMs = 5_000L
@@ -199,7 +278,7 @@ class SessionRecorderTest {
 
             val manifest = SessionManifest.load(SessionPaths.manifestFile(sessionDir))!!
             assertEquals(listOf(0, 1), manifest.segments.map { it.index })
-            assertEquals(listOf(0L, 60_000L), manifest.segments.map { it.startMs })
+            assertEquals(listOf(0L, 60_001L), manifest.segments.map { it.startMs })
             assertTrue(manifest.segments.all { it.bytes == 80L })
         } finally {
             root.deleteRecursively()

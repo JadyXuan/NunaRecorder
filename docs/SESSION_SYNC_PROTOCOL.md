@@ -60,7 +60,10 @@
 App 对每个实际交给 Opus 重组器的 A003 包写一行 `audio_packet`，保留
 `frame_id`、`chunk_id/total_chunks`、`device_timestamp_ms`、包内 Opus 帧数、
 `segment_index`、`received_at_ms` 和 `session_offset_ms`。发现帧号不连续、分块不完整
-或异常长度时，另写 `audio_integrity_event`，包括发生时间、分段和原因。
+或异常长度时，另写 `audio_integrity_event`，包括发生时间、分段和原因。用户停止后固件
+可能立即停止 A003，使最后一个产品分组来不及收齐；App 丢弃该未完整尾组并写
+`audio_boundary_event(event=trimmed_incomplete_tail)`，已完成的 Opus 帧仍可安全使用，
+不会把这种预期边界裁剪误判为会话中途丢帧。
 
 `session_offset_ms` 由 Android 单调时钟相对会话起点计算；`received_at_ms` 为
 `manifest.started_at_ms + session_offset_ms`。因此录制期间即使系统墙钟被校时，音频、
@@ -139,6 +142,7 @@ App 的录音列表、会话详情和导出对话框会显示这一状态。分�
 - 毫米波：直接使用每行 `session_offset_ms`；绝不能从 `packet_index` 推算固定采样时间。
 - `mmwave_state` 的 `sleeping → active` 区间是“无观测”，不是零值，也不应插值成连续雷达数据。
 - `audio_integrity_event` 覆盖的音频分段应标记低置信度；当前 App 不会自动上传这些损坏分段。
+- `audio_boundary_event` 是有记录的边界裁剪，不代表此前完整音频损坏；服务端可正常处理该分段。
 
 ### 1.3 `labels/sync_status.json`（客户端维护）
 

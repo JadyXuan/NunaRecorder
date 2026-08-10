@@ -49,6 +49,7 @@ class SessionRecorder(
     private var currentSegmentTimeSlot = 0L
     private var currentSegmentIntegrityIssue: String? = null
     private var currentSegmentTimelineIssueLogged = false
+    private var currentSegmentHasAudioPacket = false
     private var sessionStartMs = 0L
     private var sessionStartMonotonicMs = 0L
     private var options: RecordingOptions = RecordingOptions(
@@ -133,12 +134,17 @@ class SessionRecorder(
      * continue to be recorded into this and subsequent segments.
      */
     fun feed(data: ByteArray): String? {
+        val parsedAudio = NunaProtocolInspector.parseAudio(data)
         if (options.segmentEnabled) {
-            maybeRotateSegment()
+            maybeRotateSegment(parsedAudio)
         }
         val sessionOffsetMs = currentSessionOffsetMs()
         val receivedAtMs = sessionStartMs + sessionOffsetMs
-        NunaProtocolInspector.parseAudio(data)?.let { packet ->
+        if (parsedAudio != null && !currentSegmentHasAudioPacket) {
+            currentSegmentStartMs = sessionOffsetMs
+            currentSegmentHasAudioPacket = true
+        }
+        parsedAudio?.let { packet ->
             audioTimelineWriter.recordPacket(
                 packet = packet,
                 receivedAtMs = receivedAtMs,
@@ -235,7 +241,10 @@ class SessionRecorder(
             MmWaveCaptureStats(0L, 0L, 0L, null, 0L, null)
         }
         val droppedMmWave = droppedMmWavePackets.getAndSet(0L)
-        closeCurrentSegment(enqueueVad = options.autoVadOnRecord)
+        closeCurrentSegment(
+            enqueueVad = options.autoVadOnRecord,
+            allowIncompleteTail = true
+        )
         audioTimelineWriter.stop()
         manifest?.endedAtMs = sessionStartMs + currentSessionOffsetMs()
         manifest?.recordingActive = false
@@ -292,13 +301,17 @@ class SessionRecorder(
         private const val MAX_PENDING_MMWAVE_PACKETS = 256
     }
 
-    private fun maybeRotateSegment() {
+    private fun maybeRotateSegment(packet: NunaProtocolInspector.AudioPacket?) {
         val duration = options.segmentDurationMs
         if (duration <= 0L) return
 
         val elapsed = (monotonicClockMs() - sessionStartMonotonicMs).coerceAtLeast(0L)
         val expectedTimeSlot = elapsed / duration
         if (currentSegmentTimeSlot >= expectedTimeSlot) return
+        // Product Nuna groups six notifications under one frame ID. Rotate before chunk 0 so
+        // the previous segment always closes after a complete group. Legacy/XIAO packets are
+        // single-chunk groups and therefore continue to rotate immediately.
+        if (packet != null && packet.totalChunks > 1 && packet.chunkId != 0) return
 
         // Only rotate once per incoming notification. If callbacks were delayed for several
         // segment windows, jump directly to the current window instead of creating empty files.
@@ -321,15 +334,29 @@ class SessionRecorder(
         currentSegmentFile = file
         currentSegmentIntegrityIssue = null
         currentSegmentTimelineIssueLogged = false
+        currentSegmentHasAudioPacket = false
         reassembler?.close()
         reassembler = BleAudioReassembler(file) { onLog(it) }
         flushManifestNow()
     }
 
-    private fun closeCurrentSegment(enqueueVad: Boolean) {
+    private fun closeCurrentSegment(
+        enqueueVad: Boolean,
+        allowIncompleteTail: Boolean = false
+    ) {
         val dir = sessionDir ?: return
         val file = currentSegmentFile ?: return
-        currentSegmentIntegrityIssue = reassembler?.close()
+        currentSegmentIntegrityIssue = reassembler?.close(allowIncompleteTail)
+        reassembler?.consumeTrimmedTailDescription()?.let { detail ->
+            val sessionOffsetMs = currentSessionOffsetMs()
+            audioTimelineWriter.recordBoundaryEvent(
+                event = "trimmed_incomplete_tail",
+                detail = detail,
+                receivedAtMs = sessionStartMs + sessionOffsetMs,
+                sessionOffsetMs = sessionOffsetMs,
+                segmentIndex = currentSegmentIndex
+            )
+        }
         if (currentSegmentIntegrityIssue != null && !currentSegmentTimelineIssueLogged) {
             val sessionOffsetMs = currentSessionOffsetMs()
             audioTimelineWriter.recordIntegrityEvent(

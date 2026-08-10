@@ -78,6 +78,27 @@ class AudioTimelineWriter {
     }
 
     @Synchronized
+    fun recordBoundaryEvent(
+        event: String,
+        detail: String,
+        receivedAtMs: Long,
+        sessionOffsetMs: Long,
+        segmentIndex: Int
+    ) {
+        ensureWriter()
+        val row = JSONObject().apply {
+            put("type", "audio_boundary_event")
+            put("format_version", 1)
+            put("received_at_ms", receivedAtMs)
+            put("session_offset_ms", sessionOffsetMs)
+            put("segment_index", segmentIndex)
+            put("event", event)
+            put("detail", detail)
+        }
+        write(row, sessionOffsetMs)
+    }
+
+    @Synchronized
     fun stop(): File? {
         try {
             writer?.flush()

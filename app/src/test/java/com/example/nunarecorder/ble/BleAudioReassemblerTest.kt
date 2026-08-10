@@ -109,6 +109,30 @@ class BleAudioReassemblerTest {
         }
     }
 
+    @Test
+    fun intentionalStopCanTrimOnlyTheIncompleteTrailingGroup() {
+        val output = Files.createTempFile("nuna-stop-tail", ".opus").toFile()
+        try {
+            val reassembler = BleAudioReassembler(output)
+            reassembler.feed(audioNotification(frameId = 1))
+            reassembler.feed(
+                audioNotification(
+                    frameId = 2,
+                    chunkId = 0,
+                    totalChunks = 6,
+                    opusBytes = ByteArray(480)
+                )
+            )
+
+            assertNull(reassembler.close(allowIncompleteTail = true))
+            assertTrue(reassembler.integrityOk)
+            assertTrue(reassembler.consumeTrimmedTailDescription()?.contains("丢弃 1 个") == true)
+            assertEquals(80L, output.length())
+        } finally {
+            output.delete()
+        }
+    }
+
     private fun audioNotification(
         frameId: Int,
         chunkId: Int = 0,

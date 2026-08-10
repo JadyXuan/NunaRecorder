@@ -33,6 +33,7 @@ class BleAudioReassembler(
     private var expectedFrameId: Int? = null
     private var integrityIssue: String? = null
     private var pendingIntegrityIssue: String? = null
+    private var trimmedTailDescription: String? = null
     val integrityOk: Boolean get() = integrityIssue == null
 
     private data class FrameInfo(
@@ -48,11 +49,17 @@ class BleAudioReassembler(
         onLog("BleAudioReassembler: output=${outputFile.absolutePath}")
     }
 
-    fun close(): String? {
+    fun close(allowIncompleteTail: Boolean = false): String? {
         try {
             if (frames.isNotEmpty() && integrityIssue == null) {
-                markIntegrityError("${frames.size} 个 BLE 音频帧未收齐")
+                if (allowIncompleteTail) {
+                    trimmedTailDescription = "停止边界丢弃 ${frames.size} 个未收齐 BLE 音频帧"
+                    onLog("[reassembler] $trimmedTailDescription")
+                } else {
+                    markIntegrityError("${frames.size} 个 BLE 音频帧未收齐")
+                }
             }
+            frames.clear()
             fos?.flush()
             fos?.close()
             fos = null
@@ -65,6 +72,10 @@ class BleAudioReassembler(
             markIntegrityError("写入文件失败: ${e.message}")
         }
         return integrityIssue
+    }
+
+    fun consumeTrimmedTailDescription(): String? = trimmedTailDescription.also {
+        trimmedTailDescription = null
     }
 
     /**
