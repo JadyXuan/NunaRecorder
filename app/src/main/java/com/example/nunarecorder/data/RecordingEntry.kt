@@ -1,7 +1,9 @@
 package com.example.nunarecorder.data
 
 import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.session.SessionMmWaveStatus
 import com.example.nunarecorder.session.SessionPaths
+import com.example.nunarecorder.session.resolveMmWaveStatus
 import com.example.nunarecorder.sync.SessionSyncStatus
 import java.io.File
 
@@ -37,6 +39,14 @@ sealed class RecordingEntry {
          */
         val hasContext: Boolean = SessionPaths.contextFile(dir).exists()
         val syncStatus: SessionSyncStatus? = SessionSyncStatus.load(dir)
+
+        /**
+         * 毫米波状态。和上面两个一样是**构造时读一次**，不是 `get()`。
+         *
+         * 有这一项之前，毫米波在整个界面上完全不可见：数据在采、在传，
+         * 参与者不知道它存在，也无从判断有没有采到——和 GPS 那次是同一类盲区。
+         */
+        val mmWave: SessionMmWaveStatus = manifest.resolveMmWaveStatus(dir)
     }
 
     data class LegacyOpus(

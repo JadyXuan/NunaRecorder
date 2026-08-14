@@ -89,6 +89,13 @@
             android:exported="false"
             android:foregroundServiceType="dataSync">
         </service>
+        <!-- 上传期间把进程钉在前台：一天 800+ 个小文件要传很久，
+             没有前台组件的进程在锁屏/切走之后会被限网甚至回收 -->
+        <service
+            android:name=".service.UploadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync">
+        </service>
         <service
             android:name=".service.MigrationService"
             android:exported="false"

@@ -1,6 +1,7 @@
 package com.example.nunarecorder.session
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -130,6 +131,55 @@ class SessionManifestTest {
         assertNull(second.downMs)
 
         assertEquals("只统计已结束的中断时长", 55_000L, loaded.link.totalDownMs)
+    }
+
+    /**
+     * 2026-08-14：`disconnect_count` 曾经是 `events.size`，于是移植毫米波之后
+     * 每小时凭空多出三十几次"断连"——固件每 30 秒开关一次雷达，每次关闭记一条。
+     * 实测一个整点会话报了 41 次，真实断连是 6 次。
+     *
+     * 用户看到的正是这个假数字（"断联频率好像高了不少"），而同一批数据的
+     * 音频覆盖率反而从 77% 涨到 96%。**报假事实比不报更贵**。
+     */
+    @Test
+    fun `毫米波开关和声纹暂停不算断连`() {
+        val m = sample().apply {
+            link = LinkHealth(
+                events = listOf(
+                    LinkGapEntry(1_000L, 6_000L, "connection_timeout(8)", 2),
+                    LinkGapEntry(2_000L, 2_000L, LinkGapEntry.REASON_MMWAVE_TOGGLE, 0),
+                    LinkGapEntry(3_000L, 123_000L, LinkGapEntry.REASON_VOICEPRINT, 0)
+                )
+            )
+        }
+        val loaded = roundTrip(m)
+
+        assertEquals("只有 1 次真断连", 1, loaded.link.disconnectCount)
+        assertEquals("主动空档要单独计数", 2, loaded.link.intentionalGaps.size)
+        assertEquals(
+            "声纹暂停有两分钟真实时长，算进链路故障就是虚报",
+            5_000L, loaded.link.totalDownMs
+        )
+        // 三条 event 一条都不能丢：对齐分析要用它们的时间点
+        assertEquals(3, loaded.link.events.size)
+    }
+
+    @Test
+    fun `主动空档在 json 里能直接区分，不用匹配 reason 字符串`() {
+        val m = sample().apply {
+            link = LinkHealth(
+                events = listOf(
+                    LinkGapEntry(1_000L, 6_000L, "connection_timeout(8)", 2),
+                    LinkGapEntry(2_000L, 2_000L, LinkGapEntry.REASON_MMWAVE_TOGGLE, 0)
+                )
+            )
+        }
+        val link = m.toJson().getJSONObject("link")
+        assertEquals(1, link.getInt("disconnect_count"))
+        assertEquals(1, link.getInt("intentional_gap_count"))
+        val events = link.getJSONArray("events")
+        assertFalse(events.getJSONObject(0).getBoolean("intentional"))
+        assertTrue(events.getJSONObject(1).getBoolean("intentional"))
     }
 
     @Test

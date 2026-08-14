@@ -161,6 +161,53 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    /**
+     * 每次回到前台都重新自检。
+     *
+     * 自检结果原来只在按"开始采集"时算一次，而且**只写进日志**——
+     * 用户 2026-08-09 反馈"没看到黄"，因为它从来没有渲染过。
+     * 现在有卡片了，就必须在用户去系统设置改完再回来时刷新，
+     * 否则他关掉省电模式回来还是看到红字，只会以为没生效。
+     */
+    override fun onResume() {
+        super.onResume()
+        runCatching { viewModel.readinessReport.value = CollectionReadiness.check(this) }
+    }
+
+    /** 自检项上的"去设置"。跳不过去时退回应用详情页，不要什么都不发生。 */
+    private fun openReadinessFix(fix: CollectionReadiness.Fix) {
+        val appDetails = android.content.Intent(
+            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            android.net.Uri.fromParts("package", packageName, null)
+        )
+        val intent = when (fix) {
+            CollectionReadiness.Fix.LOCATION_SOURCE ->
+                android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+            CollectionReadiness.Fix.BLUETOOTH ->
+                android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+            CollectionReadiness.Fix.BATTERY_OPTIMIZATION ->
+                android.content.Intent(
+                    android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                )
+            // 省电模式没有标准的直达 Action，电池设置页是各家 ROM 都有的最近一层
+            CollectionReadiness.Fix.BATTERY_SAVER ->
+                android.content.Intent(android.provider.Settings.ACTION_BATTERY_SAVER_SETTINGS)
+            CollectionReadiness.Fix.NOTIFICATION ->
+                android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+            // 自启动白名单是厂商私有的，没有可用的 Action，只能把人送到应用详情
+            CollectionReadiness.Fix.APP_DETAILS,
+            CollectionReadiness.Fix.AUTOSTART -> appDetails
+            CollectionReadiness.Fix.NONE -> return
+        }
+        val opened = runCatching { startActivity(intent); true }.getOrDefault(false)
+        if (!opened) {
+            // 某些 ROM 缺这些页面。直接静默失败会让参与者反复点同一个按钮。
+            appendLog("这台手机打不开那个设置页，请手动到系统设置里找")
+            runCatching { startActivity(appDetails) }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 允许内容延伸到状态栏/导航栏区域，由 Scaffold + WindowInsets 负责安全边距
@@ -204,6 +251,9 @@ class MainActivity : ComponentActivity() {
             "${info.versionName} ($code)"
         }.getOrDefault("unknown")
         MigrationCoordinator.onLog = { appendLog(it) }
+        // 上传要在锁屏和切到别的 App 时活下来，需要 Application context 起前台服务。
+        // 存的是 applicationContext，不是本 Activity——协调者活得比 Activity 长。
+        SessionSyncCoordinator.attach(this)
         SessionSyncCoordinator.onLog = { appendLog(it) }
         SessionSyncCoordinator.onTokenRejected = {
             enrollmentStore.markRevoked()
@@ -287,6 +337,8 @@ class MainActivity : ComponentActivity() {
                                         startScanForList()
                                     }
                                 },
+                                readinessReport = viewModel.readinessReport.value,
+                                onReadinessFix = { openReadinessFix(it) },
                                 logText = logText,
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,
@@ -319,9 +371,13 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                             onStopPlayback = { segmentPlayer.stop() },
-                            onShareEntry = { entry, withContext, withVad -> shareRecordingEntry(entry, withContext, withVad) },
+                            onShareEntry = { entry, withContext, withVad, withMmWave ->
+                                shareRecordingEntry(entry, withContext, withVad, withMmWave)
+                            },
                             onDeleteEntry = { entry, onDeleted -> deleteRecordingEntry(entry, onDeleted) },
-                            onUploadEntry = { entry, withContext, withVad -> uploadRecordingEntry(entry, withContext, withVad) },
+                            onUploadEntry = { entry, withContext, withVad, withMmWave ->
+                                uploadRecordingEntry(entry, withContext, withVad, withMmWave)
+                            },
                             onUploadAllPending = { uploadAllPending() },
                             onDeleteSynced = { onDone -> deleteSyncedSessions(onDone) },
                             onMigrateLegacy = { opus, options ->
@@ -735,8 +791,13 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private fun shareRecordingEntry(entry: RecordingEntry, withContext: Boolean, withVad: Boolean) {
-        val files = collectEntryFiles(entry, withContext, withVad)
+    private fun shareRecordingEntry(
+        entry: RecordingEntry,
+        withContext: Boolean,
+        withVad: Boolean,
+        withMmWave: Boolean
+    ) {
+        val files = collectEntryFiles(entry, withContext, withVad, withMmWave)
         if (files.isEmpty()) {
             appendLog("没有可分享的文件")
             return
@@ -764,7 +825,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun uploadRecordingEntry(entry: RecordingEntry, withContext: Boolean, withVad: Boolean) {
+    private fun uploadRecordingEntry(
+        entry: RecordingEntry,
+        withContext: Boolean,
+        withVad: Boolean,
+        withMmWave: Boolean
+    ) {
         val code = enrollmentStore.current()
         if (code == null) {
             appendLog("还没有入组配置，无法上传。请到「入组」页扫描二维码。")
@@ -776,7 +842,8 @@ class MainActivity : ComponentActivity() {
             includeContext = withContext,
             includeVad = withVad,
             enrollment = code,
-            httpClient = httpClient
+            httpClient = httpClient,
+            includeMmWave = withMmWave
         )
     }
 
@@ -891,7 +958,8 @@ class MainActivity : ComponentActivity() {
     private fun collectEntryFiles(
         entry: RecordingEntry,
         withContext: Boolean,
-        withVad: Boolean
+        withVad: Boolean,
+        withMmWave: Boolean
     ): List<File> {
         return when (entry) {
             is RecordingEntry.Session -> {
@@ -905,6 +973,13 @@ class MainActivity : ComponentActivity() {
                 if (withVad) {
                     val vad = SessionPaths.vadPrelabelFile(entry.dir)
                     if (vad.exists()) list.add(vad)
+                }
+                if (withMmWave) {
+                    // 数据和开关时间线一起走：只有数据没有时间线，事后对齐时
+                    // 雷达开关那几帧音频缺失会被误判成掉线
+                    SessionPaths.mmWaveFile(entry.dir).takeIf { it.exists() }?.let { list.add(it) }
+                    SessionPaths.mmWaveStateFile(entry.dir).takeIf { it.exists() }
+                        ?.let { list.add(it) }
                 }
                 File(entry.dir, SessionPaths.DIAGNOSTICS_LOG_FILE)
                     .takeIf { it.exists() }?.let { list.add(it) }

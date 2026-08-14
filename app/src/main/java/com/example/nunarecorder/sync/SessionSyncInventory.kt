@@ -11,7 +11,13 @@ object SessionSyncInventory {
         sessionDir: File,
         manifest: SessionManifest,
         includeContext: Boolean,
-        includeVad: Boolean
+        includeVad: Boolean,
+        /**
+         * 毫米波原来跟着 [includeContext] 走，界面上也看不到它。
+         * 参与者能单独取消上下文却不能单独取消毫米波，这不合理——它是另一类数据
+         * （雷达感知），本来就该由参与者自己决定传不传。
+         */
+        includeMmWave: Boolean = true
     ): List<SyncFileEntry> {
         val list = mutableListOf<SyncFileEntry>()
         fun add(rel: String, media: String) {
@@ -27,11 +33,10 @@ object SessionSyncInventory {
             )
         }
         add(SessionPaths.MANIFEST_FILE, "application/json")
-        if (includeContext) {
-            add(SessionPaths.CONTEXT_FILE, "application/x-ndjson")
-            // 毫米波数据和开关时间线跟着 context 一起上传。
-            // 漏了这两条的后果是"采到了但传不上去"——那比没采还糟，
-            // 因为手机上的副本迟早会被清理掉。add() 对不存在的文件是 no-op。
+        if (includeContext) add(SessionPaths.CONTEXT_FILE, "application/x-ndjson")
+        if (includeMmWave) {
+            // 数据和开关时间线必须一起走：只有数据没有开关时间线，事后做切片对齐时
+            // 雷达开关那几帧音频缺失会被误判成掉线。add() 对不存在的文件是 no-op。
             add(SessionPaths.MMWAVE_FILE, "application/x-ndjson")
             add(SessionPaths.MMWAVE_STATE_FILE, "application/x-ndjson")
         }

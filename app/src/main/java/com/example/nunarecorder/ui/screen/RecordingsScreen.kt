@@ -72,9 +72,13 @@ fun RecordingsScreen(
     segmentPlayback: SegmentPlaybackState?,
     onPlaySegment: (RecordingEntry.Session, Int, String) -> Unit,
     onStopPlayback: () -> Unit,
-    onShareEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
+    onShareEntry: (
+        RecordingEntry, withContext: Boolean, withVad: Boolean, withMmWave: Boolean
+    ) -> Unit,
     onDeleteEntry: (RecordingEntry, () -> Unit) -> Unit,
-    onUploadEntry: (RecordingEntry, withContext: Boolean, withVad: Boolean) -> Unit,
+    onUploadEntry: (
+        RecordingEntry, withContext: Boolean, withVad: Boolean, withMmWave: Boolean
+    ) -> Unit,
     /** 一键上传所有未同步会话 */
     onUploadAllPending: () -> Unit = {},
     /** 一键清理已确认同步的会话，返回清理结果描述 */
@@ -101,6 +105,7 @@ fun RecordingsScreen(
     var multiModalAction by remember { mutableStateOf(MultiModalAction.SHARE) }
     var includeContextData by remember { mutableStateOf(true) }
     var includeVadPrelabel by remember { mutableStateOf(true) }
+    var includeMmWaveData by remember { mutableStateOf(true) }
     var detailSession by remember { mutableStateOf<RecordingEntry.Session?>(null) }
 
     var migrateTarget by remember { mutableStateOf<RecordingEntry.LegacyOpus?>(null) }
@@ -352,6 +357,7 @@ fun RecordingsScreen(
             is RecordingEntry.LegacyOpus -> false
         }
         val isSession = entry is RecordingEntry.Session
+        val mmWave = (entry as? RecordingEntry.Session)?.mmWave?.takeIf { it.hasData }
         val actionLabel = if (multiModalAction == MultiModalAction.SHARE) "分享" else "上传"
 
         AlertDialog(
@@ -376,6 +382,15 @@ fun RecordingsScreen(
                             label = "上下文 (GPS + IMU + 活动)"
                         )
                     }
+                    mmWave?.let {
+                        ModalOptionRow(
+                            checked = includeMmWaveData,
+                            enabled = true,
+                            onChecked = { includeMmWaveData = it },
+                            icon = { Icon(Icons.Outlined.Info, null, Modifier.size(18.dp)) },
+                            label = "毫米波 (${it.describe()})"
+                        )
+                    }
                     if (hasVad) {
                         ModalOptionRow(
                             checked = includeVadPrelabel,
@@ -391,10 +406,11 @@ fun RecordingsScreen(
                 TextButton(onClick = {
                     val ctx = hasCtx && includeContextData
                     val vad = hasVad && includeVadPrelabel
+                    val mm = mmWave != null && includeMmWaveData
                     if (multiModalAction == MultiModalAction.SHARE) {
-                        onShareEntry(entry, ctx, vad)
+                        onShareEntry(entry, ctx, vad, mm)
                     } else {
-                        onUploadEntry(entry, ctx, vad)
+                        onUploadEntry(entry, ctx, vad, mm)
                     }
                     multiModalTarget = null
                 }) {
@@ -528,6 +544,8 @@ fun RecordingsScreen(
                                 }
                                 includeVadPrelabel = entry is RecordingEntry.Session &&
                                     SessionPaths.vadPrelabelFile(entry.dir).exists()
+                                includeMmWaveData = entry is RecordingEntry.Session &&
+                                    entry.mmWave.hasData
                                 multiModalAction = MultiModalAction.SHARE
                                 multiModalTarget = entry
                             },
@@ -539,6 +557,8 @@ fun RecordingsScreen(
                                 }
                                 includeVadPrelabel = entry is RecordingEntry.Session &&
                                     SessionPaths.vadPrelabelFile(entry.dir).exists()
+                                includeMmWaveData = entry is RecordingEntry.Session &&
+                                    entry.mmWave.hasData
                                 multiModalAction = MultiModalAction.UPLOAD
                                 multiModalTarget = entry
                             },

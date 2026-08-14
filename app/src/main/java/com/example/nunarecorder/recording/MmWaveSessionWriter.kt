@@ -44,11 +44,23 @@ class MmWaveSessionWriter(
     private var stateWriter: BufferedWriter? = null
     private var file: File? = null
     private var stateFile: File? = null
-    private var packetCount = 0L
+
+    /**
+     * 采集界面要实时读这两个计数，而写入发生在 BLE 回调线程上。
+     * 加锁读会让 50 次/秒的写路径和每秒一次的 UI 读互相等，`@Volatile` 足够：
+     * 计数只增不减，UI 读到的哪怕晚一格也无所谓。
+     */
+    @Volatile
+    var packetCount = 0L
+        private set
+
+    @Volatile
+    var stateEventCount = 0L
+        private set
+
     private var payloadBytes = 0L
     private var malformedPackets = 0L
     private var packetsSinceFlush = 0
-    private var stateEventCount = 0L
     private var lastFlushAtMs = 0L
 
     @Synchronized

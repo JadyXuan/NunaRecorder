@@ -23,6 +23,7 @@ import com.example.nunarecorder.recording.RecordingOptions
 import com.example.nunarecorder.recording.CollectionClock
 import com.example.nunarecorder.recording.RecordingStateMachine
 import com.example.nunarecorder.recording.SessionRecorder
+import com.example.nunarecorder.session.LinkGapEntry
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.DiagnosticsLog
 import com.example.nunarecorder.util.PowerProbe
@@ -416,7 +417,9 @@ class RecordingService : Service() {
                 val from = voiceprintPauseStartedAtMs
                 voiceprintPauseStartedAtMs = 0L
                 handler.post {
-                    recorder?.noteIntentionalGap(from, System.currentTimeMillis(), "voiceprint_capture")
+                    recorder?.noteIntentionalGap(
+                        from, System.currentTimeMillis(), LinkGapEntry.REASON_VOICEPRINT
+                    )
                 }
             }
             // BLE 回调线程直写，不绕主线程

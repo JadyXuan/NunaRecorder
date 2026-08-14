@@ -17,6 +17,8 @@ import java.io.File
 
 data class LiveRecordingStats(
     val sessionDir: File,
+    /** 会话开始的墙钟 */
+    val startedAtMs: Long = 0L,
     val closedSegmentCount: Int,
     val closedBytes: Long,
     val openSegmentBytes: Long,
@@ -28,6 +30,17 @@ data class LiveRecordingStats(
     /** 按墙钟应有的 20 ms 包数 */
     val expectedPackets: Long,
     val disconnectCount: Int,
+    /** 本次会话已写入的毫米波原始包数 */
+    val mmWavePackets: Long = 0L,
+    /**
+     * 设备最近一次报告的雷达状态；null = 本次会话还没收到过任何 `0x13`。
+     *
+     * **null 和 false 必须分开**：false 是"设备说它关着"（固件占空的休眠窗口），
+     * null 是"我们根本没听到过设备的说法"。两者在界面上是完全不同的两句话。
+     */
+    val mmWaveRadarOn: Boolean? = null,
+    /** 收到的雷达开关事件数；0 表示 A001 那一路可能根本没通 */
+    val mmWaveStateEvents: Long = 0L,
     /** 当前链路是否处于中断状态 */
     val linkDown: Boolean
 ) {
@@ -119,6 +132,7 @@ class SessionRecorder(
         val openBytes = writer?.bytesWritten ?: 0L
         return LiveRecordingStats(
             sessionDir = dir,
+            startedAtMs = sessionStartMs,
             closedSegmentCount = manifest?.segments?.size ?: 0,
             closedBytes = closedBytes,
             openSegmentBytes = openBytes,
@@ -126,7 +140,13 @@ class SessionRecorder(
             lastFrameAtMs = lastFrameAtMs,
             receivedPackets = receivedPackets,
             expectedPackets = expectedPackets,
-            disconnectCount = linkEvents.size + (if (openGapStartMs != null) 1 else 0),
+            // 主动空档（毫米波开关、录声纹）不算断连。原来是 linkEvents.size，
+            // 于是采集界面上的"断连"每小时凭空多三十几次，而链路其实没问题。
+            disconnectCount = linkEvents.count { !it.intentional } +
+                (if (openGapStartMs != null) 1 else 0),
+            mmWavePackets = mmWave.packetCount,
+            mmWaveRadarOn = radarOn,
+            mmWaveStateEvents = mmWave.stateEventCount,
             linkDown = openGapStartMs != null
         )
     }
@@ -144,6 +164,7 @@ class SessionRecorder(
         this.sessionDir = sessionDir
         assembler.reset()
         runCatching { mmWave.start(sessionDir, sessionStartMs) }
+        radarOn = null
         linkEvents.clear()
         missingSegments.clear()
         openGapStartMs = null
@@ -221,6 +242,10 @@ class SessionRecorder(
     /** 毫米波写入器；数据和开关时间线都归它 */
     private val mmWave = MmWaveSessionWriter()
 
+    /** 设备最近报告的雷达状态；见 [LiveRecordingStats.mmWaveRadarOn] 关于 null 的说明 */
+    @Volatile
+    private var radarOn: Boolean? = null
+
     /**
      * 毫米波原始包。**任何异常都不得影响音频**——这一路是附加模态，
      * 写不进去最多少一个模态，而音频是任务本身。
@@ -239,6 +264,7 @@ class SessionRecorder(
     fun onRadarState(enabled: Boolean) {
         val dir = sessionDir ?: return
         val now = clock()
+        radarOn = enabled
         runCatching {
             mmWave.recordState(
                 enabled = enabled,
@@ -251,7 +277,9 @@ class SessionRecorder(
         if (!enabled) {
             // 只在关闭时记一条：开启瞬间的扰动和关闭瞬间是同一类，
             // 但两条会把 events 撑成一天几百条。关闭点足以定位那一对边界。
-            linkEvents.add(LinkGapEntry(now, now, "mmwave_toggle", reconnectAttempts = 0))
+            linkEvents.add(
+                LinkGapEntry(now, now, LinkGapEntry.REASON_MMWAVE_TOGGLE, reconnectAttempts = 0)
+            )
         }
     }
 

@@ -1,8 +1,10 @@
 package com.example.nunarecorder.sync
 
+import android.content.Context
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.enroll.EnrollmentCode
 import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.service.UploadService
 import com.example.nunarecorder.session.SessionPaths
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +29,39 @@ object SessionSyncCoordinator {
 
     /** 令牌被撤销时回调宿主，用于置位并提示参与者联系研究员 */
     var onTokenRejected: (() -> Unit)? = null
+
+    /**
+     * Application context，用来在上传期间开/关前台服务。
+     *
+     * 存的是 `applicationContext`，不是 Activity——这个对象活得比任何 Activity 都长，
+     * 存 Activity 就是泄漏。宿主没设置时（单测）所有前台服务调用退化为空操作。
+     */
+    @Volatile
+    private var appContext: Context? = null
+
+    fun attach(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
+     * 上传期间把进程钉在前台。
+     *
+     * 上传原来完全跑在没有前台组件的进程里：切走或锁屏之后系统可以随时限网、
+     * 冻结甚至回收它，而一天 800 多个小文件本来就要传很久。
+     * 用户报的"切界面就中断"应该是这个，**不是切界面本身**——
+     * 这个协程挂在进程级 scope 上，切标签页碰不到它。
+     */
+    private fun startForegroundUpload(text: String) {
+        appContext?.let { UploadService.ensureRunning(it, text) }
+    }
+
+    private fun updateForegroundUpload(text: String, progress: Int?) {
+        appContext?.let { UploadService.updateProgress(it, text, progress) }
+    }
+
+    private fun stopForegroundUpload() {
+        appContext?.let { UploadService.stop(it) }
+    }
 
     data class State(
         val targetKey: String,
@@ -72,7 +107,8 @@ object SessionSyncCoordinator {
         includeContext: Boolean,
         includeVad: Boolean,
         enrollment: EnrollmentCode,
-        httpClient: OkHttpClient
+        httpClient: OkHttpClient,
+        includeMmWave: Boolean = true
     ) {
         val key = when (entry) {
             is RecordingEntry.Session -> entry.dir.absolutePath
@@ -84,12 +120,13 @@ object SessionSyncCoordinator {
         }
         cancelRequested.set(false)
         _state.value = State(key, entry.displayName, Phase.SYNCING, 0f, "准备同步…")
+        startForegroundUpload("准备上传 ${entry.displayName}")
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     when (entry) {
                         is RecordingEntry.Session -> syncSession(
-                            entry, includeContext, includeVad, enrollment, httpClient
+                            entry, includeContext, includeVad, enrollment, httpClient, includeMmWave
                         )
                         is RecordingEntry.LegacyOpus -> syncLegacy(
                             entry, includeContext, enrollment, httpClient
@@ -111,6 +148,11 @@ object SessionSyncCoordinator {
                 }
             } catch (e: Exception) {
                 fail(key, entry.displayName, e.message ?: "同步异常", "failed")
+            } finally {
+                // 唯一的关闭点。放在各个终态分支里会漏——token_rejected 那条
+                // 就不走 complete/fail/cancelled，前台通知会永远挂在状态栏上。
+                // "开始置位、指望结束路径清零"这个模式本项目已经踩过两次。
+                stopForegroundUpload()
             }
         }
     }
@@ -126,11 +168,14 @@ object SessionSyncCoordinator {
         includeContext: Boolean,
         includeVad: Boolean,
         enrollment: EnrollmentCode,
-        httpClient: OkHttpClient
+        httpClient: OkHttpClient,
+        includeMmWave: Boolean
     ): SyncOutcome {
         val dir = entry.dir
         val manifest = SessionManifest.load(SessionPaths.manifestFile(dir)) ?: entry.manifest
-        val inventory = SessionSyncInventory.buildRelative(dir, manifest, includeContext, includeVad)
+        val inventory = SessionSyncInventory.buildRelative(
+            dir, manifest, includeContext, includeVad, includeMmWave
+        )
         if (inventory.isEmpty()) {
             return SyncOutcome(false, "没有可同步的文件", "failed")
         }
@@ -178,6 +223,12 @@ object SessionSyncCoordinator {
             ) { file, index, total ->
                 val p = 0.1f + 0.8f * ((index + 1).toFloat() / total.coerceAtLeast(1))
                 update(dir.absolutePath, entry.displayName, p, "上传 ${file.path} (${index + 1}/$total)", "syncing")
+                // 通知里给的是"第几个文件"，不是百分比——一天 800 多个文件时
+                // 百分比几乎不动，看着像卡死了
+                updateForegroundUpload(
+                    "${entry.displayName} · ${index + 1}/$total",
+                    (p * 100).toInt()
+                )
                 SessionSyncStatusIO.write(dir, syncStatus)
             }
         } finally {
@@ -303,7 +354,9 @@ object SessionSyncCoordinator {
         }
         cancelRequested.set(false)
         log("开始批量上传 ${ordered.size} 个会话（按录制时间先后）")
+        startForegroundUpload("准备上传 ${ordered.size} 个会话")
         scope.launch {
+          try {
             var done = 0
             for (entry in ordered) {
                 if (cancelRequested.get()) {
@@ -315,10 +368,14 @@ object SessionSyncCoordinator {
                     key, entry.displayName, Phase.SYNCING, 0f,
                     "上传 ${done + 1}/${ordered.size}：${entry.displayName}"
                 )
+                updateForegroundUpload(
+                    "第 ${done + 1}/${ordered.size} 个会话：${entry.displayName}",
+                    null
+                )
                 val result = withContext(Dispatchers.IO) {
                     when (entry) {
                         is RecordingEntry.Session ->
-                            syncSession(entry, includeContext, includeVad, enrollment, httpClient)
+                            syncSession(entry, includeContext, includeVad, enrollment, httpClient, true)
                         is RecordingEntry.LegacyOpus ->
                             syncLegacy(entry, includeContext, enrollment, httpClient)
                     }
@@ -336,6 +393,10 @@ object SessionSyncCoordinator {
             _state.value = State(
                 keyOf(ordered.last()), "批量上传", Phase.DONE, 1f, "已上传 $done 个会话"
             )
+          } finally {
+            // 同上：中途 return@launch 的失败分支也要关掉前台服务
+            stopForegroundUpload()
+          }
         }
     }
 

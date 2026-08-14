@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,10 +37,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,7 +58,9 @@ import com.example.nunarecorder.data.ScannedDevice
 import com.example.nunarecorder.recording.LinkPhase
 import com.example.nunarecorder.recording.LinkStatus
 import com.example.nunarecorder.ui.LiveRecordingUiStats
+import com.example.nunarecorder.ui.theme.NunaError
 import com.example.nunarecorder.ui.theme.NunaSuccess
+import com.example.nunarecorder.ui.theme.NunaWarning
 import kotlinx.coroutines.delay
 
 @Composable
@@ -69,6 +74,9 @@ fun MainScreen(
     firstRunStep: com.example.nunarecorder.util.FirstRunGuide.Step =
         com.example.nunarecorder.util.FirstRunGuide.Step.READY,
     onFirstRunAction: (com.example.nunarecorder.util.FirstRunGuide.Step) -> Unit = {},
+    /** 出门前自检结果；null 表示还没检查过 */
+    readinessReport: com.example.nunarecorder.util.CollectionReadiness.Report? = null,
+    onReadinessFix: (com.example.nunarecorder.util.CollectionReadiness.Fix) -> Unit = {},
     liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
@@ -164,6 +172,9 @@ fun MainScreen(
         }
 
         FirstRunCard(step = firstRunStep, onAction = onFirstRunAction)
+
+        // 自检排在引导卡之后：先把"还没配好"说完，再说"配好了但环境不对"
+        ReadinessCard(report = readinessReport, onFix = onReadinessFix)
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
 
@@ -523,6 +534,9 @@ private fun LinkHealthPanel(
                     "${liveStats.closedSegmentCount} 段 · ${liveStats.formatTotalBytes()}" +
                         if (liveStats.disconnectCount > 0) " · 断连 ${liveStats.disconnectCount} 次" else ""
                 )
+                // 毫米波在采、在传，但界面上一直看不见——和 GPS 那次是同一类盲区。
+                val mm = liveStats.mmWaveLine(nowMs)
+                StatusLine("毫米波", mm.text, emphasis = mm.alert)
             }
         }
     }
@@ -545,6 +559,106 @@ private fun StatusLine(label: String, value: String, emphasis: Boolean = false) 
             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
             modifier = Modifier.weight(1f)
         )
+    }
+}
+
+/**
+ * 环境自检卡。
+ *
+ * **这一块原来根本没有界面。** `CollectionReadiness.check()` 的结果只写进
+ * `viewModel.readinessReport` 和日志面板，没有任何 Composable 读它——
+ * 用户 2026-08-09 反馈「没看到红/黄啊（没有黄，红确实正常）」，
+ * 他看到的"红"其实是日志里那行文字，黄色那一档从来没有渲染过。
+ *
+ * **一个从不告警的自检等于没有自检**，而它挡住的正是最贵的一类失败：
+ * 缺一个权限不会崩，只会让某个模态静默缺失，等数据回来才发现，那时参与者已经走了。
+ *
+ * 默认只显示一行摘要，点开才列全部——出门前该看的是"有没有问题"，
+ * 不是把十条正常项也铺在主页上。
+ */
+@Composable
+private fun ReadinessCard(
+    report: com.example.nunarecorder.util.CollectionReadiness.Report?,
+    onFix: (com.example.nunarecorder.util.CollectionReadiness.Fix) -> Unit
+) {
+    if (report == null || report.allGood) return
+    val blocking = report.blocking
+    val degraded = report.degraded
+    var expanded by remember(report) { mutableStateOf(blocking.isNotEmpty()) }
+    val accent = if (blocking.isNotEmpty()) NunaError else NunaWarning
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.10f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    buildString {
+                        append("出门前自检：")
+                        if (blocking.isNotEmpty()) append("${blocking.size} 项无法采集")
+                        if (blocking.isNotEmpty() && degraded.isNotEmpty()) append(" · ")
+                        if (degraded.isNotEmpty()) append("${degraded.size} 项会缺数据")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = accent,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    if (expanded) "收起" else "展开",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+            }
+            if (expanded) {
+                Spacer(Modifier.height(6.dp))
+                (blocking + degraded).forEach { item ->
+                    val color =
+                        if (item.level == com.example.nunarecorder.util.CollectionReadiness.Level.BLOCKING) {
+                            NunaError
+                        } else {
+                            NunaWarning
+                        }
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        Text(
+                            "● ${item.title}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = color
+                        )
+                        // 说"不解决会怎样"，不是只说"缺少 X 权限"——
+                        // 参与者是校外的普通人，没有义务知道少了权限意味着什么
+                        Text(
+                            item.consequence,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        item.actionHint?.let { hint ->
+                            if (item.fix == com.example.nunarecorder.util.CollectionReadiness.Fix.NONE) {
+                                Text(
+                                    hint,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                            } else {
+                                TextButton(
+                                    onClick = { onFix(item.fix) },
+                                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
+                                ) {
+                                    Text(hint, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

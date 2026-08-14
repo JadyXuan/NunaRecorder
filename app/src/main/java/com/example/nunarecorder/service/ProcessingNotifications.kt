@@ -18,8 +18,10 @@ object ProcessingNotifications {
 
     const val VAD_CHANNEL_ID = "nuna_processing_vad_v2"
     const val MIGRATION_CHANNEL_ID = "nuna_processing_migration_v2"
+    const val UPLOAD_CHANNEL_ID = "nuna_processing_upload_v1"
     const val VAD_NOTIFICATION_ID = 1003
     const val MIGRATION_NOTIFICATION_ID = 1004
+    const val UPLOAD_NOTIFICATION_ID = 1005
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -41,6 +43,16 @@ object ProcessingNotifications {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "后台将旧版录音转为分段格式"
+                setShowBadge(true)
+            }
+        )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                UPLOAD_CHANNEL_ID,
+                "上传到服务器",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "会话上传进度"
                 setShowBadge(true)
             }
         )
@@ -79,6 +91,18 @@ object ProcessingNotifications {
         if (indeterminate) null else progress,
         100
     )
+
+    fun buildUpload(
+        context: Context,
+        content: String,
+        progress: Int? = null
+    ): Notification = build(context, UPLOAD_CHANNEL_ID, "Nuna · 上传中", content, progress, 100)
+
+    fun updateUpload(context: Context, content: String, progress: Int? = null) {
+        ensureChannels(context)
+        val mgr = context.getSystemService(NotificationManager::class.java)
+        mgr.notify(UPLOAD_NOTIFICATION_ID, buildUpload(context, content, progress))
+    }
 
     fun updateVad(context: Context, content: String, progress: Int? = null) {
         ensureChannels(context)

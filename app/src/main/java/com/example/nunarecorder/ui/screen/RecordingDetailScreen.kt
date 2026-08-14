@@ -52,6 +52,7 @@ import com.example.nunarecorder.audio.SegmentPlaybackState
 import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.session.AudioSegmentEntry
 import com.example.nunarecorder.session.SessionManifest
+import com.example.nunarecorder.session.SessionMmWaveStatus
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.theme.NunaSuccess
@@ -269,6 +270,7 @@ fun RecordingDetailScreen(
             manifest = manifest,
             vadData = vadData,
             hasContext = session.hasContext,
+            mmWave = session.mmWave,
             vadComplete = VadResumeHelper.isVadComplete(session.dir),
             isLiveRecording = showingLive,
             liveStats = liveStats,
@@ -372,6 +374,7 @@ private fun SummaryCard(
     manifest: SessionManifest,
     vadData: VadPrelabelData?,
     hasContext: Boolean,
+    mmWave: SessionMmWaveStatus,
     vadComplete: Boolean,
     isLiveRecording: Boolean = false,
     liveStats: LiveRecordingUiStats? = null,
@@ -418,6 +421,8 @@ private fun SummaryCard(
             }
             InfoLine("音频", segLabel)
             InfoLine("上下文", if (hasContext) "GPS + IMU + 活动 (${SessionPaths.CONTEXT_FILE})" else "无")
+            // 毫米波原来在整个界面上完全不可见，参与者无从知道它存不存在、采到没有
+            if (mmWave.enabled) InfoLine("毫米波", mmWave.describe())
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
             Text("VAD (Silero)", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
             InfoLine("状态", vadStatusText(vadStatus, vadComplete))

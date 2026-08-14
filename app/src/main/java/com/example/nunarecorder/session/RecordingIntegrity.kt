@@ -172,15 +172,34 @@ data class LinkGapEntry(
 ) {
     val downMs: Long? get() = endAtMs?.let { it - startAtMs }
 
+    /**
+     * 这条是**我方主动造成的**空档，不是链路故障。
+     *
+     * 两者都表现为"这段时间没有音频"，所以共用 `events`；但把它们混在一起计数
+     * 会得出假的断连率——实测一个整点会话 41 条 events 里 35 条是毫米波开关，
+     * 真实断连只有 6 次。参见 [LinkHealth.disconnectCount]。
+     */
+    val intentional: Boolean get() = reason in INTENTIONAL_REASONS
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("start_at_ms", startAtMs)
         put("end_at_ms", endAtMs ?: JSONObject.NULL)
         put("reason", reason)
         put("reconnect_attempts", reconnectAttempts)
         put("down_ms", downMs ?: JSONObject.NULL)
+        // 只加不改：下游不必靠字符串匹配 reason 就能把主动扰动排除掉
+        put("intentional", intentional)
     }
 
     companion object {
+        /** 毫米波开关瞬间会干扰几帧音频 */
+        const val REASON_MMWAVE_TOGGLE = "mmwave_toggle"
+
+        /** 录声纹期间日常采集暂停 */
+        const val REASON_VOICEPRINT = "voiceprint_capture"
+
+        val INTENTIONAL_REASONS = setOf(REASON_MMWAVE_TOGGLE, REASON_VOICEPRINT)
+
         fun fromJson(o: JSONObject) = LinkGapEntry(
             startAtMs = o.optLong("start_at_ms"),
             endAtMs = if (o.isNull("end_at_ms")) null else o.optLong("end_at_ms"),
@@ -202,12 +221,31 @@ data class LinkHealth(
     val reorderedFrames: Int = 0,
     val droppedCarryOverBytes: Int = 0
 ) {
-    val disconnectCount: Int get() = events.size
-    val totalDownMs: Long get() = events.sumOf { it.downMs ?: 0L }
+    /** 真正的链路故障，**不含**毫米波开关和录声纹这类主动空档 */
+    val disconnects: List<LinkGapEntry> get() = events.filterNot { it.intentional }
+
+    /** 我方主动造成的空档 */
+    val intentionalGaps: List<LinkGapEntry> get() = events.filter { it.intentional }
+
+    /**
+     * 断连次数。**排除主动空档**——2026-08-14 之前它是 `events.size`，
+     * 于是移植毫米波之后每小时凭空多出三十几次"断连"：实测一个整点会话
+     * 报了 41 次，真实断连是 6 次。用户当时的反馈正是"断联频率好像高了不少"，
+     * 而同一批数据的音频覆盖率反而从 77% 涨到 96%——**数字在撒谎，链路其实变好了**。
+     *
+     * 这是本项目最在意的一类问题：不是没实现，是实现了但会安静地报出假事实。
+     */
+    val disconnectCount: Int get() = disconnects.size
+
+    /** 链路真正断开的总时长。声纹暂停有两分钟的真实时长，算进去会虚报链路故障 */
+    val totalDownMs: Long get() = disconnects.sumOf { it.downMs ?: 0L }
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("disconnect_count", disconnectCount)
         put("total_down_ms", totalDownMs)
+        // 只加不改：主动空档仍然全部留在 events 里，这里只是给出它们的计数，
+        // 免得下游把 events.size 当断连数（我们自己就犯过）
+        put("intentional_gap_count", intentionalGaps.size)
         put("events", JSONArray().apply { events.forEach { put(it.toJson()) } })
         put("assembler", JSONObject().apply {
             put("resync_skipped_bytes", resyncSkippedBytes)

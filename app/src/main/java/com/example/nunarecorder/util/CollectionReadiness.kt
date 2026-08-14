@@ -34,13 +34,34 @@ object CollectionReadiness {
         OK
     }
 
+    /**
+     * 能跳到哪个系统设置页。
+     *
+     * 只写"到系统设置里授予位置权限"是不够的——参与者是校外的普通人，
+     * 不同 ROM 的设置路径还都不一样。能直达的就直达。
+     */
+    enum class Fix {
+        /** 没有可跳转的目标，只能靠文案 */
+        NONE,
+        APP_DETAILS,
+        LOCATION_SOURCE,
+        BLUETOOTH,
+        BATTERY_OPTIMIZATION,
+        /** 省电模式（部分 ROM 没有这个页面，跳不过去就退回电池设置） */
+        BATTERY_SAVER,
+        NOTIFICATION,
+        /** 厂商自启动白名单，没有标准 API，只能打开应用详情让用户自己找 */
+        AUTOSTART
+    }
+
     data class Item(
         val level: Level,
         val title: String,
         /** 说清"不解决会怎样"，而不是只说"缺少 X 权限" */
         val consequence: String,
         /** 非空时界面给一个跳转按钮 */
-        val actionHint: String? = null
+        val actionHint: String? = null,
+        val fix: Fix = Fix.NONE
     )
 
     data class Report(val items: List<Item>) {
@@ -76,7 +97,8 @@ object CollectionReadiness {
                 Item(
                     Level.BLOCKING, "缺少蓝牙连接权限",
                     "完全无法连接 Nuna 设备，一秒音频都采不到。",
-                    "到系统设置里给本应用授予「附近的设备」权限"
+                    "到系统设置里给本应用授予「附近的设备」权限",
+                    Fix.APP_DETAILS
                 )
             }
         )
@@ -88,7 +110,8 @@ object CollectionReadiness {
                 !adapter.isEnabled -> Item(
                     Level.BLOCKING, "蓝牙未开启",
                     "无法连接设备。开始采集后再关蓝牙会中断链路。",
-                    "下拉通知栏打开蓝牙"
+                    "下拉通知栏打开蓝牙",
+                    Fix.BLUETOOTH
                 )
                 else -> Item(Level.OK, "蓝牙已开启", "正常")
             }
@@ -102,12 +125,14 @@ object CollectionReadiness {
                 granted(context, Manifest.permission.ACCESS_COARSE_LOCATION) -> Item(
                     Level.DEGRADED, "只有大致位置权限",
                     "GPS 精度不足，位置模态基本不可用。",
-                    "在权限里把位置改成「精确」"
+                    "在权限里把位置改成「精确」",
+                    Fix.APP_DETAILS
                 )
                 else -> Item(
                     Level.DEGRADED, "缺少位置权限",
                     "整段采集不会有任何 GPS 数据，事后无法还原去过哪里。",
-                    "到系统设置里授予位置权限并选择「精确」"
+                    "到系统设置里授予位置权限并选择「精确」",
+                    Fix.APP_DETAILS
                 )
             }
         )
@@ -130,7 +155,8 @@ object CollectionReadiness {
                         Level.DEGRADED, "系统关闭了卫星定位",
                         "只能拿到 Wi-Fi/基站定位（精度几十米），户外常常一个点都没有。" +
                             "同意书里承诺的每 30 秒一个 GPS 点做不到。",
-                        "到系统「设置 → 位置」里把定位模式改成「高精度」"
+                        "到系统「设置 → 位置」里把定位模式改成「高精度」",
+                        Fix.LOCATION_SOURCE
                     )
                 }
             )
@@ -144,7 +170,8 @@ object CollectionReadiness {
                     Item(
                         Level.DEGRADED, "缺少身体活动权限",
                         "不会有走路/静止/乘车这一层标签。",
-                        "到系统设置里授予「身体活动」权限"
+                        "到系统设置里授予「身体活动」权限",
+                        Fix.APP_DETAILS
                     )
                 }
             )
@@ -176,13 +203,34 @@ object CollectionReadiness {
                         Level.DEGRADED, "缺少通知权限",
                         "看不到采集状态常驻通知，也收不到设备低电量提醒；" +
                             "部分系统还会更快回收没有可见通知的后台服务。",
-                        "到系统设置里允许本应用发送通知"
+                        "到系统设置里允许本应用发送通知",
+                        Fix.NOTIFICATION
                     )
                 }
             )
         }
 
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+
+        // 省电模式和"电池优化白名单"是**两回事**：白名单只是把本应用排除在
+        // Doze 的常规限制之外，系统级省电模式一开，后台 CPU、网络和前台服务
+        // 照样会被压。用户 2026-08-09 实测："省电模式好像又 kill 过一次采集 app"。
+        // 这一条要**事前**告警——事后自我拉起是 T-025 的兜底，不是替代品。
+        val powerSaveOn = pm?.isPowerSaveMode == true
+        items.add(
+            if (!powerSaveOn) {
+                Item(Level.OK, "省电模式已关闭", "系统不会额外压制后台")
+            } else {
+                Item(
+                    Level.DEGRADED, "系统省电模式正开着",
+                    "省电模式会压制后台 CPU 和网络，实测能直接把采集进程杀掉。" +
+                        "关掉电池优化不能替代这一条，两者是不同的开关。",
+                    "下拉通知栏关掉「省电模式」，或到系统「设置 → 电池」里关闭",
+                    Fix.BATTERY_SAVER
+                )
+            }
+        )
+
         val ignoringBattery = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
         items.add(
             if (ignoringBattery) {
@@ -192,7 +240,8 @@ object CollectionReadiness {
                     Level.DEGRADED, "电池优化仍然开启",
                     "连续采集几小时后系统可能限制后台，导致采集中断且不易察觉。" +
                         "16 小时佩戴场景下这一条几乎一定会踩到。",
-                    "点这里去关闭电池优化"
+                    "点这里去关闭电池优化",
+                    Fix.BATTERY_OPTIMIZATION
                 )
             }
         )
@@ -205,7 +254,8 @@ object CollectionReadiness {
                 Level.DEGRADED, "确认已允许后台自启动",
                 "这一层是手机厂商自己的白名单，系统不提供查询接口，所以无法自动确认。" +
                     "不加进去的话，划掉任务卡片或内存紧张时采集会被直接杀掉。",
-                "点这里去设置自启动"
+                "点这里去设置自启动",
+                Fix.AUTOSTART
             )
         )
 
