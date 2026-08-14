@@ -73,8 +73,15 @@ class NunaBleLink(
         /** 设备电量 0–100；来自标准 BLE 电池服务 */
         fun onBatteryLevel(percent: Int)
 
-        /** 设备固件版本，例如 `3.14.5.1813` */
-        fun onFirmwareRevision(version: String)
+        /**
+         * 设备固件版本，例如 `3.14.5.1813`。
+         *
+         * [authoritative] 为真表示来自 A001 `0x05` 设备信息，那是真值；
+         * 为假表示来自标准 DIS `0x2A26`——**实测每台设备都返回 `1.0.0`**，
+         * 是个通用串，分不出 1813 和 1736。要按固件做判断的调用方
+         * **只能用 authoritative 那一路**。
+         */
+        fun onFirmwareRevision(version: String, authoritative: Boolean)
 
         /** A001 上的毫米波原始包（envelope type 0x08），原样交给写入器 */
         fun onSensorPacket(raw: ByteArray) {}
@@ -908,7 +915,7 @@ class NunaBleLink(
                     if (!fw.isNullOrBlank()) {
                         log(TAG, "设备信息固件版本 $fw（权威来源）")
                         authoritativeFirmware = true
-                        listener.onFirmwareRevision(fw)
+                        listener.onFirmwareRevision(fw, authoritative = true)
                     }
                 }
             }
@@ -977,7 +984,7 @@ class NunaBleLink(
         val version = String(value, Charsets.UTF_8).trim().trim('\u0000')
         if (version.isEmpty()) return
         log(TAG, "设备固件版本 $version")
-        listener.onFirmwareRevision(version)
+        listener.onFirmwareRevision(version, authoritative = false)
     }
 
     private fun reportBattery(characteristic: BluetoothGattCharacteristic, value: ByteArray) {

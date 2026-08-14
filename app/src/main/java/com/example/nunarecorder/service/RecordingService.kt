@@ -16,6 +16,7 @@ import android.os.PowerManager
 import com.example.nunarecorder.MainActivity
 import com.example.nunarecorder.R
 import com.example.nunarecorder.ble.NunaBleLink
+import com.example.nunarecorder.data.DeviceStorage
 import com.example.nunarecorder.data.UserSettingsStorage
 import com.example.nunarecorder.recording.LinkPhase
 import com.example.nunarecorder.recording.RecordingController
@@ -443,8 +444,19 @@ class RecordingService : Service() {
             }
         }
 
-        override fun onFirmwareRevision(version: String) {
-            handler.post { recorder?.setDeviceFirmware(version) }
+        override fun onFirmwareRevision(version: String, authoritative: Boolean) {
+            handler.post {
+                recorder?.setDeviceFirmware(version)
+                // 只有权威来源值得存进设备记录：DIS 的 `1.0.0` 存进去等于把"未知"
+                // 记成"已知且正常"，那条检查就永远放行。见 DeviceFirmwarePolicy。
+                if (authoritative) {
+                    recordingDeviceAddress?.let { addr ->
+                        runCatching {
+                            DeviceStorage(applicationContext).recordFirmware(addr, version)
+                        }
+                    }
+                }
+            }
         }
 
         override fun onFatal(reason: String) {

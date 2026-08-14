@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.ActivityCompat
+import com.example.nunarecorder.data.DeviceFirmwarePolicy
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 
@@ -81,8 +82,27 @@ object CollectionReadiness {
     private fun granted(context: Context, permission: String): Boolean =
         ActivityCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
-    fun check(context: Context): Report {
+    /**
+     * @param selectedDeviceFirmware 当前选中设备**上次采集时**报上来的权威固件版本；
+     *   null = 这台设备还没采过，此时任何设计都判断不了（开采前读不到真固件，
+     *   见 [com.example.nunarecorder.data.DeviceFirmwarePolicy]）。
+     */
+    fun check(context: Context, selectedDeviceFirmware: String? = null): Report {
         val items = mutableListOf<Item>()
+
+        // 设备固件。放在最前面是因为它决定"这台设备能不能采到毫米波"，
+        // 而这件事在数据里完全看不出来——实测一台旧固件设备连续 51 分钟零毫米波。
+        DeviceFirmwarePolicy.warning(selectedDeviceFirmware)?.let { warning ->
+            items.add(
+                Item(
+                    // 只降级不阻断：毫米波是附加模态，音频才是任务本身。
+                    // 为了保住附加模态而让参与者一秒都采不到，是把优先级反过来了。
+                    Level.DEGRADED, "这台设备的固件不是统一版本",
+                    warning,
+                    "联系研究员升级固件，或换一台台账内的设备"
+                )
+            )
+        }
 
         // ── 阻断项 ────────────────────────────────────────────────────────
         val btPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

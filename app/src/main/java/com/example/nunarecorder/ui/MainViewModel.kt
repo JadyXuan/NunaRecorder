@@ -45,6 +45,14 @@ class MainViewModel : ViewModel() {
     val voiceprintMessage = mutableStateOf<String?>(null)
 
     /** 最近一次开采自检结果 */
+    /**
+     * 固件不匹配的警告文案；非 null 时界面弹确认框。
+     *
+     * 存在 ViewModel 而不是 Composable 局部状态：触发它的是
+     * `MainActivity.startRecording()`，不是某个 Composable。
+     */
+    val firmwareWarning = mutableStateOf<String?>(null)
+
     val readinessReport =
         mutableStateOf<com.example.nunarecorder.util.CollectionReadiness.Report?>(null)
 

@@ -50,6 +50,7 @@ import com.example.nunarecorder.sync.ServerHandshakeCheck
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.AppVersionCheck
+import com.example.nunarecorder.data.DeviceFirmwarePolicy
 import com.example.nunarecorder.util.CollectionReadiness
 import com.example.nunarecorder.util.DiagnosticsLog
 import com.example.nunarecorder.vad.VadJobQueue
@@ -171,7 +172,10 @@ class MainActivity : ComponentActivity() {
      */
     override fun onResume() {
         super.onResume()
-        runCatching { viewModel.readinessReport.value = CollectionReadiness.check(this) }
+        runCatching {
+            viewModel.readinessReport.value =
+                CollectionReadiness.check(this, deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value))
+        }
     }
 
     /** 自检项上的"去设置"。跳不过去时退回应用详情页，不要什么都不发生。 */
@@ -302,6 +306,27 @@ class MainActivity : ComponentActivity() {
                         .firstOrNull()
                 }
                 var segmentPlayback by remember { mutableStateOf<SegmentPlaybackState?>(null) }
+
+                // 固件不匹配：必须显式确认才继续。放在最外层，任何标签页都盖得住。
+                viewModel.firmwareWarning.value?.let { warning ->
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { viewModel.firmwareWarning.value = null },
+                        title = { androidx.compose.material3.Text("这台设备的固件不是统一版本") },
+                        text = { androidx.compose.material3.Text(warning) },
+                        confirmButton = {
+                            androidx.compose.material3.TextButton(onClick = {
+                                viewModel.firmwareWarning.value = null
+                                // 音频照常采，只是没有毫米波——不该因此让人一秒都采不到
+                                startRecording(bypassFirmwareWarning = true)
+                            }) { androidx.compose.material3.Text("仍然开始采集") }
+                        },
+                        dismissButton = {
+                            androidx.compose.material3.TextButton(onClick = {
+                                viewModel.firmwareWarning.value = null
+                            }) { androidx.compose.material3.Text("先不采，去联系研究员") }
+                        }
+                    )
+                }
 
                 DisposableEffect(Unit) {
                     segmentPlayer.setOnStateChanged { segmentPlayback = it }
@@ -518,7 +543,10 @@ class MainActivity : ComponentActivity() {
      * Activity 不再持有 GATT 或录制管线。原来「连接 + 握手」和「开始录制」是两个按钮、
      * 两段状态，中间任何一步失败都没人发现；现在只有一个入口，链路健康由状态面板显示。
      */
-    private fun startRecording() {
+    /**
+     * @param bypassFirmwareWarning 参与者在固件警告对话框里选了"仍然开始采集"
+     */
+    private fun startRecording(bypassFirmwareWarning: Boolean = false) {
         if (bluetoothAdapter?.isEnabled != true) {
             appendLog("请先开启蓝牙")
             return
@@ -534,7 +562,23 @@ class MainActivity : ComponentActivity() {
             ?: address
         // 权限少开不会让 App 崩，只会让某个模态静默缺失，等数据回来才发现——
         // 那时参与者已经走了。所以在开始之前就摆出来。
-        val readiness = CollectionReadiness.check(this)
+        val storedFirmware = deviceStorage.firmwareOf(address)
+
+        // 旧固件的设备毫米波会全程为空，而数据里除了 device_firmware 看不出来。
+        //
+        // **这里是打断，不是阻断。** 参与者必须显式确认才能继续——一张黄色卡片
+        // 他可能根本不展开，而这一条不是点个系统设置就能解决的，要联系研究员。
+        // 但也不能真的拦死：毫米波是附加模态，音频才是任务本身（AGENTS.md §1），
+        // 为了保住附加模态让人一秒都采不到，是把优先级反过来了。
+        if (!bypassFirmwareWarning) {
+            DeviceFirmwarePolicy.warning(storedFirmware)?.let { warning ->
+                DiagnosticsLog.log("Readiness", "固件不匹配，等待参与者确认：$storedFirmware")
+                viewModel.firmwareWarning.value = warning
+                return
+            }
+        }
+
+        val readiness = CollectionReadiness.check(this, storedFirmware)
         readiness.items.filter { it.level != CollectionReadiness.Level.OK }.forEach {
             appendLog("自检: ${it.title} —— ${it.consequence}")
         }
