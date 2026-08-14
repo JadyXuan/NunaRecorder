@@ -48,6 +48,16 @@ echo "签名指纹已核对：${GOT_SIGNER:0:16}…"
 
 # versionCode 必须严格大于线上：同号或降号 Android 不认为是升级，
 # 表现为"参与者装不上新版"，又是一次静默失败。
+#
+# **`LOCAL_VC` 必须从 APK 里读，不能读 `app/build.gradle.kts`。**
+# 这一条不只是"读源头更准"，它顺带挡住了一类真实存在的故障：
+# 2026-08-14 实测，跨文件的接口签名变更之后
+# `./gradlew assembleDeviceDebug` 会报 BUILD SUCCESSFUL 但**根本不重新生成 APK**
+# （`compileDebugKotlin` 同样假成功，只有 `--rerun-tasks` 抓得到）。
+# 那时源码里的 versionCode 已经加了，而 APK 里还是旧号——
+# 从 APK 读就会撞上这里的"不大于线上"直接拒绝，从 gradle 配置读则会
+# **把上一次的包当成新版发出去，而所有校验都通过**。
+# 谁要"优化"这一段，先看这条。
 AAPT=$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/build-tools/*/ | tail -1)aapt2
 LOCAL_VC=$("$AAPT" dump badging "$APK" 2>/dev/null |
   sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
