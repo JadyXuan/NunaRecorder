@@ -10,6 +10,7 @@
 | §1.1 `manifest.json` | `session/SessionManifest.kt` |
 | §1.2 `context/context.jsonl` | `service/ContextDataService.kt` |
 | §1.3 `labels/sync_status.json` | `sync/SessionSyncStatus.kt` |
+| §1.4 `context/mmwave*.jsonl` | `recording/MmWaveSessionWriter.kt`, `ble/NunaProtocolInspector.kt` |
 | §1 `labels/vad_prelabel.json` | `vad/VadPrelabelWriter.kt` |
 | §2 同步流程 | `sync/SessionSyncCoordinator.kt`, `sync/SessionSyncUploader.kt` |
 
@@ -24,6 +25,8 @@
 | `manifest.json` | 会话元数据、音频分段列表、VAD 摘要 |
 | `audio/seg_XXX.opus` | 裸 Opus 流，每段约 60s |
 | `context/context.jsonl` | GPS / IMU / **身体活动** 等时序标签（JSONL） |
+| `context/mmwave.jsonl` | 毫米波原始包（见 §1.4）；**旧会话没有这个文件** |
+| `context/mmwave_state.jsonl` | 毫米波开关时间线（见 §1.4）；**旧会话没有这个文件** |
 | `labels/vad_prelabel.json` | Silero VAD 预标注 |
 | `labels/sync_status.json` | **本机** 服务器同步状态（不上传亦可由服务端生成） |
 
@@ -81,16 +84,65 @@
 
 `end_at_ms` 为 `null` 表示会话结束时链路仍未恢复。
 
+##### `events[]` 里混着两种东西——2026-08-14 更正
+
+`events` 同时装**链路故障**和**我方主动造成的空档**（录声纹暂停、毫米波开关）。
+两者都表现为"这段时间没有音频"，所以放在一起；但 **2026-08-14 之前
+`disconnect_count` 是 `events.size`**，把主动空档也算成了断连。
+
+移植毫米波之后这个错误变得很显眼：固件每 30 秒开关一次雷达，每次关闭记一条
+`mmwave_toggle`，于是**一个整点会话报了 41 次断连，真实断连只有 6 次**。
+用户当时的反馈是"断联频率好像高了不少"，而同一批数据的音频覆盖率反而从
+77% 涨到 96%——**数字在撒谎，链路其实是变好的**。
+
+现在：
+
+- `disconnect_count` / `total_down_ms` **只统计真正的链路故障**；
+- 新增 `link.intentional_gap_count`；
+- 每条 event 新增 `intentional: true|false`，下游不必再靠字符串匹配 `reason`。
+
+**已入库的旧会话不会被改写**：`app_version ≤ 1.27 (28)` 的 manifest 里，
+`disconnect_count` 仍是含主动空档的旧口径，重新统计时请按 `reason` 过滤
+（`mmwave_toggle`、`voiceprint_capture`）。
+
+#### 2026-08-14 新增字段（向后兼容，旧会话没有这些键）
+
+| 字段 | 含义 |
+| --- | --- |
+| `app_version` | 采集端版本，如 `1.27 (28)` |
+| `device_firmware` | 设备固件版本，如 `3.14.5.1813`；读不到时不写这个键 |
+| `end_reason` | 会话是怎么结束的，见下 |
+| `context.modalities[]` | 本次启用的上下文模态：`imu` / `gps` / `activity` / `mmwave` |
+| `context.mmwave_file`、`context.mmwave_state_file` | 仅当 `modalities` 含 `mmwave` 时出现 |
+| `mmwave` | 毫米波摘要，见 §1.4 |
+| `audio.deleted_segments[]` | 参与者主动删除的分段，与 `missing_segments` 不是一回事 |
+
+`end_reason` 取值：`user_stop`（用户按了停止）、`hourly_rollover`（整点换会话）、
+`service_destroyed`（服务被系统回收）、`crash_recovered`（上次没能正常收尾，下次启动补的）。
+**没有这个键 = 2026-08-09 之前的旧会话**，不代表结束方式未知。
+
 ### 1.2 `context/context.jsonl`（每行一个 JSON）
 
 | type | 含义 | 示例字段 |
 |------|------|----------|
-| `meta` | 采集开始 | `started_at_ms`, `modalities` |
+| `meta` | 采集开始 | `started_at_ms`, `modalities`, `context_file` |
 | `imu` | IMU | `sensor`: accel/gyro/mag, `x,y,z`, `t_ms` |
-| `gps` | GPS | `lat,lon,alt,acc,speed,bearing`, `t_ms` |
+| `gps` | GPS | `lat,lon,alt,acc,speed,bearing`, `provider`, `t_ms` |
+| `gps_status` | **定位注册诊断** | 见下 |
 | `activity` | **身体活动** | `state`: STILL/WALKING/RUNNING/IN_VEHICLE/…, `confidence` 0–100, `t_ms` |
 
 活动状态来自 Android Activity Recognition API（需 Google Play 服务）。
+
+`gps.provider` 是 Android 给出的定位来源（`gps` / `fused` / `network`）。
+**`network` 意味着那个点是 Wi-Fi/基站定位，精度几十米**，不能当成同意书 §3 承诺的 GPS 轨迹。
+
+`gps_status` 每次注册定位时写一条（会话开始、整点轮转各一次），
+字段 `gps_registered` / `network_registered` / `fused_registered` / `has_fine_permission` /
+`gps_provider_enabled` / `failures[]`。它存在的唯一理由是**区分「这段没出门」和「这段定位那一路是断的」**——
+2026-08-09 全天采到的 provider 清一色 `network`，而当时没有这一行，事后无法判断是权限、
+是系统定位模式，还是代码坏了。**分析时先读它再读 `gps`。**
+
+毫米波不写进 `context.jsonl`，它有自己的两个文件，见 §1.4。
 
 ### 1.3 `labels/sync_status.json`（客户端维护）
 
@@ -136,7 +188,134 @@
 
 ---
 
-## 2. 同步流程（推荐服务端实现）
+### 1.4 毫米波（mmWave）
+
+Nuna 设备内置毫米波雷达，通过 BLE A001 特征的 `0x08` 通知上报。
+**这一路已经在产生真实数据**（2026-08-11 起，15 个会话 1946 个包），
+但在本文冻结之前服务端不知道它是什么、不校验、也不解析——它是靠 `context/` 的通用透传混上来的。
+本节把它写成契约，**只加不改**：老会话没有这些键和文件，读到就当没有毫米波。
+
+**App 不解码 payload。** 解码协议在设备侧（Ruihan）手里，尚未交付；已知呼吸信号可提取、
+心跳暂不可用。**在拿到协议之前不要自己去猜那 256 字节的字段语义**，猜错的派生数据比没有更糟。
+
+#### 1.4.1 `manifest.json` 里的 `mmwave` 段
+
+```json
+"mmwave": {
+  "enabled": true,
+  "status": "captured",
+  "file": "context/mmwave.jsonl",
+  "packet_count": 1249,
+  "payload_bytes": 319744,
+  "file_bytes": 1299456,
+  "malformed_packets": 0,
+  "dropped_packets": 0,
+  "state_file": "context/mmwave_state.jsonl",
+  "state_event_count": 75,
+  "state_file_bytes": 14025
+}
+```
+
+`packet_count` / `payload_bytes` / `file_bytes` / `state_file_bytes` **只在会话收尾时写入**，
+未收尾的会话没有这几个键。
+
+**`status` 四个取值——不要凭字面猜，语义如下：**
+
+| 值 | 含义 | 怎么产生的 |
+|----|------|-----------|
+| `disabled` | 本次会话没有启用毫米波模态 | 当前 App 恒为启用，只有旧会话和单测会出现 |
+| `waiting` | **会话没有正常收尾**，不是"还在等数据" | 会话开始时的初值；只有 `stop()` 会把它改掉，进程被杀就永远停在这里 |
+| `captured` | 收尾时 `packet_count > 0` | 正常情况 |
+| `no_data` | 收尾时 `packet_count == 0`：订阅了 A001，但一个 `0x08` 都没收到 | 见下面的判读规则 |
+
+> **`waiting` 是一个坏消息，不是一个中间态。** 已上传的会话里出现它，
+> 说明那次采集崩了或被系统杀了，同时 `end_reason` 会是 `crash_recovered`。
+> 实测两例（2026-08-11、08-12）都是零长会话。
+
+**`no_data` 的判读规则**（回答"是设备没发，还是我们没收到"）：
+
+`no_data` 的字面含义只有一个——**客户端订阅了 A001 并且一个 `0x08` 都没收到**。
+它本身不区分归属，要结合另外两处才能定位：
+
+1. 先看 `mmwave_state.jsonl`。**有 `0x13` 事件说明 A001 订阅是通的**，
+   那就是设备侧没在发毫米波，不是链路问题。
+2. 再看 `audio.segments` 是否为空。客户端**在收到第一帧音频之后才订阅 A001**，
+   所以一次完全没有音频的会话必然是 `no_data`，那不是毫米波的问题。
+
+实测的两例都属于第 1 类，而且指向同一个原因：
+
+| 会话 | 固件 | 时长 | `0x13` | 结果 |
+|---|---|---|---|---|
+| `…06_EE_1786431562666` | 3.14.5.1813 | 37 s | 1 条 `enabled:false` | 会话太短，雷达那一轮没轮到开 |
+| `…05_7A_1786536181824` | **3.14.5.1736** | **51 min** | 1 条 `enabled:false` | **整整 51 分钟雷达一次都没开过** |
+
+> **旧固件的设备会静默地完全没有毫米波。** `05_7A` 跑的是 `3.14.5.1736`，
+> 比统一基线 `3.14.5.1813` 旧。所以拿到 `no_data` 的会话时**先看 `device_firmware`**。
+
+#### 1.4.2 `context/mmwave.jsonl`（每行一个 JSON）
+
+```json
+{"type":"mmwave_raw","format_version":1,"packet_index":0,
+ "received_at_ms":1786374012345,"session_offset_ms":11607,"device_timestamp_ms":9876543,
+ "sensor_type":1,"payload_bytes":256,"payload_base64":"…","raw_packet_base64":"…",
+ "protocol_version":1,"checksum":4660,"checksum_class":"legacy_fixed_1234"}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `packet_index` | 会话内从 0 递增；**有空洞就是写失败，不是丢包** |
+| `received_at_ms` | 手机收到该通知的墙钟 epoch 毫秒 |
+| `session_offset_ms` | `received_at_ms − manifest.started_at_ms`，下限 0。**和 `audio.segments[].start_ms` 是同一个基准**，跨模态对齐用这个 |
+| `device_timestamp_ms` | 设备自己的时间戳，**与手机时钟无关，未标定，不要用它做跨模态对齐** |
+| `sensor_type` | 协议里的传感器类型；实测恒为 `1` |
+| `payload_bytes` / `payload_base64` | 不透明载荷，实测恒为 **256 字节** |
+| `raw_packet_base64` | 完整 BLE 包，**272 字节** = 7 信封 + 1 `sensor_type` + 8 时间戳 + 256 载荷 |
+| `protocol_version` / `checksum` / `checksum_class` | 信封字段；`checksum_class` 实测恒为 `legacy_fixed_1234`（固件用固定 `0x1234`，不是 CRC） |
+
+**为什么原包和载荷都存**：现在没有解码协议，等拿到之后如果发现载荷的切分方式和现在
+不一样（比如时间戳其实占 4 字节），只有留着原包才能重解。多存 272 字节/包，
+代价见下面的体积。
+
+#### 1.4.3 `context/mmwave_state.jsonl`（每行一个 JSON）
+
+固件自己给雷达**约 30 秒开 / 30 秒关**地占空（省电），实测开关间隔 25–42 秒。
+**开关瞬间会短暂干扰几帧音频**，所以开关时间线必须记，否则事后做切片对齐时那几帧缺失
+会被误判成掉线。
+
+```json
+{"type":"mmwave_state","format_version":1,"event_index":0,
+ "received_at_ms":1786374017997,"session_offset_ms":5330,
+ "enabled":false,"state":"inactive","requested_by_app":false,"source":"device_0x13"}
+```
+
+**只在状态变化时写一条。** 时间基准与 `mmwave.jsonl` 相同。
+
+| `state` | 含义 |
+|---------|------|
+| `active` | `enabled=true`，雷达在采 |
+| `sleeping` | `enabled=false` **且 App 请求过开启** → 固件的省电休眠窗口，不是关闭 |
+| `inactive` | `enabled=false` 且 App 没请求过 → 设备侧本来就是关的 |
+
+`source` 目前只有 `device_0x13`（来自 A001 `0x13` 通知）。
+`requested_by_app` 目前恒为 `false`：**App 不主动开关雷达**，只被动记录。
+
+**与 `link.events` 的关系**：每次雷达**关闭**时，`manifest.link.events` 里会额外多一条
+`{"reason": "mmwave_toggle", "start_at_ms": t, "end_at_ms": t, "down_ms": 0, "intentional": true}`。
+**这条不是断连**，是我方主动扰动的标记，`start == end`。
+它已经被排除在 `link.disconnect_count` / `total_down_ms` 之外（见 §1.1 的 2026-08-14 更正），
+下游按 `intentional` 过滤即可，不必匹配 `reason` 字符串。
+只在关闭时记，开启时不记——两条会把 `events` 撑到一天几百条，而关闭点足以定位那一对边界。
+
+#### 1.4.4 体积与上传
+
+实测每行约 **1033 字节**（原包 + 载荷各一份 base64）。一小时 1249 包 ≈ **1.24 MiB**，
+16 小时佩戴约 **20 MiB**，相对音频（60 s/段 × 约 235 KiB）可以忽略。
+
+两个文件跟 `context/context.jsonl` 一起走同一次上传（`SessionSyncInventory`），
+`media_type` 都是 `application/x-ndjson`，参与 `init` 清单和 commit 校验。
+**参与者在上传页取消勾选 context 时这两个文件也不会上传。**
+
+
 
 目标：**先登记、再逐文件上传、最后 commit 校验**，避免「发到一半当成功」。
 
