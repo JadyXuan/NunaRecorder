@@ -751,10 +751,22 @@ class MainActivity : ComponentActivity() {
         when (val r = EnrollmentCodec.parse(raw)) {
             is EnrollmentParseResult.Error -> appendLog("入组失败：${r.reason}")
             is EnrollmentParseResult.Ok -> {
+                // 换一张入组码 = 身份或凭据变了。内置浏览器的免密登录靠会话 Cookie，
+                // 不清的话它会**继续用旧密码的会话**，而重发二维码正是我们更新密码的手段
+                // （用户 2026-08-16：「更新密码不仅是给新的密码，而是重新二维码入组，
+                // 确保内置浏览器也能用最新密码」）。所以这里无条件清。
+                com.example.nunarecorder.ui.screen.clearBrowserSession()
                 enrollmentStore.save(r.code)
                 viewModel.setEnrollment(r.code, false)
                 // 令牌本身绝不进日志，只留前 4 位指纹
                 appendLog("已入组：${r.code.participantId} · 令牌 ${r.code.tokenFingerprint}…")
+                appendLog(
+                    if (r.code.login?.password?.isNotBlank() == true) {
+                        "入组码带了标注站密码，内置浏览器会自动登录"
+                    } else {
+                        "入组码没带标注站密码，第一次登录标注站要手动输一次"
+                    }
+                )
                 lifecycleScope.launch {
                     // 二维码装不下标注网址和网关凭据，入组后用令牌向服务端补齐
                     val client = EnrollmentConfigClient(httpClient)
