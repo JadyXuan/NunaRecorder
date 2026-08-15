@@ -45,6 +45,7 @@ import com.example.nunarecorder.enroll.EnrollmentCode
 fun LoginGuideScreen(
     enrollment: EnrollmentCode?,
     onCopy: (label: String, value: String) -> Unit,
+    onBack: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -54,6 +55,7 @@ fun LoginGuideScreen(
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        androidx.compose.material3.TextButton(onClick = onBack) { Text("← 回内置浏览器") }
         Text("怎么登录标注网站", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
         if (enrollment == null) {

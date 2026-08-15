@@ -66,6 +66,24 @@ class CollectionReadinessTest {
     }
 
     @Test
+    fun `没入组要显示，而且要强制展开`() {
+        // 用户 2026-08-15：「建议添加提示不然都不知道没入组」。
+        // 之前完全没有这一条——没入组时自检一句话都不说，采完才发现传不上去。
+        val r = CollectionReadiness.Report(
+            listOf(Item(Level.DEGRADED, "还没有入组", "传不上去", "去扫码", Fix.NONE, prominent = true))
+        )
+        assertFalse("有降级项就不能算全好", r.allGood)
+        assertTrue("入组是传数据的前提，但不该挡住采集", r.canRecord)
+        assertTrue("自己解决不了的项必须默认展开", r.items.any { it.prominent })
+    }
+
+    @Test
+    fun `能自己点设置解决的项不强制展开`() {
+        // 每条都强制展开，卡片就永远是摊开的十几行，等于没有重点
+        assertFalse(Item(Level.DEGRADED, "省电模式", "会被杀", "去关", Fix.BATTERY_SAVER).prominent)
+    }
+
+    @Test
     fun `没有跳转目标的项默认是 NONE`() {
         // Google Play 服务缺失是机型限制，跳到任何设置页都没用，
         // 给个点了没反应的按钮比不给更糟。

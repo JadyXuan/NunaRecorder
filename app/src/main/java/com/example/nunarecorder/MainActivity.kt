@@ -64,6 +64,7 @@ import com.example.nunarecorder.ui.MainViewModel
 import com.example.nunarecorder.ui.LiveRecordingUiStats
 import com.example.nunarecorder.ui.screen.RecordingsScreen
 import com.example.nunarecorder.ui.screen.EnrollScreen
+import com.example.nunarecorder.ui.screen.AnnotationBrowserScreen
 import com.example.nunarecorder.ui.screen.LoginGuideScreen
 import com.example.nunarecorder.ui.screen.VoiceprintScreen
 import com.example.nunarecorder.voiceprint.VoiceprintSession
@@ -184,7 +185,8 @@ class MainActivity : ComponentActivity() {
                 CollectionReadiness.check(
                     this,
                     deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value),
-                    viewModel.uploadIdentityProblem.value
+                    viewModel.uploadIdentityProblem.value,
+                    hasEnrollment = enrollmentStore.current() != null
                 )
         }
     }
@@ -347,6 +349,9 @@ class MainActivity : ComponentActivity() {
                         .firstOrNull()
                 }
                 var segmentPlayback by remember { mutableStateOf<SegmentPlaybackState?>(null) }
+                // 内置浏览器 vs 账号密码说明。自动填充失败时参与者仍然要能看到凭据自己输，
+                // 否则一个填不上的浏览器就是死路。
+                var showLoginCredentials by remember { mutableStateOf(false) }
 
                 // 固件不匹配：必须显式确认才继续。放在最外层，任何标签页都盖得住。
                 viewModel.firmwareWarning.value?.let { warning ->
@@ -473,17 +478,35 @@ class MainActivity : ComponentActivity() {
                                     enrollmentStore.clear()
                                     viewModel.setEnrollment(null, false)
                                     viewModel.settingsCheckResult.value = null
-                                    appendLog("已清除入组配置（本地录音不受影响）")
+                                    // 免密登录靠的是会话 Cookie，设备要回收再发给下一个人，
+                                    // 不清的话他打开标注站直接就是上一个人的身份
+                                    com.example.nunarecorder.ui.screen.clearBrowserSession()
+                                    appendLog("已清除入组配置和内置浏览器登录状态（本地录音不受影响）")
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
-                            3 -> LoginGuideScreen(
+                            3 -> if (showLoginCredentials) LoginGuideScreen(
                                 enrollment = enrollment,
                                 onCopy = { label, value ->
                                     val cm = getSystemService(Context.CLIPBOARD_SERVICE)
                                         as android.content.ClipboardManager
                                     cm.setPrimaryClip(android.content.ClipData.newPlainText(label, value))
                                     appendLog("已复制$label")
+                                },
+                                onBack = { showLoginCredentials = false },
+                                modifier = Modifier.fillMaxSize()
+                            ) else AnnotationBrowserScreen(
+                                enrollment = enrollment,
+                                onShowCredentials = { showLoginCredentials = true },
+                                onOpenExternally = { url ->
+                                    runCatching {
+                                        startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse(url)
+                                            )
+                                        )
+                                    }.onFailure { appendLog("打不开系统浏览器：${it.message}") }
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )

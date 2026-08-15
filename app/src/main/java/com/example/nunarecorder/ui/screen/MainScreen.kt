@@ -584,7 +584,11 @@ private fun ReadinessCard(
     if (report == null || report.allGood) return
     val blocking = report.blocking
     val degraded = report.degraded
-    var expanded by remember(report) { mutableStateOf(blocking.isNotEmpty()) }
+    // 参与者自己解决不了的那几条（入组卡发错、固件不对）默认展开：
+    // 折叠起来的一行提示等于没提示
+    var expanded by remember(report) {
+        mutableStateOf(blocking.isNotEmpty() || report.items.any { it.prominent })
+    }
     val accent = if (blocking.isNotEmpty()) NunaError else NunaWarning
 
     Card(

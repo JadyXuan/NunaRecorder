@@ -29,7 +29,7 @@ fun BottomNavBar(
         TabItem(Icons.Outlined.LocationOn, "设备"),
         TabItem(Icons.Outlined.List, "录音"),
         TabItem(Icons.Outlined.AccountCircle, "入组"),
-        TabItem(Icons.Outlined.Info, "登录"),
+        TabItem(Icons.Outlined.Info, "标注"),
         TabItem(Icons.Outlined.Face, "声纹"),
         TabItem(Icons.Outlined.Settings, "设置")
     )

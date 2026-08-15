@@ -62,7 +62,15 @@ object CollectionReadiness {
         val consequence: String,
         /** 非空时界面给一个跳转按钮 */
         val actionHint: String? = null,
-        val fix: Fix = Fix.NONE
+        val fix: Fix = Fix.NONE,
+        /**
+         * 自检卡片默认折叠，这一位为真时强制展开。
+         *
+         * 留给**参与者自己解决不了、必须找研究员**的那几条：入组卡发错、设备固件不对。
+         * 它们不是点一下系统设置就能好的，折叠起来等于没说——
+         * 用户 2026-08-15 原话：「建议添加提示不然都不知道没入组」。
+         */
+        val prominent: Boolean = false
     )
 
     data class Report(val items: List<Item>) {
@@ -91,13 +99,28 @@ object CollectionReadiness {
         context: Context,
         selectedDeviceFirmware: String? = null,
         /** 上传身份自检的失败原因；null = 通过或还没查 */
-        uploadIdentityProblem: String? = null
+        uploadIdentityProblem: String? = null,
+        /** 有没有入组配置。没有的话采得到但传不上去，而界面上原来看不出来 */
+        hasEnrollment: Boolean = true
     ): Report {
         val items = mutableListOf<Item>()
 
         // 采得到但传不上去，是最贵的一种失败：参与者戴了一整天，回来才发现。
         // 2026-08-15 实测就是这样——入组卡的参与者编号和令牌指向的人不一致，
         // 服务端 init 一路 403，而界面只显示"部分同步 (7/7)"。
+        if (!hasEnrollment) {
+            items.add(
+                Item(
+                    Level.DEGRADED, "还没有入组",
+                    "没有入组配置，采到的录音传不上服务器，也拿不到标注网站的账号。" +
+                        "录音会先存在手机里，入组之后可以补传。",
+                    "去「入组」页扫研究员给的二维码",
+                    Fix.NONE,
+                    prominent = true
+                )
+            )
+        }
+
         uploadIdentityProblem?.let {
             items.add(
                 Item(
@@ -107,7 +130,8 @@ object CollectionReadiness {
                     // （同一条理由在 T-044 的固件闸门上用过，不要在这里反过来。）
                     Level.DEGRADED, "上传身份不对，现在传不上去",
                     "$it 录音会照常保存在手机里，等入组卡换对之后可以补传，不会丢。",
-                    "去「入组」页重新扫研究员给的二维码"
+                    "去「入组」页重新扫研究员给的二维码",
+                    prominent = true
                 )
             )
         }
@@ -121,7 +145,8 @@ object CollectionReadiness {
                     // 为了保住附加模态而让参与者一秒都采不到，是把优先级反过来了。
                     Level.DEGRADED, "这台设备的固件不是统一版本",
                     warning,
-                    "联系研究员升级固件，或换一台台账内的设备"
+                    "联系研究员升级固件，或换一台台账内的设备",
+                    prominent = true
                 )
             )
         }

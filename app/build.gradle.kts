@@ -33,8 +33,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // 每次对外发包必须 +1，否则 Android 不认为是升级
-        versionCode = 32
-        versionName = "1.31"
+        versionCode = 33
+        versionName = "1.32"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
