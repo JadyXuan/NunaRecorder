@@ -53,6 +53,9 @@ class MainViewModel : ViewModel() {
      */
     val firmwareWarning = mutableStateOf<String?>(null)
 
+    /** 上传身份自检的失败原因；null = 通过或还没查过 */
+    val uploadIdentityProblem = mutableStateOf<String?>(null)
+
     val readinessReport =
         mutableStateOf<com.example.nunarecorder.util.CollectionReadiness.Report?>(null)
 

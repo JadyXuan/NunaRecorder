@@ -87,8 +87,30 @@ object CollectionReadiness {
      *   null = 这台设备还没采过，此时任何设计都判断不了（开采前读不到真固件，
      *   见 [com.example.nunarecorder.data.DeviceFirmwarePolicy]）。
      */
-    fun check(context: Context, selectedDeviceFirmware: String? = null): Report {
+    fun check(
+        context: Context,
+        selectedDeviceFirmware: String? = null,
+        /** 上传身份自检的失败原因；null = 通过或还没查 */
+        uploadIdentityProblem: String? = null
+    ): Report {
         val items = mutableListOf<Item>()
+
+        // 采得到但传不上去，是最贵的一种失败：参与者戴了一整天，回来才发现。
+        // 2026-08-15 实测就是这样——入组卡的参与者编号和令牌指向的人不一致，
+        // 服务端 init 一路 403，而界面只显示"部分同步 (7/7)"。
+        uploadIdentityProblem?.let {
+            items.add(
+                Item(
+                    // **降级不阻断。** 传不上去不等于采不了——录音留在手机上，
+                    // 换张正确的入组卡就能补传。而阻断意味着这段时间一秒都采不到，
+                    // 那是拿一次确定的全损去换一次可以事后补救的麻烦。
+                    // （同一条理由在 T-044 的固件闸门上用过，不要在这里反过来。）
+                    Level.DEGRADED, "上传身份不对，现在传不上去",
+                    "$it 录音会照常保存在手机里，等入组卡换对之后可以补传，不会丢。",
+                    "去「入组」页重新扫研究员给的二维码"
+                )
+            )
+        }
 
         // 设备固件。放在最前面是因为它决定"这台设备能不能采到毫米波"，
         // 而这件事在数据里完全看不出来——实测一台旧固件设备连续 51 分钟零毫米波。

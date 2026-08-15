@@ -178,9 +178,44 @@ class MainActivity : ComponentActivity() {
         // 开机有 BootCompletedReceiver 兜，但那两条都不成立时，
         // 只要参与者开过一次 App 就恢复了。
         runCatching { MorningReminderReceiver.schedule(this) }
+        checkUploadIdentity()
         runCatching {
             viewModel.readinessReport.value =
-                CollectionReadiness.check(this, deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value))
+                CollectionReadiness.check(
+                    this,
+                    deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value),
+                    viewModel.uploadIdentityProblem.value
+                )
+        }
+    }
+
+    /**
+     * 回前台时顺手确认一次"这台手机现在传得上去吗"。
+     *
+     * 2026-08-15 实测：入组卡的参与者编号和令牌指向的人不一致，服务端 `init` 全部
+     * 403，而界面只显示"部分同步 (7/7)"，用户以为是新旧数据不兼容。
+     * **握手自检本来就能查出这一条**（`ServerHandshakeCheck` 里的 403 分支），
+     * 但它只在手动"保存设置"时才跑——也就是说这个错误要等到采完一天上传时才暴露。
+     *
+     * 一次 HTTP 探测，故意发空 body（鉴权在 handler 之前执行，400 = 令牌通过），
+     * 不会在服务端留下任何 upload 记录。
+     */
+    private fun checkUploadIdentity() {
+        val code = enrollmentStore.current() ?: run {
+            viewModel.uploadIdentityProblem.value = null
+            return
+        }
+        lifecycleScope.launch {
+            val problem = withContext(Dispatchers.IO) {
+                runCatching {
+                    ServerHandshakeCheck.run(httpClient, code).lines
+                        .firstOrNull { it.level == ServerHandshakeCheck.Level.FAIL }?.text
+                }.getOrNull()
+            }
+            // 探测失败（比如没网）不当成身份问题：那会在离线时天天误报，
+            // 而一个总在误报的告警等于没有告警。
+            viewModel.uploadIdentityProblem.value =
+                problem?.takeIf { it.contains("403") || it.contains("401") || it.contains("503") }
         }
     }
 

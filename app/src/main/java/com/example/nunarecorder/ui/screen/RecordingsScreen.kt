@@ -30,6 +30,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -166,10 +167,20 @@ fun RecordingsScreen(
     }
     LaunchedEffect(syncState) {
         when (syncState?.phase) {
-            SessionSyncCoordinator.Phase.DONE,
             SessionSyncCoordinator.Phase.ERROR,
-            SessionSyncCoordinator.Phase.CANCELLED,
             SessionSyncCoordinator.Phase.TOKEN_REJECTED -> {
+                // 先把原因弹出来再清状态。原来失败和成功走同一条清理分支，
+                // 于是 Phase.ERROR 刚置上就被 clearDoneState() 抹掉，
+                // **失败原因在界面上一闪都没有**——"一键上传没反应"就是这么来的。
+                val why = syncState?.message
+                refreshList()
+                SessionSyncCoordinator.clearDoneState()
+                if (!why.isNullOrBlank()) {
+                    snackbarHostState.showSnackbar(why, duration = SnackbarDuration.Long)
+                }
+            }
+            SessionSyncCoordinator.Phase.DONE,
+            SessionSyncCoordinator.Phase.CANCELLED -> {
                 refreshList()
                 SessionSyncCoordinator.clearDoneState()
             }

@@ -223,7 +223,12 @@ fun RecordingItem(
                 }
             }
 
-            syncStatus?.takeIf { it.status in setOf("partial", "failed") && it.summary.failed > 0 }?.let { sync ->
+            // 判据不能是 summary.failed > 0：**上传在 init 阶段失败时一个文件都不会被标成
+            // failed**（它们停在 pending 或上一次的 synced），于是界面只显示
+            // "部分同步 (7/7)"、"部分同步 (0/11)"，**一个字的原因都没有**——
+            // 而 sync_status.json 里明明写着"令牌与参与者编号不匹配（403）"。
+            // 用户 2026-08-15 实测就卡在这里：以为是新旧数据不兼容，实际是入组卡发错了。
+            syncStatus?.takeIf { it.status in setOf("partial", "failed") }?.let { sync ->
                 Spacer(Modifier.height(6.dp))
                 Text(
                     syncHint(sync),
@@ -309,6 +314,12 @@ private fun SyncBadge(status: String, summary: SessionSyncStatus.Summary) {
 
 private fun syncHint(sync: SessionSyncStatus): String {
     val failed = sync.files.filter { it.status == "failed" }
+    // 整次上传失败（init / commit 没过）时没有任何单个文件是 failed，
+    // 此时唯一的信息在 last_error 里。它必须显示出来，否则参与者只看到
+    // 一个不带原因的"部分同步"，而那条信息恰恰是他能拿去找研究员的唯一线索。
+    if (failed.isEmpty()) {
+        return sync.lastError?.takeIf { it.isNotBlank() } ?: "上传未完成，原因未记录"
+    }
     val names = failed.take(3).joinToString { it.path.substringAfterLast('/') }
     val more = if (failed.size > 3) " 等" else ""
     return "未同步成功: $names$more (${failed.size} 个文件)"
