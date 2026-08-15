@@ -64,6 +64,8 @@ class RecordingService : Service() {
         private const val POWER_SAMPLE_PERIOD_MS = 3 * 60_000L
 
         const val ACTION_START = "com.example.nunarecorder.action.START_RECORDING"
+        /** 看门狗自我拉起。**与 ACTION_START 分开**，因为它必须先复核采集意图 */
+        const val ACTION_WATCHDOG = "com.example.nunarecorder.action.WATCHDOG_RESTART"
         const val ACTION_STOP = "com.example.nunarecorder.action.STOP_RECORDING"
         const val EXTRA_DEVICE_NAME = "extra_device_name"
         const val EXTRA_DEVICE_ADDRESS = "extra_device_address"
@@ -135,9 +137,27 @@ class RecordingService : Service() {
                 RecordingIntent.save(this, name, address)
                 startRecording(name, address)
             }
+            ACTION_WATCHDOG -> {
+                // 看门狗到点。**只有采集意图还在时才恢复**——
+                // 用户按过停止的话意图已经被清掉，这里必须什么都不做。
+                val pending = RecordingIntent.load(this)
+                if (pending == null) {
+                    DiagnosticsLog.log(TAG, "看门狗到点，但用户已停止采集，不拉起")
+                    if (!active) stopSelf()
+                    return START_NOT_STICKY
+                }
+                if (active) return START_STICKY
+                DiagnosticsLog.log(TAG, "看门狗发现采集已中断，恢复 device=${pending.deviceName}")
+                startRecording(pending.deviceName, pending.deviceAddress)
+            }
             ACTION_STOP -> {
                 // 用户主动停止：清掉意图，否则系统重启服务时会自己又开始录
                 RecordingIntent.clear(this)
+                // 还要把已经排出去的闹钟撤掉。看门狗排的是 10 分钟之后的一次性唤醒，
+                // 停止时不撤，它就会在十分钟内把采集重新拉起来——
+                // 用户 2026-08-16 实测："怎么还会自动开启采集，毕竟有的时候用户主动关
+                // 说明是有隐私消息"。**清意图是第二道闸，撤闹钟是第一道，两道都要有。**
+                cancelSelfRestartAlarms()
                 stopRecording()
                 stopSelf()
             }
@@ -219,9 +239,11 @@ class RecordingService : Service() {
         if (now - lastWatchdogArmMs < WATCHDOG_ALARM_PERIOD_MS) return
         lastWatchdogArmMs = now
         val restart = Intent(this, RecordingService::class.java).apply {
-            action = ACTION_START
-            putExtra(EXTRA_DEVICE_NAME, recordingDeviceName)
-            putExtra(EXTRA_DEVICE_ADDRESS, recordingDeviceAddress)
+            // **不能直接发 ACTION_START。** 那条闹钟是 10 分钟之后才响的，
+            // 这中间用户完全可能按了停止——而按停止是一个隐私决定
+            // （"这段我不想被录"），自己又拉起来等于推翻它。
+            // 改成专用 action，响的时候再复核一次采集意图还在不在。
+            action = ACTION_WATCHDOG
         }
         val pi = PendingIntent.getForegroundService(
             this, 2, restart,
@@ -235,6 +257,30 @@ class RecordingService : Service() {
                     pi
                 )
         }
+    }
+
+    /**
+     * 撤掉所有会把采集重新拉起来的闹钟。
+     *
+     * 两个来源：[onTaskRemoved] 排的一次性重启（请求码 1）和 [armWatchdogAlarm]
+     * 排的看门狗（请求码 2）。**只在用户主动停止时调用**——
+     * 服务被系统回收时不能撤，那正是 T-025 要靠它恢复的场景。
+     */
+    private fun cancelSelfRestartAlarms() {
+        val am = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+        listOf(
+            1 to Intent(this, RecordingService::class.java).apply { action = ACTION_START },
+            2 to Intent(this, RecordingService::class.java).apply { action = ACTION_WATCHDOG }
+        ).forEach { (code, intent) ->
+            runCatching {
+                PendingIntent.getForegroundService(
+                    this, code, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                ).also { am.cancel(it); it.cancel() }
+            }
+        }
+        lastWatchdogArmMs = 0L
+        DiagnosticsLog.log(TAG, "已撤销自我拉起闹钟（用户主动停止）")
     }
 
     override fun onDestroy() {
