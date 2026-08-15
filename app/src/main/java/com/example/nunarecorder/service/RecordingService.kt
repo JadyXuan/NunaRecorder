@@ -24,6 +24,7 @@ import com.example.nunarecorder.recording.RecordingOptions
 import com.example.nunarecorder.recording.CollectionClock
 import com.example.nunarecorder.recording.RecordingStateMachine
 import com.example.nunarecorder.recording.SessionRecorder
+import com.example.nunarecorder.reminder.MorningReminderReceiver
 import com.example.nunarecorder.session.LinkGapEntry
 import com.example.nunarecorder.session.SessionPaths
 import com.example.nunarecorder.util.DiagnosticsLog
@@ -265,6 +266,9 @@ class RecordingService : Service() {
         val options = RecordingOptions.from(UserSettingsStorage(this).load())
         recordingDeviceName = deviceName
         recordingDeviceAddress = deviceAddress
+        // 已经开始录了就立刻停掉当天的早晨提醒。
+        // 在你照做之后还响的通知，是最快让人去关通知的东西，而关掉就是永久失效。
+        runCatching { MorningReminderReceiver.onRecordingStarted(this) }
         recordingOptions = options
         currentHourStart = CollectionClock.hourStart(System.currentTimeMillis())
         val sessionDir = SessionPaths.newSessionDir(deviceName, deviceAddress)

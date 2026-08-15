@@ -21,6 +21,8 @@ import androidx.core.app.NotificationCompat
 import com.example.nunarecorder.MainActivity
 import com.example.nunarecorder.R
 import com.example.nunarecorder.context.ActivityRecognitionCollector
+import com.example.nunarecorder.reminder.MorningReminder
+import com.example.nunarecorder.reminder.MorningReminderStore
 import com.example.nunarecorder.util.LocationUpdatesHelper
 import java.io.File
 import java.io.BufferedOutputStream
@@ -177,12 +179,34 @@ class ContextDataService : Service() {
             writeRecord(
                 """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"]}"""
             )
+            writeMorningReminderState()
             startImu()
             startGps()
             startActivity()
         } catch (e: Exception) {
             Log.e(TAG, "startCapture failed", e)
             stopSelf()
+        }
+    }
+
+    /**
+     * 把当天早晨提醒的状态写进 `context.jsonl`。
+     *
+     * **通知被关是永久失效，而且我们看不见**——参与者仍然在采集，只是每天照样
+     * 八点半才开始，而从数据上分不出「提醒没用」和「提醒被关了」。
+     * 不写的话，等发现那 285 分钟没降下来，根本不知道该改提醒设计还是该改别的。
+     * 做法照 `gps_status`：每个会话都带一行，轮转出来的也带。
+     */
+    private fun writeMorningReminderState() {
+        runCatching {
+            val store = MorningReminderStore(this)
+            writeRecord(
+                MorningReminder.toJsonLine(
+                    store.load(),
+                    System.currentTimeMillis(),
+                    store.notificationsEnabled()
+                )
+            )
         }
     }
 
@@ -288,6 +312,7 @@ class ContextDataService : Service() {
         // 2026-08-10 实测 15:00 和 16:00 两个会话就缺这一行，而它是唯一能分辨
         // "这段没有 GPS" 和 "这段 GPS 那一路是断的" 的依据。
         lastGpsRegistration?.let { writeRecord(it.toJsonLine(System.currentTimeMillis())) }
+        writeMorningReminderState()
         writeRecord(
             """{"type":"meta","started_at_ms":${System.currentTimeMillis()},"context_file":"${sidecar.name}","modalities":["imu","gps","activity"],"reason":"hourly_rollover"}"""
         )

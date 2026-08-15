@@ -46,6 +46,7 @@ import com.example.nunarecorder.data.RecordingEntry
 import com.example.nunarecorder.data.LogLevel
 import com.example.nunarecorder.migration.MigrationCoordinator
 import com.example.nunarecorder.recording.RecordingController
+import com.example.nunarecorder.reminder.MorningReminderReceiver
 import com.example.nunarecorder.sync.ServerHandshakeCheck
 import com.example.nunarecorder.sync.SessionSyncCoordinator
 import com.example.nunarecorder.session.SessionPaths
@@ -172,6 +173,11 @@ class MainActivity : ComponentActivity() {
      */
     override fun onResume() {
         super.onResume()
+        // 早晨提醒的闹钟在这里续上。选 onResume 是因为它每次回前台都跑一次，
+        // 而闹钟被系统清掉（强杀、清后台、换机）之后没有任何其他地方会重排——
+        // 开机有 BootCompletedReceiver 兜，但那两条都不成立时，
+        // 只要参与者开过一次 App 就恢复了。
+        runCatching { MorningReminderReceiver.schedule(this) }
         runCatching {
             viewModel.readinessReport.value =
                 CollectionReadiness.check(this, deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value))

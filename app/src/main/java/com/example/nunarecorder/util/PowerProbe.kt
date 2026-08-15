@@ -2,6 +2,7 @@ package com.example.nunarecorder.util
 
 import android.content.Context
 import android.os.BatteryManager
+import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
 
@@ -26,6 +27,31 @@ class PowerProbe(private val context: Context) {
 
     /** 本进程累计占用的 CPU 毫秒。它和墙钟的比值就是平均 CPU 占用率。 */
     private fun processCpuMs(): Long = Process.getElapsedCpuTime()
+
+    /**
+     * 是否在充电。**没有它就分不出"掉电慢"和"边充边录"**——
+     * 08-10 有 26 个采样窗口电量在上升，是回头看电量增量才发现的。
+     */
+    private fun isCharging(): Boolean =
+        runCatching {
+            (context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager).isCharging
+        }.getOrDefault(false)
+
+    /**
+     * 屏幕是否亮着。
+     *
+     * 实测 08-09 白天 2.8%/小时、晚上 6.8%/小时，**同一个 App、同样的采集负载**。
+     * 差额几乎肯定是手机自用，但那是**推断**——因为当时没记屏幕状态。
+     * 而这个数会被用来回答"参与者的手机撑不撑得住一天""7 天要不要发充电宝"，
+     * **用推断值去定预算是不行的**。
+     *
+     * 采样是瞬时的，但周期均匀（3 分钟），所以一段时间里"亮"的样本占比可以当
+     * 亮屏时长占比用；一小时约 20 个样本，分辨率足够分开 2.8 和 6.8。
+     */
+    private fun screenOn(): Boolean =
+        runCatching {
+            (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        }.getOrDefault(false)
 
     private fun batteryPercent(): Int =
         runCatching {
@@ -67,13 +93,16 @@ class PowerProbe(private val context: Context) {
 
         DiagnosticsLog.log(
             "Power",
-            "窗口 %.1f 分钟 · CPU %.1f%% · 手机电量 %d%%（%+d，约 %.1f%%/小时）· 收包 %,d · 音频 %.1f MB"
+            ("窗口 %.1f 分钟 · CPU %.1f%% · 手机电量 %d%%（%+d，约 %.1f%%/小时）" +
+                " · 充电 %s · 屏幕 %s · 收包 %,d · 音频 %.1f MB")
                 .format(
                     wallDelta / 60000.0,
                     cpuPercent,
                     nowBattery,
                     batteryDelta,
                     perHour,
+                    if (isCharging()) "是" else "否",
+                    if (screenOn()) "亮" else "灭",
                     packetDelta,
                     sessionBytes / 1048576.0
                 )

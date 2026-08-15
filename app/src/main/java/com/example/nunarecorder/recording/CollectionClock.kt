@@ -30,6 +30,22 @@ object CollectionClock {
     }
 
     /**
+     * 采集日的**起点**（本地 04:00，epoch 毫秒）。
+     *
+     * 「04:00 → 当天首次录制」是 T-047 的验收指标，端上和服务端必须用同一个边界，
+     * 否则同一段数据两边算出来的"迟了多久"不一样。
+     */
+    fun dayStart(epochMs: Long): Long {
+        val cal = Calendar.getInstance(zone).apply {
+            timeInMillis = epochMs
+            if (get(Calendar.HOUR_OF_DAY) < DAY_CUT_HOUR) add(Calendar.DAY_OF_MONTH, -1)
+            set(Calendar.HOUR_OF_DAY, DAY_CUT_HOUR)
+            set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        return cal.timeInMillis
+    }
+
+    /**
      * 当前所属小时格的**起点**（本地整点，epoch 毫秒）。
      *
      * 小时格对齐本地整点而不是"开始录制后每满一小时"：两台手机在同一时刻开始

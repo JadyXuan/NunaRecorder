@@ -28,6 +28,8 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 开机后把早晨提醒的闹钟排回来。不排的话重启一次这条就永久静默，而且没人看得出来 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -89,6 +91,20 @@
             android:exported="false"
             android:foregroundServiceType="dataSync">
         </service>
+        <!-- 早晨提醒：闹钟轮询 + 通知被划掉的回调。
+             不能用 ACTION_USER_PRESENT 静态注册（Android 8 起的隐式广播限制），
+             所以用闹钟把进程唤醒、再看当时屏幕和锁屏状态。 -->
+        <receiver
+            android:name=".reminder.MorningReminderReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".reminder.BootCompletedReceiver"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
         <!-- 上传期间把进程钉在前台：一天 800+ 个小文件要传很久，
              没有前台组件的进程在锁屏/切走之后会被限网甚至回收 -->
         <service
