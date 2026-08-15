@@ -76,7 +76,15 @@ class EnrollScanActivity : ComponentActivity() {
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
-            val scanner = BarcodeScanning.getClient()
+            // 相机失败有兜底，扫码器构造原来没有。ML Kit 的模型虽然打包进了 APK
+            // （不依赖 Google 服务），但仍可能在某些精简 ROM 上初始化失败——
+            // 而入组是参与者的第一步，崩在这里等于整个流程从第一步就断了。
+            // 粘贴文本码那条退路本来就在，退回去就行。
+            val scanner = runCatching { BarcodeScanning.getClient() }.getOrElse {
+                Toast.makeText(this, "扫码组件不可用，请改用粘贴文本码", Toast.LENGTH_LONG).show()
+                finish()
+                return@addListener
+            }
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(1280, 720))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

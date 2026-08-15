@@ -77,10 +77,34 @@ fun AnnotationBrowserScreen(
     val autoSubmitted = remember { mutableSetOf<String>() }
     var loading by remember { mutableStateOf(true) }
     var currentUrl by remember { mutableStateOf(startUrl) }
-    var webView by remember { mutableStateOf<WebView?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // WebView 是系统组件，正常一定在；但它可能正在被商店更新，或被精简 ROM 拿掉，
+    // 那时构造会抛 MissingWebViewPackageException。**在进入 AndroidView 之前就构造**，
+    // 否则异常发生在组合期，直接闪退。
+    val webView = remember { runCatching { WebView(context) }.getOrNull() }
 
-    // 系统返回键先在网页里后退，退到头了再交给外面
-    BackHandler(enabled = webView?.canGoBack() == true) { webView?.goBack() }
+    if (webView == null) {
+        Column(modifier.fillMaxSize().padding(24.dp)) {
+            Text("这台手机的内置浏览器组件不可用", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "可以改用系统浏览器打开标注网站，账号密码在下面这一页里。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Row {
+                TextButton(onClick = { onOpenExternally(startUrl) }) { Text("用系统浏览器打开") }
+                TextButton(onClick = onShowCredentials) { Text("查看账号密码") }
+            }
+        }
+        return
+    }
+
+    // 系统返回键先在网页里后退，退到头了再交给外面。
+    // **canGoBack() 不是可观察状态**，直接写进 enabled 只会在首次组合时求值一次，
+    // 之后翻多少页它都还是 false——返回键会直接退出这一页而不是网页内后退。
+    // 所以用一个 state 在导航变化时刷新。
+    var canGoBack by remember { mutableStateOf(false) }
+    BackHandler(enabled = canGoBack) { webView.goBack() }
 
     Column(modifier.fillMaxSize()) {
         Row(
@@ -104,9 +128,12 @@ fun AnnotationBrowserScreen(
 
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    webView = this
+            // 离开这个标签页时销毁。不销毁的话每切一次就漏一个 WebView 的原生内存，
+            // 而且页面里正在播的录音会在后台继续响。
+            // 代价是切回来要重新加载页面——登录状态在 Cookie 里，不用重新登录。
+            onRelease = { runCatching { it.destroy() } },
+            factory = {
+                webView.apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     // 标注站是给手机用的，按手机宽度渲染
@@ -121,11 +148,13 @@ fun AnnotationBrowserScreen(
                         ) {
                             loading = true
                             url?.let { currentUrl = it }
+                            canGoBack = view?.canGoBack() == true
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             loading = false
                             url?.let { currentUrl = it }
+                            canGoBack = view?.canGoBack() == true
                             val host = runCatching { Uri.parse(url).host }.getOrNull() ?: return
                             val target = LoginAutofill.targetFor(host, webHost)
                             // 站外什么都不注入。这一句是整个功能的安全边界。
