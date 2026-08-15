@@ -186,7 +186,8 @@ class MainActivity : ComponentActivity() {
                     this,
                     deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value),
                     viewModel.uploadIdentityProblem.value,
-                    hasEnrollment = enrollmentStore.current() != null
+                    hasEnrollment = enrollmentStore.current() != null,
+                    dismissed = dismissedReadinessKeys()
                 )
         }
     }
@@ -202,6 +203,25 @@ class MainActivity : ComponentActivity() {
      * 一次 HTTP 探测，故意发空 body（鉴权在 handler 之前执行，400 = 令牌通过），
      * 不会在服务端留下任何 upload 记录。
      */
+    private val readinessDismissPrefs by lazy {
+        getSharedPreferences("readiness_dismissed", Context.MODE_PRIVATE)
+    }
+
+    private fun dismissedReadinessKeys(): Set<String> =
+        readinessDismissPrefs.getStringSet("keys", emptySet()) ?: emptySet()
+
+    private fun dismissReadinessItem(key: String) {
+        readinessDismissPrefs.edit()
+            .putStringSet("keys", dismissedReadinessKeys() + key).apply()
+        viewModel.readinessReport.value = CollectionReadiness.check(
+            this,
+            deviceStorage.firmwareOf(viewModel.selectedDeviceAddress.value),
+            viewModel.uploadIdentityProblem.value,
+            hasEnrollment = enrollmentStore.current() != null,
+            dismissed = dismissedReadinessKeys()
+        )
+    }
+
     private fun checkUploadIdentity() {
         val code = enrollmentStore.current() ?: run {
             viewModel.uploadIdentityProblem.value = null
@@ -219,6 +239,37 @@ class MainActivity : ComponentActivity() {
             viewModel.uploadIdentityProblem.value =
                 problem?.takeIf { it.contains("403") || it.contains("401") || it.contains("503") }
         }
+    }
+
+    /**
+     * 各家 OEM 的自启动/后台管理页。**这些是私有 Action，没有兼容性承诺**，
+     * 所以逐个试，能解析出来的才用，全都不行就退回应用详情页。
+     */
+    private fun autostartIntent(): android.content.Intent? {
+        val candidates = listOf(
+            // vivo（用户这台是 vivo V2303A）
+            "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager",
+            // 小米
+            "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            // 华为
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            // OPPO / 一加 / realme
+            "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+            // 三星
+            "com.samsung.android.lool" to "com.samsung.android.sm.ui.battery.BatteryActivity"
+        )
+        for ((pkg, cls) in candidates) {
+            val intent = android.content.Intent().setComponent(
+                android.content.ComponentName(pkg, cls)
+            )
+            val resolvable = runCatching {
+                packageManager.resolveActivity(intent, 0) != null
+            }.getOrDefault(false)
+            if (resolvable) return intent
+        }
+        return null
     }
 
     /** 自检项上的"去设置"。跳不过去时退回应用详情页，不要什么都不发生。 */
@@ -243,8 +294,10 @@ class MainActivity : ComponentActivity() {
                 android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
             // 自启动白名单是厂商私有的，没有可用的 Action，只能把人送到应用详情
-            CollectionReadiness.Fix.APP_DETAILS,
-            CollectionReadiness.Fix.AUTOSTART -> appDetails
+            // 自启动白名单是厂商私有的，没有标准 Action。按机型试已知的几个入口，
+            // 都打不开再退回应用详情——用户 2026-08-16 反馈那一步"要自己在权限里翻"。
+            CollectionReadiness.Fix.AUTOSTART -> autostartIntent() ?: appDetails
+            CollectionReadiness.Fix.APP_DETAILS -> appDetails
             CollectionReadiness.Fix.NONE -> return
         }
         val opened = runCatching { startActivity(intent); true }.getOrDefault(false)
@@ -410,6 +463,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 readinessReport = viewModel.readinessReport.value,
                                 onReadinessFix = { openReadinessFix(it) },
+                                onReadinessDismiss = { dismissReadinessItem(it) },
                                 logText = logText,
                                 deviceList = viewModel.deviceList,
                                 pairedDevices = viewModel.pairedDevices,
@@ -485,17 +539,8 @@ class MainActivity : ComponentActivity() {
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
-                            3 -> if (showLoginCredentials) LoginGuideScreen(
-                                enrollment = enrollment,
-                                onCopy = { label, value ->
-                                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
-                                        as android.content.ClipboardManager
-                                    cm.setPrimaryClip(android.content.ClipData.newPlainText(label, value))
-                                    appendLog("已复制$label")
-                                },
-                                onBack = { showLoginCredentials = false },
-                                modifier = Modifier.fillMaxSize()
-                            ) else AnnotationBrowserScreen(
+                            3 -> Box(Modifier.fillMaxSize()) {
+                              AnnotationBrowserScreen(
                                 enrollment = enrollment,
                                 onShowCredentials = { showLoginCredentials = true },
                                 onOpenExternally = { url ->
@@ -509,7 +554,30 @@ class MainActivity : ComponentActivity() {
                                     }.onFailure { appendLog("打不开系统浏览器：${it.message}") }
                                 },
                                 modifier = Modifier.fillMaxSize()
-                            )
+                              )
+                              // 账号密码做成覆盖层而不是切页面：切走会销毁 WebView，
+                              // 回来整页重新加载（用户 2026-08-16 实测"返回页面还刷新了"）。
+                              if (showLoginCredentials) androidx.compose.ui.window.Dialog(
+                                  onDismissRequest = { showLoginCredentials = false },
+                                  properties = androidx.compose.ui.window.DialogProperties(
+                                      usePlatformDefaultWidth = false
+                                  )
+                              ) {
+                                androidx.compose.material3.Surface(Modifier.fillMaxSize()) {
+                                  LoginGuideScreen(
+                                enrollment = enrollment,
+                                onCopy = { label, value ->
+                                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText(label, value))
+                                    appendLog("已复制$label")
+                                },
+                                onBack = { showLoginCredentials = false },
+                                modifier = Modifier.fillMaxSize()
+                                  )
+                                }
+                              }
+                            }
                             4 -> VoiceprintScreen(
                                 state = voiceprint,
                                 linkStreaming = linkStatus.isStreaming,

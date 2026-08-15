@@ -70,7 +70,16 @@ object CollectionReadiness {
          * 它们不是点一下系统设置就能好的，折叠起来等于没说——
          * 用户 2026-08-15 原话：「建议添加提示不然都不知道没入组」。
          */
-        val prominent: Boolean = false
+        val prominent: Boolean = false,
+        /**
+         * 非空时界面给一个"不再提示"。
+         *
+         * 只给**查不到、只能靠人确认**的那种项。自启动白名单是 OEM 私有的，
+         * 没有任何 API 能查，所以只能无条件提醒——而一条永远消不掉的提醒，
+         * 参与者第二天就会连着整张卡片一起无视。用户 2026-08-16：
+         * 「这个出门前自启，能不能叉掉呢」。
+         */
+        val dismissKey: String? = null
     )
 
     data class Report(val items: List<Item>) {
@@ -101,7 +110,9 @@ object CollectionReadiness {
         /** 上传身份自检的失败原因；null = 通过或还没查 */
         uploadIdentityProblem: String? = null,
         /** 有没有入组配置。没有的话采得到但传不上去，而界面上原来看不出来 */
-        hasEnrollment: Boolean = true
+        hasEnrollment: Boolean = true,
+        /** 参与者已经点过"不再提示"的项 */
+        dismissed: Set<String> = emptySet()
     ): Report {
         val items = mutableListOf<Item>()
 
@@ -322,10 +333,14 @@ object CollectionReadiness {
                 "这一层是手机厂商自己的白名单，系统不提供查询接口，所以无法自动确认。" +
                     "不加进去的话，划掉任务卡片或内存紧张时采集会被直接杀掉。",
                 "点这里去设置自启动",
-                Fix.AUTOSTART
+                Fix.AUTOSTART,
+                dismissKey = KEY_AUTOSTART
             )
         )
 
-        return Report(items)
+        return Report(items.filterNot { it.dismissKey != null && it.dismissKey in dismissed })
     }
+
+    /** 自启动那条的"不再提示"键 */
+    const val KEY_AUTOSTART = "autostart"
 }

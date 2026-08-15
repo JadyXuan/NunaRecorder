@@ -93,6 +93,25 @@ class LoginAutofillTest {
     }
 
     @Test
+    fun `入组码没带密码时不要填一个空串`() {
+        // 服务端只存哈希，密码可能取不回来（印在入组卡上）。
+        // 填空串会让参与者以为"填过了但没生效"，比不填更糟。
+        // 用户 2026-08-16 实测："UserID 自动填好了，但是密码还是没有"。
+        val noPw = enrollment.copy(login = LoginHint(username = "u", password = ""))
+        assertNull(LoginAutofill.credentialsFor(noPw, LoginAutofill.Target.PARTICIPANT))
+    }
+
+    @Test
+    fun `分步登录页要靠观察 DOM 继续填，不能只跑一次`() {
+        // Authentik 先账号后密码，而且不整页跳转，onPageFinished 只触发一次。
+        // 只跑一次的话密码框永远等不到人来填。
+        val js = LoginAutofill.fillScript("u", "p", submit = true)
+        assertTrue("要有 MutationObserver", js.contains("MutationObserver"))
+        assertTrue("要能穿 shadow DOM", js.contains("shadowRoot"))
+        assertTrue("重复注入要复用而不是重新武装", js.contains("__egoFill"))
+    }
+
+    @Test
     fun `NONE 永远拿不到凭据`() {
         assertNull(LoginAutofill.credentialsFor(enrollment, LoginAutofill.Target.NONE))
     }

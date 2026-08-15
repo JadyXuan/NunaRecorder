@@ -77,6 +77,7 @@ fun MainScreen(
     /** 出门前自检结果；null 表示还没检查过 */
     readinessReport: com.example.nunarecorder.util.CollectionReadiness.Report? = null,
     onReadinessFix: (com.example.nunarecorder.util.CollectionReadiness.Fix) -> Unit = {},
+    onReadinessDismiss: (String) -> Unit = {},
     liveRecordingStats: LiveRecordingUiStats? = null,
     onDeviceClick: (ScannedDevice) -> Unit,
     onPairedDeviceClick: (PairedDevice) -> Unit,
@@ -174,7 +175,11 @@ fun MainScreen(
         FirstRunCard(step = firstRunStep, onAction = onFirstRunAction)
 
         // 自检排在引导卡之后：先把"还没配好"说完，再说"配好了但环境不对"
-        ReadinessCard(report = readinessReport, onFix = onReadinessFix)
+        ReadinessCard(
+            report = readinessReport,
+            onFix = onReadinessFix,
+            onDismissItem = onReadinessDismiss
+        )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
 
@@ -579,7 +584,8 @@ private fun StatusLine(label: String, value: String, emphasis: Boolean = false) 
 @Composable
 private fun ReadinessCard(
     report: com.example.nunarecorder.util.CollectionReadiness.Report?,
-    onFix: (com.example.nunarecorder.util.CollectionReadiness.Fix) -> Unit
+    onFix: (com.example.nunarecorder.util.CollectionReadiness.Fix) -> Unit,
+    onDismissItem: (String) -> Unit = {}
 ) {
     if (report == null || report.allGood) return
     val blocking = report.blocking
@@ -643,6 +649,14 @@ private fun ReadinessCard(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
+                        item.dismissKey?.let { key ->
+                            TextButton(
+                                onClick = { onDismissItem(key) },
+                                contentPadding = PaddingValues(0.dp, 0.dp)
+                            ) {
+                                Text("我已设置好，不再提示", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
                         item.actionHint?.let { hint ->
                             if (item.fix == com.example.nunarecorder.util.CollectionReadiness.Fix.NONE) {
                                 Text(
