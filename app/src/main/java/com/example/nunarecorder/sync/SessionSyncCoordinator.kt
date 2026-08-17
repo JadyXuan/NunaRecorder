@@ -114,8 +114,11 @@ object SessionSyncCoordinator {
             is RecordingEntry.Session -> entry.dir.absolutePath
             is RecordingEntry.LegacyOpus -> entry.opusFile.absolutePath
         }
-        if (isActiveFor(key)) {
-            log("同步已在进行中")
+        if (_state.value?.phase == Phase.SYNCING) {
+            log(
+                if (isActiveFor(key)) "同步已在进行中"
+                else "已有另一个会话正在同步，当前会话排队前请等待它结束"
+            )
             return
         }
         cancelRequested.set(false)

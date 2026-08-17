@@ -13,6 +13,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 
 class SessionSyncUploader(
@@ -49,22 +50,24 @@ class SessionSyncUploader(
      * 正在执行的请求。取消上传时必须把它 `cancel()` 掉——只在文件之间检查取消标记，
      * 卡在某个文件里的上传永远等不到下一次检查（2026-08-03 实测：点取消没反应）。
      */
-    @Volatile
-    private var activeCall: Call? = null
+    private val activeCalls = java.util.concurrent.ConcurrentHashMap.newKeySet<Call>()
+    private val cancellationRequested = AtomicBoolean(false)
 
     /** 中止在途请求。幂等，可从任意线程调用。 */
     fun cancelInFlight() {
-        activeCall?.cancel()
+        cancellationRequested.set(true)
+        activeCalls.toList().forEach { it.cancel() }
     }
 
     // inline：调用处的 lambda 里有 `return null` 这类非局部返回
     private inline fun <T> withCall(request: Request, block: (okhttp3.Response) -> T): T {
         val call = client.newCall(request)
-        activeCall = call
+        activeCalls.add(call)
+        if (cancellationRequested.get()) call.cancel()
         return try {
             call.execute().use(block)
         } finally {
-            activeCall = null
+            activeCalls.remove(call)
         }
     }
 
@@ -295,7 +298,7 @@ class SessionSyncUploader(
             .post(body)
             .build()
         return try {
-            client.newCall(request).execute().use { it.isSuccessful }
+            withCall(request) { it.isSuccessful }
         } catch (_: Exception) {
             false
         }
