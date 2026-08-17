@@ -4,6 +4,7 @@ import com.example.nunarecorder.util.writeTextAtomic
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 data class AudioSegmentEntry(
     val index: Int,
@@ -281,18 +282,30 @@ data class SessionManifest(
 }
 
 object SessionManifestIO {
+    private val sessionLocks = ConcurrentHashMap<String, Any>()
+
+    /** Serialize a read-modify-write operation for one session manifest. */
+    fun <T> withSessionLock(sessionDir: File, block: () -> T): T {
+        val lock = sessionLocks.computeIfAbsent(sessionDir.absolutePath) { Any() }
+        return synchronized(lock, block)
+    }
+
     fun write(sessionDir: File, manifest: SessionManifest) {
-        sessionDir.mkdirs()
-        File(sessionDir, SessionPaths.AUDIO_DIR).mkdirs()
-        File(sessionDir, "context").mkdirs()
-        File(sessionDir, "labels").mkdirs()
-        SessionPaths.manifestFile(sessionDir).writeTextAtomic(manifest.toJson().toString(2))
+        withSessionLock(sessionDir) {
+            sessionDir.mkdirs()
+            File(sessionDir, SessionPaths.AUDIO_DIR).mkdirs()
+            File(sessionDir, "context").mkdirs()
+            File(sessionDir, "labels").mkdirs()
+            SessionPaths.manifestFile(sessionDir).writeTextAtomic(manifest.toJson().toString(2))
+        }
     }
 
     fun updateVadSummary(sessionDir: File, status: String, speechSegments: Int, totalSegments: Int) {
-        val mf = SessionPaths.manifestFile(sessionDir)
-        val manifest = SessionManifest.load(mf) ?: return
-        manifest.vad = VadSummary(status = status, speechSegments = speechSegments, totalSegments = totalSegments)
-        write(sessionDir, manifest)
+        withSessionLock(sessionDir) {
+            val mf = SessionPaths.manifestFile(sessionDir)
+            val manifest = SessionManifest.load(mf) ?: return@withSessionLock
+            manifest.vad = VadSummary(status = status, speechSegments = speechSegments, totalSegments = totalSegments)
+            write(sessionDir, manifest)
+        }
     }
 }

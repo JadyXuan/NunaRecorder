@@ -29,29 +29,30 @@ object SegmentDeleter {
 
     data class Result(val ok: Boolean, val message: String)
 
-    fun deleteSegment(sessionDir: File, index: Int, nowMs: Long = System.currentTimeMillis()): Result {
-        val manifestFile = SessionPaths.manifestFile(sessionDir)
-        val manifest = SessionManifest.load(manifestFile)
-            ?: return Result(false, "读不到 manifest.json，未删除任何内容")
+    fun deleteSegment(sessionDir: File, index: Int, nowMs: Long = System.currentTimeMillis()): Result =
+        SessionManifestIO.withSessionLock(sessionDir) {
+            val manifestFile = SessionPaths.manifestFile(sessionDir)
+            val manifest = SessionManifest.load(manifestFile)
+                ?: return@withSessionLock Result(false, "读不到 manifest.json，未删除任何内容")
 
-        val entry = manifest.segments.find { it.index == index }
-            ?: return Result(false, "分段 $index 不在 manifest 里")
+            val entry = manifest.segments.find { it.index == index }
+                ?: return@withSessionLock Result(false, "分段 $index 不在 manifest 里")
 
-        val audioFile = File(sessionDir, entry.file)
-        if (audioFile.exists() && !audioFile.delete()) {
-            return Result(false, "删除音频文件失败：${entry.file}")
+            val audioFile = File(sessionDir, entry.file)
+            if (audioFile.exists() && !audioFile.delete()) {
+                return@withSessionLock Result(false, "删除音频文件失败：${entry.file}")
+            }
+
+            manifest.segments.removeAll { it.index == index }
+            if (manifest.deletedSegments.none { it.index == index }) {
+                manifest.deletedSegments = manifest.deletedSegments + SegmentDeletion(index, nowMs)
+            }
+            SessionManifestIO.write(sessionDir, manifest)
+
+            removeVadEntry(sessionDir, index)
+
+            Result(true, "已删除第 $index 段（约第 ${index + 1} 分钟）")
         }
-
-        manifest.segments.removeAll { it.index == index }
-        if (manifest.deletedSegments.none { it.index == index }) {
-            manifest.deletedSegments = manifest.deletedSegments + SegmentDeletion(index, nowMs)
-        }
-        SessionManifestIO.write(sessionDir, manifest)
-
-        removeVadEntry(sessionDir, index)
-
-        return Result(true, "已删除第 $index 段（约第 ${index + 1} 分钟）")
-    }
 
     /**
      * 整会话删除的前置条件：内部片段必须先删干净。
