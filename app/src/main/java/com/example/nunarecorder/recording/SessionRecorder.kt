@@ -203,9 +203,10 @@ class SessionRecorder(
         if (frames.isNotEmpty()) {
             maybeRotateSegment(now)
             for (frame in frames) {
-                writer?.write(frame.opus)
-                accumulator.onFrame(frame)
-                receivedPackets += frame.opus.size / OpusStreamAssembler.OPUS_FRAME_SIZE
+                if (writer?.write(frame.opus) == true) {
+                    accumulator.onFrame(frame)
+                    receivedPackets += frame.opus.size / OpusStreamAssembler.OPUS_FRAME_SIZE
+                }
             }
             // 会话级"应有包数"按墙钟算，和每段一致
             expectedPackets = SegmentFrameStats.expectedPacketsFor(
@@ -250,9 +251,16 @@ class SessionRecorder(
      * 毫米波原始包。**任何异常都不得影响音频**——这一路是附加模态，
      * 写不进去最多少一个模态，而音频是任务本身。
      */
+    @Synchronized
     fun feedSensorPacket(raw: ByteArray) {
         if (sessionDir == null) return
-        runCatching { mmWave.feed(raw) }
+        val result = runCatching { mmWave.feed(raw) }.getOrElse { error ->
+            onLog("毫米波写入异常：${error.message ?: error.javaClass.simpleName}")
+            return
+        }
+        if (result is MmWaveCaptureResult.WriteFailed) {
+            onLog("毫米波写入失败：${result.reason}")
+        }
     }
 
     /**
@@ -265,7 +273,7 @@ class SessionRecorder(
         val dir = sessionDir ?: return
         val now = clock()
         radarOn = enabled
-        runCatching {
+        val wrote = runCatching {
             mmWave.recordState(
                 enabled = enabled,
                 requestedByApp = false,
@@ -273,7 +281,12 @@ class SessionRecorder(
                 sessionOffsetMs = (now - (manifest?.startedAtMs ?: now)).coerceAtLeast(0L),
                 source = "device_0x13"
             )
+            true
+        }.getOrElse { error ->
+            onLog("毫米波状态写入异常：${error.message ?: error.javaClass.simpleName}")
+            false
         }
+        if (!wrote) onLog("毫米波状态写入失败")
         if (!enabled) {
             // 只在关闭时记一条：开启瞬间的扰动和关闭瞬间是同一类，
             // 但两条会把 events 撑成一天几百条。关闭点足以定位那一对边界。
@@ -284,6 +297,7 @@ class SessionRecorder(
     }
 
     /** 设备固件版本；连上之后才读得到，所以是后置写入而不是构造参数。 */
+    @Synchronized
     fun setDeviceFirmware(version: String) {
         val m = manifest ?: return
         if (m.deviceFirmware == version) return
@@ -415,7 +429,7 @@ class SessionRecorder(
         }
         val file = File(dir, rel)
         currentSegmentFile = file
-        writer = SegmentOpusWriter(file)
+        writer = SegmentOpusWriter(file) { message -> onLog("音频分段写入失败：$message") }
         accumulator = SegmentFrameAccumulator()
         flushManifestNow()
     }

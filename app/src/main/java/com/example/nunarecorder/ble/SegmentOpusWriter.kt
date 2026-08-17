@@ -17,23 +17,43 @@ import java.io.FileOutputStream
  * 不做缓冲：`FileOutputStream` 直接落到 page cache，进程被杀时已写入的音频不会丢。
  * 50 帧/秒 × 80 字节的写入量对 syscall 来说可以忽略。
  */
-class SegmentOpusWriter(val file: File) {
+class SegmentOpusWriter(
+    val file: File,
+    private val onWriteFailure: (String) -> Unit = {}
+) {
 
     companion object {
         private const val TAG = "SegmentOpusWriter"
     }
 
-    private var out: FileOutputStream? = FileOutputStream(file)
+    private var out: FileOutputStream? = null
+    private var failureReported = false
+
+    init {
+        out = try {
+            FileOutputStream(file)
+        } catch (e: Exception) {
+            reportFailure("open failed: ${file.name}", e)
+            null
+        }
+    }
 
     var bytesWritten: Long = 0L
         private set
 
-    fun write(opus: ByteArray) {
+    fun write(opus: ByteArray): Boolean {
+        val stream = out ?: run {
+            reportFailure("write skipped: ${file.name}", null)
+            return false
+        }
         try {
-            out?.write(opus)
+            stream.write(opus)
             bytesWritten += opus.size
+            return true
         } catch (e: Exception) {
-            Log.e(TAG, "write failed: ${file.name}", e)
+            out = null
+            reportFailure("write failed: ${file.name}", e)
+            return false
         }
     }
 
@@ -42,9 +62,16 @@ class SegmentOpusWriter(val file: File) {
             out?.flush()
             out?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "close failed: ${file.name}", e)
+            reportFailure("close failed: ${file.name}", e)
         } finally {
             out = null
         }
+    }
+
+    private fun reportFailure(message: String, error: Exception?) {
+        if (failureReported) return
+        failureReported = true
+        if (error == null) Log.e(TAG, message) else Log.e(TAG, message, error)
+        onWriteFailure(message)
     }
 }
