@@ -23,3 +23,11 @@ analysis/opus_samples/notes.txt
 # Kotlin compiler daemon scratch output
 .kotlin/
 _local_apk/
+
+# Android release signing material (keep outside the repository)
+# 两边都要：签名密钥进了仓库就是把发布密钥推到第三方 GitHub 上，
+# 而固定发布密钥正是"参与者升级不用卸载"（卸载会带走未上传录音）的前提。
+*.jks
+*.keystore
+*.p12
+*.pem
