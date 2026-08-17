@@ -9,6 +9,8 @@ class DeviceStorage(private val context: Context) {
     companion object {
         private const val PREF_NAME = "paired_devices_prefs"
         private const val KEY_DEVICES = "paired_devices"
+        /** 同一进程内 Activity 和 RecordingService 可能同时做设备列表读改写。 */
+        private val storageLock = Any()
 
         /**
          * 合并一台设备的记录。**纯函数，因为这里的错误是静默的**——
@@ -61,7 +63,9 @@ class DeviceStorage(private val context: Context) {
      * 抹掉一次就要重采一次才能补回来，且界面上完全看不出来。
      */
     fun saveOrUpdateDevice(device: PairedDevice) {
-        saveList(upsert(getPairedDevices(), device))
+        synchronized(storageLock) {
+            saveList(upsert(getPairedDevices(), device))
+        }
     }
 
     /**
@@ -71,9 +75,11 @@ class DeviceStorage(private val context: Context) {
      * 存进去等于把"未知"记成"已知且正常"，比不存更糟。
      */
     fun recordFirmware(address: String, version: String) {
-        val current = getPairedDevices()
-        val next = withFirmware(current, address, version)
-        if (next !== current) saveList(next)
+        synchronized(storageLock) {
+            val current = getPairedDevices()
+            val next = withFirmware(current, address, version)
+            if (next !== current) saveList(next)
+        }
     }
 
     fun firmwareOf(address: String?): String? =
@@ -104,12 +110,16 @@ class DeviceStorage(private val context: Context) {
     }
 
     fun removeDevice(address: String) {
-        val list = getPairedDevices().filterNot { it.address == address }
-        saveList(list)
+        synchronized(storageLock) {
+            val list = getPairedDevices().filterNot { it.address == address }
+            saveList(list)
+        }
     }
 
     fun clearAll() {
-        sp.edit().remove(KEY_DEVICES).apply()
+        synchronized(storageLock) {
+            sp.edit().remove(KEY_DEVICES).apply()
+        }
     }
 
     private fun saveList(list: List<PairedDevice>) {
