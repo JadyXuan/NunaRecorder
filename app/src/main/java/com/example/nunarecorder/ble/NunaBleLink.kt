@@ -193,16 +193,22 @@ class NunaBleLink(
 
     private val handshakeClient = HandshakeClient(context) { msg -> log("HS", msg) }
 
+    @Volatile
     private var gatt: BluetoothGatt? = null
     private var deviceAddress: String? = null
     private val running = AtomicBoolean(false)
     private var reconnectAttempt = 0
+    @Volatile
     private var subscribed = false
+    @Volatile
     private var lastDataAtMs = 0L
     /** A003 订阅成功的时刻；宽限期从这里算 */
+    @Volatile
     private var subscribedAtMs = 0L
     /** 本次连接是否收到过哪怕一帧 */
+    @Volatile
     private var receivedAnyData = false
+    @Volatile
     private var connectedAtMs = 0L
     private var awaitingStatusRead = false
     private var adapterReceiverRegistered = false
@@ -410,9 +416,13 @@ class NunaBleLink(
 
     @SuppressLint("MissingPermission")
     private fun startServiceDiscovery(g: BluetoothGatt, gen: Int, reason: String) {
+        if (!running.get()) return
+        if (isStale(g)) {
+            log(TAG, "第 $gen 代服务发现请求属于已被替换的连接，丢弃")
+            return
+        }
         if (mtuSettled) return
         mtuSettled = true
-        if (isStale(g) || !running.get()) return
         val ok = runCatching { g.discoverServices() }.getOrDefault(false)
         log(TAG, "发起服务发现（第 $gen 代，$reason，MTU=$negotiatedMtu）= $ok")
         if (!ok) {
@@ -577,6 +587,11 @@ class NunaBleLink(
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             handler.post {
+                if (isStale(g)) {
+                    log(TAG, "丢弃旧连接的 MTU 回调 mtu=$mtu status=$status")
+                    return@post
+                }
+                if (!running.get()) return@post
                 negotiatedMtu = mtu
                 log(TAG, "MTU 协商结果 $mtu（status=$status）")
                 if (mtu < PRODUCT_AUDIO_MIN_ATT_MTU) {
@@ -593,6 +608,10 @@ class NunaBleLink(
             status: Int
         ) {
             handler.post {
+                if (isStale(g)) {
+                    log(TAG, "丢弃旧连接的 CCCD 回调 status=$status")
+                    return@post
+                }
                 if (!running.get()) return@post
                 if (descriptor.uuid != CCCD_UUID) return@post
                 @Suppress("DEPRECATION")
@@ -633,6 +652,11 @@ class NunaBleLink(
             value: ByteArray,
             status: Int
         ) {
+            if (isStale(g)) {
+                log(TAG, "丢弃旧连接的特征读取回调 char=${characteristic.uuid} status=$status")
+                return
+            }
+            if (!running.get()) return
             logStatusPayload(characteristic, value)
             reportBattery(characteristic, value)
             reportFirmware(characteristic, value)
@@ -647,6 +671,11 @@ class NunaBleLink(
             status: Int
         ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+            if (isStale(g)) {
+                log(TAG, "丢弃旧连接的特征读取回调 char=${characteristic.uuid} status=$status")
+                return
+            }
+            if (!running.get()) return
             @Suppress("DEPRECATION")
             logStatusPayload(characteristic, characteristic.value ?: ByteArray(0))
             handleStatusRead(g, characteristic)
@@ -657,11 +686,28 @@ class NunaBleLink(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            if (isStale(g)) {
+                log(TAG, "丢弃旧连接的特征通知回调 char=${characteristic.uuid}")
+                return
+            }
+            if (!running.get()) return
             when (characteristic.uuid) {
                 TRANSFER_CHAR_UUID -> handler.post {
-                    if (running.get()) handshakeClient.onNotification(g, characteristic)
+                    if (!running.get()) return@post
+                    if (isStale(g)) {
+                        log(TAG, "丢弃已排队的旧连接握手通知 char=${characteristic.uuid}")
+                        return@post
+                    }
+                    handshakeClient.onNotification(g, characteristic)
                 }
-                BATTERY_LEVEL_UUID -> handler.post { reportBattery(characteristic, value) }
+                BATTERY_LEVEL_UUID -> handler.post {
+                    if (!running.get()) return@post
+                    if (isStale(g)) {
+                        log(TAG, "丢弃已排队的旧连接电量通知")
+                        return@post
+                    }
+                    reportBattery(characteristic, value)
+                }
                 // A001 遥测：毫米波原始包、雷达开关、设备信息。**直接在 BLE 线程处理**，
                 // 不绕主线程——毫米波包频率高，绕一圈只会给主线程添堵。
                 STATUS_CHAR_UUID -> dispatchStatusNotification(value)
@@ -715,6 +761,10 @@ class NunaBleLink(
     private fun handleStatusRead(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         if (characteristic.uuid != STATUS_CHAR_UUID) return
         handler.post {
+            if (isStale(g)) {
+                log(TAG, "丢弃已排队的旧连接 A001 读取回调")
+                return@post
+            }
             if (!running.get() || awaitingStatusRead) return@post
             awaitingStatusRead = true
             enableAudioNotifications(g)
@@ -922,6 +972,7 @@ class NunaBleLink(
         }
     }
 
+    @Volatile
     private var lastRadarEnabled: Boolean? = null
 
     private fun scheduleBatteryRead(g: BluetoothGatt) {
@@ -976,6 +1027,7 @@ class NunaBleLink(
      * **取决于谁后到**。同一台设备在数据里出现两个版本号，比没有版本号更糟——
      * 它会让人以为设备真的换过固件。所以权威来源到手之后就不再接受 DIS 的值。
      */
+    @Volatile
     private var authoritativeFirmware = false
 
     private fun reportFirmware(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
