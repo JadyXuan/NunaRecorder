@@ -22,3 +22,4 @@ analysis/opus_samples/notes.txt
 
 # Kotlin compiler daemon scratch output
 .kotlin/
+_local_apk/
