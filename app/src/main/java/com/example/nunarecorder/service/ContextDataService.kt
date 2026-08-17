@@ -24,6 +24,7 @@ import com.example.nunarecorder.context.ActivityRecognitionCollector
 import com.example.nunarecorder.reminder.MorningReminder
 import com.example.nunarecorder.reminder.MorningReminderStore
 import com.example.nunarecorder.util.LocationUpdatesHelper
+import com.example.nunarecorder.util.DiagnosticsLog
 import java.io.File
 import java.io.BufferedOutputStream
 import java.io.FileOutputStream
@@ -111,6 +112,7 @@ class ContextDataService : Service() {
     private var output: OutputStream? = null
     private var lastFlushMs = 0L
     private val lock = Any()
+    @Volatile
     private var collecting = false
 
     private var sensorManager: SensorManager? = null
@@ -185,6 +187,7 @@ class ContextDataService : Service() {
             startActivity()
         } catch (e: Exception) {
             Log.e(TAG, "startCapture failed", e)
+            DiagnosticsLog.log(TAG, "上下文服务启动失败：${e.javaClass.simpleName}: ${e.message}")
             stopSelf()
         }
     }
@@ -299,6 +302,7 @@ class ContextDataService : Service() {
             output = try {
                 BufferedOutputStream(FileOutputStream(sidecar, true), 64 * 1024)
             } catch (e: Exception) {
+                DiagnosticsLog.log(TAG, "上下文轮转打开输出失败：${e.javaClass.simpleName}: ${e.message}")
                 Log.e(TAG, "切换 context 输出失败: ${e.message}")
                 collecting = false
                 null
@@ -334,6 +338,10 @@ class ContextDataService : Service() {
 
         synchronized(lock) {
             runCatching { output?.flush(); output?.close() }
+                .onFailure { e ->
+                    Log.e(TAG, "关闭 context 输出失败", e)
+                    DiagnosticsLog.log(TAG, "关闭 context 输出失败：${e.javaClass.simpleName}: ${e.message}")
+                }
             output = null
         }
         Log.d(TAG, "Context capture stopped")
@@ -342,13 +350,20 @@ class ContextDataService : Service() {
     private fun writeRecord(line: String) {
         synchronized(lock) {
             if (!collecting) return
-            runCatching {
-                output?.write((line + "\n").toByteArray(Charsets.UTF_8))
+            try {
+                val stream = output ?: error("context output unavailable")
+                stream.write((line + "\n").toByteArray(Charsets.UTF_8))
                 val now = System.currentTimeMillis()
                 if (now - lastFlushMs >= FLUSH_PERIOD_MS) {
-                    output?.flush()
+                    stream.flush()
                     lastFlushMs = now
                 }
+            } catch (e: Exception) {
+                collecting = false
+                Log.e(TAG, "写入 context 失败，停止上下文采集", e)
+                DiagnosticsLog.log(TAG, "写入 context 失败，已停止上下文采集：${e.javaClass.simpleName}: ${e.message}")
+                runCatching { output?.close() }
+                output = null
             }
         }
     }
