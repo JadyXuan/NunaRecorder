@@ -122,6 +122,12 @@ object MorningReminder {
         if (p.sentCount >= MAX_PER_DAY) return Decision(Action.STOP_TODAY, p)
         // 人没在用手机就不发。这一条是整个设计的支点：
         // 睡着时弹出来的通知会被划掉，然后我们以为"已经提醒过了"。
+        //
+        // ⚠️ **这是一条故意什么都不做的路径**，而这类路径最容易在后来的重构里
+        // 被当成 bug "修掉"。所以留下实测记录，不只是留下理由：
+        // 2026-08-18 在 API 35 模拟器上强制 deep Doze（mState=IDLE、屏幕关、电池供电），
+        // 闹钟按 15 分钟醒来、判定 WAIT、**没有发通知**，并把自己重排到下一轮。
+        // 也就是说"醒了但什么都不做"是被验证过的正确行为，不是漏了一个分支。
         if (!inUse) return Decision(Action.WAIT, p)
         // 同一次解锁里不重复发
         if (p.unlockEpisodes == p.lastSentEpisode) return Decision(Action.WAIT, p)
