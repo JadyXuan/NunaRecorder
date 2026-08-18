@@ -98,6 +98,7 @@ class MorningReminderReceiver : BroadcastReceiver() {
         val pm = app.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val km = app.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
         val inUse = (pm?.isInteractive == true) && (km?.isKeyguardLocked != true)
+        val notifOk = store.notificationsEnabled()
 
         val decision = MorningReminder.decide(
             MorningReminder.Snapshot(
@@ -107,11 +108,25 @@ class MorningReminderReceiver : BroadcastReceiver() {
                 recordingActive = RecordingController.link.value.isSessionActive ||
                     RecordingController.stats.value != null,
                 phoneInUse = inUse,
-                notificationsEnabled = store.notificationsEnabled()
+                notificationsEnabled = notifOk
             ),
             store.load()
         )
         store.save(decision.progress)
+
+        // **每次醒来都记一行，不只是发提醒的时候。**
+        //
+        // 原来只有 POST 分支写日志，于是「闹钟醒了但人在睡」和「闹钟根本没醒」
+        // 写出来的数据一模一样——都是什么都没有。而 T-047 的存亡条件恰恰是
+        // **"Doze 下闹钟到底醒不醒"**，那条验收标准用只记 POST 的版本**测不出来**：
+        // 采一整天回来看到 `sent_count: 0`，仍然分不清是提醒没必要发，
+        // 还是这个功能压根没跑起来。
+        DiagnosticsLog.log(
+            "Reminder",
+            "闹钟醒了 · 手机在用=$inUse · 决定=${decision.action} · " +
+                "已发=${decision.progress.sentCount}/${MorningReminder.MAX_PER_DAY} · " +
+                "解锁=${decision.progress.unlockEpisodes} · 通知权限=$notifOk"
+        )
 
         when (decision.action) {
             MorningReminder.Action.STOP_TODAY -> stopForToday(app)

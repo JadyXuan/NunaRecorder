@@ -61,7 +61,26 @@ object MorningReminder {
         /** 上一次轮询时手机是不是在用，用来识别"新的一次解锁" */
         val wasInUse: Boolean = false,
         /** 当天第一次观察到手机被使用的时刻；0 = 还没观察到 */
-        val firstInUseAtMs: Long = 0L
+        val firstInUseAtMs: Long = 0L,
+        /**
+         * 当天闹钟**实际醒来**的次数。
+         *
+         * **这不是调试计数，是分析时唯一能分层的那一列。**
+         *
+         * 没有它，`sentCount == 0` 有三种读法，而它们在数据里长得一模一样：
+         * ① 提醒没必要发（人自己就戴上了）② 人一直在睡 ③ **闹钟压根没醒**。
+         * 有了它：`pollCount > 0 && sentCount == 0` 才是"自然佩戴"，
+         * 而 `pollCount == 0` 说明这个功能在这台手机上没跑起来。
+         *
+         * 更要紧的是它对承重主张的作用：**被提醒的早晨和没被提醒的早晨不是同一个总体**
+         * （提醒是干预，它改的是构念不是混淆）。「这个人的常态」只对**自然佩戴**
+         * 那一段成立，而把两段分开的依据就是这一列。**参与者标完就没了，事后补不出来。**
+         */
+        val pollCount: Int = 0,
+        /** 当天闹钟最后一次醒来的时刻；0 = 一次都没醒过 */
+        val lastPollAtMs: Long = 0L,
+        /** 当天第一次真正发出提醒的时刻；0 = 没发过。用来判断"戴上"离提醒有多近 */
+        val firstSentAtMs: Long = 0L
     )
 
     enum class Action {
@@ -83,7 +102,10 @@ object MorningReminder {
     fun decide(snapshot: Snapshot, stored: Progress): Decision {
         val today = CollectionClock.dayId(snapshot.nowMs)
         // 换采集日 = 整体重置。跨天不携带任何东西，见类文档里那条干预漂移。
-        val p0 = if (stored.dayId == today) stored else Progress(dayId = today)
+        // 计数在最前面加：**闹钟醒了这件事本身要被记下来**，哪怕这一轮什么都不做，
+        // 否则"醒了但没发"和"根本没醒"又变回同一种数据。
+        val p0 = (if (stored.dayId == today) stored else Progress(dayId = today))
+            .let { it.copy(pollCount = it.pollCount + 1, lastPollAtMs = snapshot.nowMs) }
 
         // 已经在录：立刻停。一个在你已经照做之后还在响的通知，
         // 是最快让人去关通知的东西——而关掉之后就永久失效了。
@@ -106,7 +128,11 @@ object MorningReminder {
 
         return Decision(
             Action.POST,
-            p.copy(sentCount = p.sentCount + 1, lastSentEpisode = p.unlockEpisodes)
+            p.copy(
+                sentCount = p.sentCount + 1,
+                lastSentEpisode = p.unlockEpisodes,
+                firstSentAtMs = if (p.firstSentAtMs == 0L) snapshot.nowMs else p.firstSentAtMs
+            )
         )
     }
 
@@ -128,6 +154,12 @@ object MorningReminder {
             put("sent_count", p.sentCount)
             put("dismissed_count", p.dismissedCount)
             put("unlock_episodes", p.unlockEpisodes)
+            // 见 Progress.pollCount：这三个是分析时的分层依据，不是调试字段
+            put("poll_count", p.pollCount)
+            if (p.lastPollAtMs > 0L) put("last_poll_at_ms", p.lastPollAtMs)
+            if (p.firstSentAtMs > 0L) put("first_sent_at_ms", p.firstSentAtMs)
+            // 便于下游直接分层，不必自己推：真正决定"这一天算不算自然佩戴"的就是它
+            put("prompted", p.sentCount > 0)
             // false = 提醒这一路已经永久失效，且只有这一行看得出来
             put("notifications_enabled", notificationsEnabled)
             put("max_per_day", MAX_PER_DAY)

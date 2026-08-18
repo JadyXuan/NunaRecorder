@@ -168,6 +168,35 @@ segments[].bytes  ==  frames.received × 80
 2026-08-09 全天采到的 provider 清一色 `network`，而当时没有这一行，事后无法判断是权限、
 是系统定位模式，还是代码坏了。**分析时先读它再读 `gps`。**
 
+#### `morning_reminder`：每个会话一行，**它是分析时的分层依据**
+
+早晨提醒（T-2026-08-15-047）自己的状态，会话开始和整点轮转时各写一行：
+
+```json
+{"type":"morning_reminder","t_ms":...,"collection_day":"20260809",
+ "sent_count":1,"dismissed_count":0,"unlock_episodes":2,
+ "poll_count":37,"last_poll_at_ms":...,"first_sent_at_ms":...,
+ "prompted":true,"notifications_enabled":true,"max_per_day":2,
+ "minutes_from_day_start":285}
+```
+
+**`prompted` / `poll_count` 不是调试字段，请勿在分析时忽略。**
+
+| 想回答 | 看什么 |
+| --- | --- |
+| 这一天是**自然佩戴**还是**被提醒之后才戴** | **`prompted`**（等价于 `sent_count > 0`） |
+| `sent_count == 0` 是"没必要提醒"还是"提醒功能没跑起来" | **`poll_count`**：`> 0` 是前者，`== 0` 是后者 |
+| 提醒这一路是不是被永久关掉了 | `notifications_enabled` |
+| 参与者看到了但选择不理 | `dismissed_count` |
+
+> ⚠️ **为什么这条影响的是结论而不只是排障**：
+> **提醒是一次干预，被提醒的早晨和没被提醒的早晨不是同一个总体**——
+> 它改变的是构念，不是可以事后控制掉的混淆。
+> 所以「参与者的日常作息」这类结论**只对 `prompted == false` 的那些天成立**，
+> 报的时候要声明作用域。
+>
+> **而这一列参与者采完就没了，事后补不出来。**
+
 毫米波不写进 `context.jsonl`，它有自己的两个文件，见 §1.4。
 
 ### 1.3 `labels/sync_status.json`（客户端维护）

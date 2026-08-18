@@ -148,6 +148,67 @@ class MorningReminderTest {
     }
 
     @Test
+    fun `闹钟每次醒来都要计数，哪怕这一轮什么都不做`() {
+        // 没有这个计数，sentCount == 0 有三种读法而数据里长得一样：
+        // 提醒没必要发 / 人一直在睡 / **闹钟压根没醒**。
+        var p = MorningReminder.Progress()
+        // 人在睡：WAIT
+        p = MorningReminder.decide(snap(at(9, 5), inUse = false), p).progress
+        assertEquals(1, p.pollCount)
+        // 已经在录：STOP_TODAY——照样算醒过一次
+        p = MorningReminder.decide(snap(at(9, 6), recording = true), p).progress
+        assertEquals(2, p.pollCount)
+        assertEquals(0, p.sentCount)
+        assertEquals(at(9, 6), p.lastPollAtMs)
+    }
+
+    @Test
+    fun `自然佩戴和功能没跑起来必须分得开`() {
+        // 这是这几个字段存在的全部理由：
+        //   pollCount > 0 且 sentCount == 0  → 闹钟活着，人自己戴上的 → **自然佩戴**
+        //   pollCount == 0                   → 闹钟没醒，这台手机上功能没跑起来
+        val natural = MorningReminder.decide(
+            snap(at(9, 7), recording = true), MorningReminder.Progress()
+        ).progress
+        assertTrue("闹钟醒过", natural.pollCount > 0)
+        assertEquals("但没提醒过", 0, natural.sentCount)
+
+        val neverRan = MorningReminder.Progress(dayId = CollectionClock.dayId(at(9, 7)))
+        assertEquals("闹钟一次都没醒", 0, neverRan.pollCount)
+    }
+
+    @Test
+    fun `被提醒过的一天要能一眼看出来`() {
+        // 「这个人的常态」只对自然佩戴那段成立——被提醒的早晨是另一个总体。
+        var p = MorningReminder.decide(snap(at(9, 7)), MorningReminder.Progress()).progress
+        assertEquals(at(9, 7), p.firstSentAtMs)
+
+        val j = JSONObject(MorningReminder.toJsonLine(p, at(9, 8), notificationsEnabled = true))
+        assertTrue("prompted 要直接可读，别让下游自己推", j.getBoolean("prompted"))
+        assertTrue(j.getInt("poll_count") > 0)
+        assertEquals(at(9, 7), j.getLong("first_sent_at_ms"))
+
+        val untouched = JSONObject(
+            MorningReminder.toJsonLine(
+                MorningReminder.Progress(pollCount = 3), at(9, 8), notificationsEnabled = true
+            )
+        )
+        assertFalse("没提醒过的那天必须是 false", untouched.getBoolean("prompted"))
+        assertEquals(3, untouched.getInt("poll_count"))
+    }
+
+    @Test
+    fun `分层用的那几个字段也跨天重置`() {
+        var p = MorningReminder.decide(snap(at(9, 7)), MorningReminder.Progress()).progress
+        p = MorningReminder.decide(snap(at(9, 7, 30), inUse = false), p).progress
+        assertEquals(2, p.pollCount)
+
+        val nextDay = MorningReminder.decide(snap(at(10, 7, 0)), p).progress
+        assertEquals("跨天不能累积轮询计数", 1, nextDay.pollCount)
+        assertEquals("跨天不能带着昨天的首发时刻", at(10, 7, 0), nextDay.firstSentAtMs)
+    }
+
+    @Test
     fun `没有通知权限时仍然照常推进状态，不要静默假装发过`() {
         // 权限没了也要走完 decide，这样 sent_count 反映的是"我们试图发了几次"，
         // 配合 notifications_enabled=false 才能还原真相

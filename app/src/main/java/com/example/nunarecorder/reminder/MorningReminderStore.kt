@@ -22,7 +22,10 @@ class MorningReminderStore(context: Context) {
         unlockEpisodes = sp.getInt(K_EPISODES, 0),
         lastSentEpisode = sp.getInt(K_LAST_SENT_EP, -1),
         wasInUse = sp.getBoolean(K_WAS_IN_USE, false),
-        firstInUseAtMs = sp.getLong(K_FIRST_USE, 0L)
+        firstInUseAtMs = sp.getLong(K_FIRST_USE, 0L),
+        pollCount = sp.getInt(K_POLLS, 0),
+        lastPollAtMs = sp.getLong(K_LAST_POLL, 0L),
+        firstSentAtMs = sp.getLong(K_FIRST_SENT, 0L)
     )
 
     fun save(p: MorningReminder.Progress) {
@@ -34,6 +37,9 @@ class MorningReminderStore(context: Context) {
             .putInt(K_LAST_SENT_EP, p.lastSentEpisode)
             .putBoolean(K_WAS_IN_USE, p.wasInUse)
             .putLong(K_FIRST_USE, p.firstInUseAtMs)
+            .putInt(K_POLLS, p.pollCount)
+            .putLong(K_LAST_POLL, p.lastPollAtMs)
+            .putLong(K_FIRST_SENT, p.firstSentAtMs)
             .apply()
     }
 
@@ -64,5 +70,8 @@ class MorningReminderStore(context: Context) {
         const val K_LAST_SENT_EP = "last_sent_episode"
         const val K_WAS_IN_USE = "was_in_use"
         const val K_FIRST_USE = "first_use_at_ms"
+        const val K_POLLS = "poll_count"
+        const val K_LAST_POLL = "last_poll_at_ms"
+        const val K_FIRST_SENT = "first_sent_at_ms"
     }
 }
