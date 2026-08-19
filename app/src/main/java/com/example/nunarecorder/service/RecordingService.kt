@@ -63,9 +63,12 @@ class RecordingService : Service() {
         /** 功耗采样周期 */
         private const val POWER_SAMPLE_PERIOD_MS = 3 * 60_000L
 
-        const val ACTION_START = "com.example.nunarecorder.action.START_RECORDING"
+        /** Only a direct UI action may use this path; it creates the persisted intent. */
+        const val ACTION_START = RecordingRecoveryProtocol.ACTION_USER_START
+        /** System replay after task removal; it must re-read, never recreate, user intent. */
+        const val ACTION_RECOVER = RecordingRecoveryProtocol.ACTION_SYSTEM_RECOVER
         /** 看门狗自我拉起。**与 ACTION_START 分开**，因为它必须先复核采集意图 */
-        const val ACTION_WATCHDOG = "com.example.nunarecorder.action.WATCHDOG_RESTART"
+        const val ACTION_WATCHDOG = RecordingRecoveryProtocol.ACTION_WATCHDOG
         const val ACTION_STOP = "com.example.nunarecorder.action.STOP_RECORDING"
         const val EXTRA_DEVICE_NAME = "extra_device_name"
         const val EXTRA_DEVICE_ADDRESS = "extra_device_address"
@@ -128,27 +131,28 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val name = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "unknown"
-                val address = intent.getStringExtra(EXTRA_DEVICE_ADDRESS)
-                if (address.isNullOrBlank()) {
-                    DiagnosticsLog.log(TAG, "START 缺少设备地址，忽略")
-                    stopSelf()
+                val requested = RecordingStartPolicy.Target(
+                    name,
+                    intent.getStringExtra(EXTRA_DEVICE_ADDRESS).orEmpty()
+                )
+                val decision = RecordingStartPolicy.decide(
+                    RecordingStartPolicy.Origin.USER, requested, persistedIntent = null
+                )
+                if (!applyStartDecision(decision, "START 缺少设备地址，忽略")) {
                     return START_NOT_STICKY
                 }
-                RecordingIntent.save(this, name, address)
-                startRecording(name, address)
+            }
+            ACTION_RECOVER -> {
+                if (!recoverRecording("任务卡重启闹钟到点，但用户已停止采集，不拉起")) {
+                    return START_NOT_STICKY
+                }
             }
             ACTION_WATCHDOG -> {
                 // 看门狗到点。**只有采集意图还在时才恢复**——
                 // 用户按过停止的话意图已经被清掉，这里必须什么都不做。
-                val pending = RecordingIntent.load(this)
-                if (pending == null) {
-                    DiagnosticsLog.log(TAG, "看门狗到点，但用户已停止采集，不拉起")
-                    if (!active) stopSelf()
+                if (!recoverRecording("看门狗到点，但用户已停止采集，不拉起")) {
                     return START_NOT_STICKY
                 }
-                if (active) return START_STICKY
-                DiagnosticsLog.log(TAG, "看门狗发现采集已中断，恢复 device=${pending.deviceName}")
-                startRecording(pending.deviceName, pending.deviceAddress)
             }
             ACTION_STOP -> {
                 // 用户主动停止：清掉意图，否则系统重启服务时会自己又开始录
@@ -171,39 +175,71 @@ class RecordingService : Service() {
                 // 现在恢复，但**开一个新会话**而不是假装旧的还在继续：进程死过一次，
                 // 中间缺了多久无从得知，用新会话 + 日志留痕如实表达，
                 // 而不是把一段空白缝进旧会话的时间轴里。
-                val intent2 = RecordingIntent.load(this)
-                if (intent2 == null) {
-                    DiagnosticsLog.log(TAG, "服务被系统重启，但没有待恢复的采集意图，退出")
-                    stopSelf()
+                if (!recoverRecording("服务被系统重启，但没有待恢复的采集意图，退出")) {
                     return START_NOT_STICKY
                 }
-                DiagnosticsLog.log(
-                    TAG,
-                    "服务被系统重启（进程曾被杀死），以新会话恢复采集 device=${intent2.deviceName}"
-                )
-                startRecording(intent2.deviceName, intent2.deviceAddress)
             }
         }
         return START_STICKY
+    }
+
+    private fun recoverRecording(missingIntentMessage: String): Boolean {
+        val persisted = RecordingIntent.load(this)?.let {
+            RecordingStartPolicy.Target(it.deviceName, it.deviceAddress)
+        }
+        val decision = RecordingStartPolicy.decide(
+            RecordingStartPolicy.Origin.SYSTEM_RECOVERY,
+            requested = null,
+            persistedIntent = persisted
+        )
+        return applyStartDecision(decision, missingIntentMessage)
+    }
+
+    private fun applyStartDecision(
+        decision: RecordingStartPolicy.Decision,
+        ignoredMessage: String
+    ): Boolean {
+        return when (decision) {
+            RecordingStartPolicy.Decision.Ignore -> {
+                DiagnosticsLog.log(TAG, ignoredMessage)
+                if (!active) stopSelf()
+                false
+            }
+            is RecordingStartPolicy.Decision.Start -> {
+                val target = decision.target
+                if (decision.persistIntent) {
+                    RecordingIntent.save(this, target.deviceName, target.deviceAddress)
+                }
+                if (!active) {
+                    if (!decision.persistIntent) {
+                        DiagnosticsLog.log(
+                            TAG,
+                            "系统复核采集意图仍有效，恢复 device=" + target.deviceName
+                        )
+                    }
+                    startRecording(target.deviceName, target.deviceAddress)
+                }
+                true
+            }
+        }
     }
 
     /**
      * 佩戴者把任务卡片划掉。
      *
      * 前台服务本应活下来，但部分 OEM（vivo / 华为 / 小米）会连带杀掉进程。
-     * 这里主动重排一次启动：如果进程真被杀了，`START_STICKY` 加上持久化的采集意图
-     * 会把它拉回来；如果没被杀，这次重排是无害的（`startRecording` 对重复 START 是幂等的）。
+     * 这里主动重排专用恢复 action；到点后仍要重新读取采集意图，不能信任排闹钟时的状态。
+     * 如果没被杀，这次重排是无害的（`startRecording` 对重复 START 是幂等的）。
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         if (active) {
             DiagnosticsLog.log(TAG, "任务卡片被划掉，采集继续；已排重启兜底")
+            val spec = RecordingRecoveryProtocol.taskRemovedAlarm
             val restart = Intent(this, RecordingService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_DEVICE_NAME, recordingDeviceName)
-                putExtra(EXTRA_DEVICE_ADDRESS, recordingDeviceAddress)
+                action = spec.action
             }
             val pi = PendingIntent.getForegroundService(
-                this, 1, restart,
+                this, spec.requestCode, restart,
                 PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
             )
             runCatching {
@@ -238,15 +274,16 @@ class RecordingService : Service() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastWatchdogArmMs < WATCHDOG_ALARM_PERIOD_MS) return
         lastWatchdogArmMs = now
+        val spec = RecordingRecoveryProtocol.watchdogAlarm
         val restart = Intent(this, RecordingService::class.java).apply {
             // **不能直接发 ACTION_START。** 那条闹钟是 10 分钟之后才响的，
             // 这中间用户完全可能按了停止——而按停止是一个隐私决定
             // （"这段我不想被录"），自己又拉起来等于推翻它。
             // 改成专用 action，响的时候再复核一次采集意图还在不在。
-            action = ACTION_WATCHDOG
+            action = spec.action
         }
         val pi = PendingIntent.getForegroundService(
-            this, 2, restart,
+            this, spec.requestCode, restart,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         runCatching {
@@ -265,13 +302,15 @@ class RecordingService : Service() {
      * 两个来源：[onTaskRemoved] 排的一次性重启（请求码 1）和 [armWatchdogAlarm]
      * 排的看门狗（请求码 2）。**只在用户主动停止时调用**——
      * 服务被系统回收时不能撤，那正是 T-025 要靠它恢复的场景。
+     * 额外撤掉旧版本用 ACTION_START 排的请求码 1，覆盖原地升级后残留的 PendingIntent。
      */
     private fun cancelSelfRestartAlarms() {
         val am = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
-        listOf(
-            1 to Intent(this, RecordingService::class.java).apply { action = ACTION_START },
-            2 to Intent(this, RecordingService::class.java).apply { action = ACTION_WATCHDOG }
-        ).forEach { (code, intent) ->
+        RecordingRecoveryProtocol.cancellableAlarms.map { spec ->
+            spec.requestCode to Intent(this, RecordingService::class.java).apply {
+                action = spec.action
+            }
+        }.forEach { (code, intent) ->
             runCatching {
                 PendingIntent.getForegroundService(
                     this, code, intent,
