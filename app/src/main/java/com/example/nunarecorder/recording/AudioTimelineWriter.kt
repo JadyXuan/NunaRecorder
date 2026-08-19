@@ -15,6 +15,11 @@ import java.io.OutputStreamWriter
  * phone-monotonic-derived timestamps are retained because their exact protocol semantics
  * can be refined later without changing the raw Opus format.
  */
+/**
+ * ⚠️ **未接线（2026-08-19 核实）。** 本类有完整实现和单测，但**生产代码零调用**，
+ * 产出的文件也不在 `SessionSyncInventory` 的上传清单里。
+ * **单测通过不代表这个功能存在。** 详见 [com.example.nunarecorder.session.SessionPaths.AUDIO_TIMELINE_FILE]。
+ */
 class AudioTimelineWriter {
     private var sessionDir: File? = null
     private var writer: BufferedWriter? = null

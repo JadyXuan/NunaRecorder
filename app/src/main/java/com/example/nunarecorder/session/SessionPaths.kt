@@ -19,7 +19,16 @@ object SessionPaths {
     const val MMWAVE_FILE = "context/mmwave.jsonl"
     /** 毫米波开关时间线；开关瞬间会短暂干扰几帧音频，切片对齐要用它纠正 */
     const val MMWAVE_STATE_FILE = "context/mmwave_state.jsonl"
-    /** 音频时间线，供跨模态切片对齐 */
+    /**
+     * 音频时间线，供跨模态切片对齐。
+     *
+     * ⚠️ **2026-08-19：这个文件从来没有被写出来过。** [AudioTimelineWriter] 有实现、
+     * 有单测，但**生产代码一处都没有实例化它**，`SessionSyncInventory` 也不收集它。
+     * 所以"设备时间与手机时间对齐的证据"目前**不存在**——
+     * 常量 + 类 + 单测三样凑在一起看起来像已交付，这正是本项目说的第三类危险：
+     * **已承诺、而实现它的东西还没写，且它读起来像已经做到了。**
+     * 要用它必须同时补两处：录制路径里实际调用，和 inventory 里收进上传清单。
+     */
     const val AUDIO_TIMELINE_FILE = "audio/timeline.jsonl"
     /** 诊断日志随会话一起上传；`labels/` 是服务端允许的顶层目录之一 */
     const val DIAGNOSTICS_LOG_FILE = "labels/diagnostics.log"

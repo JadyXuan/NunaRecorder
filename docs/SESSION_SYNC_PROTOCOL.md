@@ -56,13 +56,35 @@
 
 ```json
 {
-  "expected": 3000,          // 按墙钟应有的 20ms 帧数
-  "received": 2952,          // 实际写入的帧数
-  "sequence_lost": 48,       // 设备 frameId 序号上的空洞 → 帧发了但没到（链路丢包）
-  "unaccounted": 0,          // expected − received − sequence_lost → 设备根本没发（可为负）
-  "gaps": [{"at_frame_offset": 1200, "missing_frames": 48, "next_frame_id": 6418}]
+  "unit": "opus_packet_20ms",
+  "expected": 3000,          // 按墙钟应有的 20ms 包数
+  "received": 2952,          // 实际写入的包数
+  "missing": 48,             // expected − received，恒等于两者之差
+  "device_frames": {         // ⚠️ 这一层的单位是**设备帧**，不是 20ms 包
+    "received": 82,          // 收到的设备帧数
+    "sequence_lost": 2,      // 设备 frameId 序号上的空洞 → 帧发了但没到（链路丢包）
+    "gaps": [{"at_frame_offset": 1200, "missing_frames": 48, "next_frame_id": 6418}]
+  }
 }
 ```
+
+> ⚠️ **`device_frames` 里的计数与外层不同量纲，不要跨层做算术。**
+> 一个设备帧携带**不定数量**的 80 字节 Opus 包（负载按 80 的整数倍裁剪，
+> 见 `OpusStreamAssembler.kt:227`），**代码里没有任何固定换算常量**，
+> 所以 `sequence_lost`（设备帧）**换算不成**缺失的包数。
+> 上面例子里 `2` 和 `48` 不构成任何比例关系，别去凑。
+>
+> **外层只有一条恒等式：`missing == expected − received`**，
+> 它**不减** `sequence_lost`——设备帧的空洞已经反映在 `received` 变小里了，再减一次是重复扣。
+>
+> （2026-08-03 那批数据里观察到过精确 36.0 的比值，**那是当时 `received` 误数了设备帧的量纲 bug**，
+> 不是协议常量。**不要把它当换算率写进任何解析代码。**）
+
+> **本节 2026-08-19 更正。** 此前这里写的是顶层 `sequence_lost` / `unaccounted` / `gaps`，
+> **而代码从来没有输出过那个形状**——真实输出是上面这个（`RecordingIntegrity.kt:66`）。
+> 按旧文档解析的下游会取不到 `sequence_lost`（默认成 0）、找不到 `unaccounted`。
+> **这是"冻结了一份声明，而行为在别处"的实例**：文档冻住了，代码按自己的样子在写，
+> 两边从没对过。**已点名 platform 与 benchmark 复核他们的解析。**
 
 **不做补偿**：不补零、不拉伸时间轴。段短了就是短了，空洞位置如实上报。
 
