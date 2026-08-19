@@ -35,19 +35,30 @@ class MigrationService : Service() {
             if (!BatteryOptimizationHelper.isIgnoringOptimizations(app)) {
                 Log.w(TAG, "未忽略电池优化，息屏后任务可能被系统终止")
             }
-            app.startForegroundService(
-                Intent(app, MigrationService::class.java).apply {
-                    action = ACTION_START
-                    putExtra(EXTRA_OPUS_PATH, opusPath)
-                    putExtra(EXTRA_DO_SPLIT, options.doSplit)
-                    putExtra(EXTRA_DO_VAD, options.doVad)
-                    putExtra(EXTRA_SEGMENT_SEC, options.segmentDurationSec)
-                }
-            )
+            runCatching {
+                app.startForegroundService(
+                    Intent(app, MigrationService::class.java).apply {
+                        action = ACTION_START
+                        putExtra(EXTRA_OPUS_PATH, opusPath)
+                        putExtra(EXTRA_DO_SPLIT, options.doSplit)
+                        putExtra(EXTRA_DO_VAD, options.doVad)
+                        putExtra(EXTRA_SEGMENT_SEC, options.segmentDurationSec)
+                    }
+                )
+            }.onFailure {
+                Log.w(TAG, "无法启动迁移前台服务：${it.message}")
+                MigrationCoordinator.fail(
+                    opusPath, File(opusPath).name, "迁移未启动：前台处理额度暂不可用"
+                )
+            }
         }
     }
 
     private var serviceWakeLock: PowerManager.WakeLock? = null
+
+    /** Prevents a timed-out service instance from promoting itself again via worker callbacks. */
+    @Volatile
+    private var timedOut = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -83,6 +94,7 @@ class MigrationService : Service() {
                     doVad = intent.getBooleanExtra(EXTRA_DO_VAD, true),
                     segmentDurationSec = intent.getIntExtra(EXTRA_SEGMENT_SEC, 60).coerceIn(10, 600)
                 )
+                timedOut = false
                 migrationRunning = true
                 Log.d(TAG, "start migration: ${opus.name} split=${options.doSplit} vad=${options.doVad}")
                 acquireServiceWakeLock()
@@ -92,6 +104,19 @@ class MigrationService : Service() {
         }
         return START_STICKY
     }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "dataSync 前台额度耗尽，撤下迁移保活；已写文件保留且任务不会并发重开")
+        DataSyncTimeoutStopper(
+            cleanup = {
+                timedOut = true
+                releaseServiceWakeLock()
+            },
+            removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
+            stopService = { stopSelf() }
+        ).stop()
+    }
+
 
     private fun runMigration(opusPath: String, options: MigrateOptions) {
         val opus = File(opusPath)
@@ -154,7 +179,9 @@ class MigrationService : Service() {
 
     override fun onDestroy() {
         releaseServiceWakeLock()
-        migrationRunning = false
+        // The executor, not the Service instance, owns the migration. A timeout
+        // destroys this instance while the worker may still be completing safe,
+        // resumable files; only the worker's finally block clears migrationRunning.
         super.onDestroy()
     }
 
@@ -181,6 +208,7 @@ class MigrationService : Service() {
     }
 
     private fun promoteToForeground(content: String, percent: Int, indeterminate: Boolean = false) {
+        if (timedOut) return
         val notification = ProcessingNotifications.buildMigration(this, content, percent, indeterminate)
         ForegroundServiceHelper.startDataSync(
             this,

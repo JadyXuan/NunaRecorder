@@ -522,16 +522,11 @@ class RecordingService : Service() {
 
     private fun startForegroundCompat() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        ForegroundServiceHelper.startConnectedDevice(
+            this,
+            NOTIFICATION_ID,
+            notification
+        )
     }
 
     /**
