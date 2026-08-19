@@ -42,7 +42,7 @@
 
     <application
         android:name=".NunaApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -79,12 +79,12 @@
         <service
             android:name=".service.RecordingService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync">
+            android:foregroundServiceType="connectedDevice">
         </service>
         <service
             android:name=".service.ContextDataService"
             android:exported="false"
-            android:foregroundServiceType="location|dataSync">
+            android:foregroundServiceType="location">
         </service>
         <service
             android:name=".service.VadProcessingService"

@@ -27,9 +27,11 @@ class VadProcessingService : Service() {
             if (!ProcessingNotifications.canPostNotifications(app)) {
                 Log.w(TAG, "通知权限未授予，前台服务通知可能不可见")
             }
-            app.startForegroundService(
-                Intent(app, VadProcessingService::class.java).apply { action = ACTION_START }
-            )
+            runCatching {
+                app.startForegroundService(
+                    Intent(app, VadProcessingService::class.java).apply { action = ACTION_START }
+                )
+            }.onFailure { Log.w(TAG, "无法启动 VAD 前台服务：${it.message}") }
         }
 
         fun stopIfIdle(context: Context?) {
@@ -77,6 +79,18 @@ class VadProcessingService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "dataSync 前台额度耗尽，撤下保活服务；VAD 结果仍按段可续跑")
+        DataSyncTimeoutStopper(
+            cleanup = {
+                releaseServiceWakeLock()
+                foregroundActive = false
+            },
+            removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
+            stopService = { stopSelf() }
+        ).stop()
     }
 
     override fun onDestroy() {

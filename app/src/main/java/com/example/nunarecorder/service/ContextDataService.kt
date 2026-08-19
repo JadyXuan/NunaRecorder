@@ -138,7 +138,10 @@ class ContextDataService : Service() {
                 val path = intent.getStringExtra(EXTRA_SIDECAR_PATH) ?: run {
                     stopSelf(); return START_NOT_STICKY
                 }
-                startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
+                ForegroundServiceHelper.startLocation(
+                    this, NOTIFICATION_ID,
+                    buildNotification("正在采集 GPS、IMU 与身体活动...")
+                )
                 startCapture(File(path))
             }
             ACTION_SWITCH -> {
@@ -148,7 +151,10 @@ class ContextDataService : Service() {
                 } else if (!collecting) {
                     // 服务不知怎么已经停了：当成一次正常启动，别让新会话没有传感器数据
                     Log.w(TAG, "SWITCH 时采集未在进行，按 START 处理")
-                    startForeground(NOTIFICATION_ID, buildNotification("正在采集 GPS、IMU 与身体活动..."))
+                    ForegroundServiceHelper.startLocation(
+                        this, NOTIFICATION_ID,
+                        buildNotification("正在采集 GPS、IMU 与身体活动...")
+                    )
                     startCapture(File(path))
                 } else {
                     switchOutput(File(path))

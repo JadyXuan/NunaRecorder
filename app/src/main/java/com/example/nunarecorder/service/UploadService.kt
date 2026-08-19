@@ -110,6 +110,18 @@ class UploadService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "dataSync 前台额度耗尽，撤下上传保活；上传清单保留，可安全续传")
+        DataSyncTimeoutStopper(
+            cleanup = {
+                releaseWakeLock()
+                foregroundActive = false
+            },
+            removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
+            stopService = { stopSelf() }
+        ).stop()
+    }
+
     override fun onDestroy() {
         releaseWakeLock()
         foregroundActive = false
