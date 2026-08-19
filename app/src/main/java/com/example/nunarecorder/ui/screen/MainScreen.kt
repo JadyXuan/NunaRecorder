@@ -174,13 +174,6 @@ fun MainScreen(
 
         FirstRunCard(step = firstRunStep, onAction = onFirstRunAction)
 
-        // 自检排在引导卡之后：先把"还没配好"说完，再说"配好了但环境不对"
-        ReadinessCard(
-            report = readinessReport,
-            onFix = onReadinessFix,
-            onDismissItem = onReadinessDismiss
-        )
-
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
 
         // 以下随内容滚动
@@ -190,6 +183,27 @@ fun MainScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+
+        // 自检卡**放在可滚动区**，不钉在顶部。
+        //
+        // 它在**没入组的新手机上会自动展开**（prominent），那时权限一个都没给——
+        // 蓝牙、位置、卫星定位、身体活动、通知、省电、自启动、没入组，十几条全摊开。
+        // 钉住的那一段于是吃掉大半个屏幕，把下面的"扫描附近设备"和设备列表
+        // 挤进一条几乎没有高度的滚动区。模拟器上全新未入组安装可复现。
+        //
+        // ⚠️ 这**不是**在修"不入组不能扫描"——那个不存在，用户 2026-08-19 自己
+        // 确认过扫描正常，代码里也没有任何闸门（`startScanForList` 无提前返回、
+        // 扫描按钮无 `enabled` 条件、单测锁住未入组时 `canRecord` 仍为 true）。
+        // 这纯粹是可用性改进，别把它当成那个问题的修复记录。
+        //
+        // 放在滚动区第一位：往下看第一眼就见到，又不抢任何按钮的位置。
+        // 顶部只留必须始终可达的东西（链路状态 + 开始/停止），这是 2026-08-08
+        // 那次"设备一多连开始都点不到"定下的边界。
+        ReadinessCard(
+            report = readinessReport,
+            onFix = onReadinessFix,
+            onDismissItem = onReadinessDismiss
+        )
 
         FilledTonalButton(
             onClick = onScanClick,
